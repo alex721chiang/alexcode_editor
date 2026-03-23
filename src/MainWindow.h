@@ -1,12 +1,13 @@
 #pragma once
 #include <QMainWindow>
-#include <QPlainTextEdit>
 #include <QTabWidget>
 #include <QListWidget>
 #include <QLineEdit>
 #include <QComboBox>
 #include <QPushButton>
+#include <QDialog>
 #include "FilterEngine.h"
+#include "CodeEditor.h"
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -17,6 +18,8 @@ private slots:
     void onResultDoubleClicked(QListWidgetItem* item);
     void openFile();
     void saveFile();
+    void showFindDialog();
+    void performFind();
 private:
     QTabWidget* tabWidget;
     QListWidget* resultsList = nullptr;
@@ -24,6 +27,11 @@ private:
     QComboBox* logicCombo;
     QPushButton* filterBtn;
     FilterEngine engine;
+    
+    QDialog* findDialog;
+    QLineEdit* findInput;
+    
     void setupUI();
+    CodeEditor* activeEditor();
 };
 
