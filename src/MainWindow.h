@@ -19,10 +19,11 @@ private slots:
     void saveFile();
 private:
     QTabWidget* tabWidget;
-    QListWidget* resultsList;
+    QListWidget* resultsList = nullptr;
     QLineEdit* filterInput;
     QComboBox* logicCombo;
     QPushButton* filterBtn;
     FilterEngine engine;
     void setupUI();
 };
+

@@ -19,17 +19,35 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
 void MainWindow::setupUI() {
     tabWidget = new QTabWidget(this);
+    tabWidget->setTabsClosable(true);
+    connect(tabWidget, &QTabWidget::tabCloseRequested, this, [this](int index) {
+        delete tabWidget->widget(index);
+    });
+    connect(tabWidget, &QTabWidget::currentChanged, this, [this](int) {
+        if (resultsList) resultsList->clear();
+    });
     setCentralWidget(tabWidget);
 
     QMenuBar* menuBar = new QMenuBar(this);
     setMenuBar(menuBar);
     QMenu* fileMenu = menuBar->addMenu("File");
     
+    QAction* newAction = new QAction("New File", this);
+    newAction->setShortcut(QKeySequence::New);
+    fileMenu->addAction(newAction);
+    connect(newAction, &QAction::triggered, this, [this]() {
+        QPlainTextEdit* editor = new QPlainTextEdit(this);
+        tabWidget->addTab(editor, "Untitled");
+        tabWidget->setCurrentWidget(editor);
+    });
+
     QAction* openAction = new QAction("Open", this);
+    openAction->setShortcut(QKeySequence::Open);
     fileMenu->addAction(openAction);
     connect(openAction, &QAction::triggered, this, &MainWindow::openFile);
 
     QAction* saveAction = new QAction("Save", this);
+    saveAction->setShortcut(QKeySequence::Save);
     fileMenu->addAction(saveAction);
     connect(saveAction, &QAction::triggered, this, &MainWindow::saveFile);
 
@@ -51,6 +69,9 @@ void MainWindow::setupUI() {
 
     connect(filterBtn, &QPushButton::clicked, this, &MainWindow::runFilter);
     connect(resultsList, &QListWidget::itemDoubleClicked, this, &MainWindow::onResultDoubleClicked);
+
+    QPlainTextEdit* initialEditor = new QPlainTextEdit(this);
+    tabWidget->addTab(initialEditor, "Untitled");
 }
 
 void MainWindow::openFile() {
