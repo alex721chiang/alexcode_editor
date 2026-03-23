@@ -1,6 +1,7 @@
 #pragma once
 #include <QMainWindow>
 #include <QPlainTextEdit>
+#include <QTabWidget>
 #include <QListWidget>
 #include <QLineEdit>
 #include <QComboBox>
@@ -14,8 +15,10 @@ public:
 private slots:
     void runFilter();
     void onResultDoubleClicked(QListWidgetItem* item);
+    void openFile();
+    void saveFile();
 private:
-    QPlainTextEdit* editor;
+    QTabWidget* tabWidget;
     QListWidget* resultsList;
     QLineEdit* filterInput;
     QComboBox* logicCombo;
