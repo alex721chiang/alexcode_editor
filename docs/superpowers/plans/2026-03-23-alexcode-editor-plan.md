@@ -303,3 +303,71 @@ git add src/MainWindow.*
 git commit -m "feat: integrate FilterEngine and enable click-to-jump in results"
 ```
 *(Line Numbers and Syntax Highlighting are deferred to next phase to keep scope controlled)*
+
+### Task 5: Tabbed UI & File I/O Operations
+
+**Files:**
+- Modify: `src/MainWindow.h`, `src/MainWindow.cpp`
+
+- [ ] **Step 1: Replace QPlainTextEdit with QTabWidget**
+
+Modify `MainWindow.h` to use `QTabWidget* tabWidget;` instead of a single `QPlainTextEdit* editor;`.
+Update `setupUI` to set the central widget to `tabWidget`.
+
+- [ ] **Step 2: Add File Menu Actions (Open, Save)**
+
+Add `void openFile();`, `void saveFile();` slots in `MainWindow.h`.
+In `MainWindow.cpp`, create a menu bar with "File -> Open", "File -> Save".
+Connect them to the slots.
+
+- [ ] **Step 3: Implement File Operations**
+
+In `openFile()`: use `QFileDialog::getOpenFileName`. If valid, read file, create a new `QPlainTextEdit`, set its text, and `addTab()` to `tabWidget`.
+In `saveFile()`: get current widget from `tabWidget`, cast to `QPlainTextEdit`, save its content to the associated file.
+
+- [ ] **Step 4: Update Filter Logic for Active Tab**
+
+Update `runFilter()` to get the current text from `tabWidget->currentWidget()`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/MainWindow.*
+git commit -m "feat: add tabbed UI and basic file open/save operations"
+```
+
+### Task 6: View Controls & Syntax Highlighting
+
+**Files:**
+- Create: `src/SyntaxHighlighter.h`, `src/SyntaxHighlighter.cpp`
+- Create: `src/CodeEditor.h`, `src/CodeEditor.cpp`
+- Modify: `src/MainWindow.h`, `src/MainWindow.cpp`, `src/CMakeLists.txt`
+
+- [ ] **Step 1: Implement basic QSyntaxHighlighter**
+
+Create `SyntaxHighlighter` subclassing `QSyntaxHighlighter`.
+Define basic rules (C++ keywords, strings, comments) using `QRegularExpression`.
+Apply it to the document passed to it.
+
+- [ ] **Step 2: Implement CodeEditor with Line Numbers**
+
+Create `CodeEditor` subclassing `QPlainTextEdit`.
+Implement the standard Qt line number area (handle `updateRequest`, `updateLineNumberAreaWidth`, override `resizeEvent`).
+
+- [ ] **Step 3: Add Zoom and Word Wrap to MainWindow**
+
+Add "View" menu to `MainWindow`.
+Add toggles for "Word Wrap" (sets `setLineWrapMode`).
+Add actions for Zoom In/Out (using `QFont` sizing on the active `CodeEditor`).
+
+- [ ] **Step 4: Integration**
+
+Update `openFile()` to create `CodeEditor` instances instead of standard `QPlainTextEdit`.
+Attach the `SyntaxHighlighter` to the `CodeEditor`'s document.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/
+git commit -m "feat: implement line numbers, syntax highlighting, zoom, and word wrap"
+```
