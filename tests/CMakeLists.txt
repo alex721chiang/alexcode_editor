@@ -1,1 +1,5 @@
-# Tests will go here
+include(FetchContent)
+FetchContent_Declare(googletest URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip)
+FetchContent_MakeAvailable(googletest)
+add_executable(AlexCodeTests FilterEngineTest.cpp ../src/FilterEngine.cpp)
+target_link_libraries(AlexCodeTests PRIVATE gtest_main Qt6::Core)
