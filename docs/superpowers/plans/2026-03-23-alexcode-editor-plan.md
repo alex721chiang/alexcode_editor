@@ -279,7 +279,9 @@ void MainWindow::runFilter() {
     QStringList lines = text.split("\n");
     for (int i = 0; i < lines.size(); ++i) {
         if (engine.matchLine(lines[i])) {
-            resultsList->addItem(QString("Line %1: %2").arg(i + 1).arg(lines[i]));
+            QListWidgetItem* item = new QListWidgetItem(QString("Line %1: %2").arg(i + 1).arg(lines[i]));
+            item->setData(Qt::UserRole, i); // Store line number (0-indexed) for safe click-to-jump
+            resultsList->addItem(item);
         }
     }
 }
@@ -289,7 +291,7 @@ Connect `filterBtn->clicked` to `runFilter` in `setupUI`.
 - [ ] **Step 3: Connect click-to-jump**
 
 Add slot `void onResultDoubleClicked(QListWidgetItem* item);`.
-Parse the line number from the item text, use `QTextCursor` to jump the `editor` to that line.
+Retrieve the line number using `item->data(Qt::UserRole).toInt()`, use `QTextCursor` to jump the `editor` to that line.
 
 - [ ] **Step 4: Build and test manually**
 
@@ -354,20 +356,32 @@ Apply it to the document passed to it.
 Create `CodeEditor` subclassing `QPlainTextEdit`.
 Implement the standard Qt line number area (handle `updateRequest`, `updateLineNumberAreaWidth`, override `resizeEvent`).
 
-- [ ] **Step 3: Add Zoom and Word Wrap to MainWindow**
+- [ ] **Step 3: Add View Controls, Zoom, and Word Wrap to CodeEditor**
 
-Add "View" menu to `MainWindow`.
-Add toggles for "Word Wrap" (sets `setLineWrapMode`).
-Add actions for Zoom In/Out (using `QFont` sizing on the active `CodeEditor`).
+Add "View" menu to `MainWindow` and add toggles for "Word Wrap" (sets `setLineWrapMode`).
+In `CodeEditor`, explicitly override `wheelEvent(QWheelEvent *event)`: if `event->modifiers() & Qt::ControlModifier`, dynamically adjust `font()` size to support Ctrl+Mouse Wheel zooming.
 
-- [ ] **Step 4: Integration**
+- [ ] **Step 4: Integration & Python Syntax**
 
 Update `openFile()` to create `CodeEditor` instances instead of standard `QPlainTextEdit`.
 Attach the `SyntaxHighlighter` to the `CodeEditor`'s document.
+Expand `SyntaxHighlighter` rules to also detect basic Python keywords (`def`, `class`, `import`, `print`) and Python-style comments (`#`).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Add Edit Menu (Undo/Redo, Cut/Copy/Paste, Find)**
+
+In `MainWindow.cpp`, create an "Edit" menu.
+Connect standard Qt actions: `undo`, `redo`, `cut`, `copy`, `paste` to the active `CodeEditor`.
+Implement a basic Ctrl+F (Find) dialog or tool window that searches the active `CodeEditor` using `find()` and highlights the match.
+
+- [ ] **Step 6: Write Performance Test**
+
+Create `tests/PerformanceTest.cpp`.
+Generate a mock 100,000 line text file. Instantiate `FilterEngine`, set a keyword, and measure the `matchLine` execution time across all lines.
+Assert that the total execution time is under 500ms using `std::chrono`.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/
-git commit -m "feat: implement line numbers, syntax highlighting, zoom, and word wrap"
+git add src/ tests/
+git commit -m "feat: implement line numbers, syntax highlighting (C++/Python), view controls, edit actions, basic find, and perf test"
 ```
