@@ -13,6 +13,7 @@
 #include <QFileInfo>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QStyle>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), findDialog(nullptr) {
     setupUI();
@@ -36,101 +37,97 @@ void MainWindow::setupUI() {
     });
     setCentralWidget(tabWidget);
 
-    QMenuBar* menuBar = new QMenuBar(this);
-    setMenuBar(menuBar);
-
-    // File Menu
-    QMenu* fileMenu = menuBar->addMenu("File");
-    
-    QAction* newAction = new QAction("New File", this);
+    // Initialize Actions
+    newAction = new QAction("New File", this);
     newAction->setShortcut(QKeySequence::New);
-    fileMenu->addAction(newAction);
+    newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     connect(newAction, &QAction::triggered, this, [this]() {
         CodeEditor* editor = new CodeEditor(this);
         tabWidget->addTab(editor, "Untitled");
         tabWidget->setCurrentWidget(editor);
     });
 
-    QAction* openAction = new QAction("Open", this);
+    openAction = new QAction("Open", this);
     openAction->setShortcut(QKeySequence::Open);
-    fileMenu->addAction(openAction);
+    openAction->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
     connect(openAction, &QAction::triggered, this, &MainWindow::openFile);
 
-    QAction* saveAction = new QAction("Save", this);
+    saveAction = new QAction("Save", this);
     saveAction->setShortcut(QKeySequence::Save);
-    fileMenu->addAction(saveAction);
+    saveAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     connect(saveAction, &QAction::triggered, this, &MainWindow::saveFile);
 
-    // Edit Menu
-    QMenu* editMenu = menuBar->addMenu("Edit");
-    
-    QAction* undoAction = new QAction("Undo", this);
+    undoAction = new QAction("Undo", this);
     undoAction->setShortcut(QKeySequence::Undo);
-    editMenu->addAction(undoAction);
+    undoAction->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
     connect(undoAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->undo();
     });
 
-    QAction* redoAction = new QAction("Redo", this);
+    redoAction = new QAction("Redo", this);
     redoAction->setShortcut(QKeySequence::Redo);
-    editMenu->addAction(redoAction);
+    redoAction->setIcon(style()->standardIcon(QStyle::SP_ArrowForward));
     connect(redoAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->redo();
     });
-    
-    editMenu->addSeparator();
 
-    QAction* cutAction = new QAction("Cut", this);
+    cutAction = new QAction("Cut", this);
     cutAction->setShortcut(QKeySequence::Cut);
-    editMenu->addAction(cutAction);
     connect(cutAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->cut();
     });
 
-    QAction* copyAction = new QAction("Copy", this);
+    copyAction = new QAction("Copy", this);
     copyAction->setShortcut(QKeySequence::Copy);
-    editMenu->addAction(copyAction);
     connect(copyAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->copy();
     });
 
-    QAction* pasteAction = new QAction("Paste", this);
+    pasteAction = new QAction("Paste", this);
     pasteAction->setShortcut(QKeySequence::Paste);
-    editMenu->addAction(pasteAction);
     connect(pasteAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->paste();
     });
 
-    editMenu->addSeparator();
-
-    QAction* findAction = new QAction("Find", this);
+    findAction = new QAction("Find", this);
     findAction->setShortcut(QKeySequence::Find);
-    editMenu->addAction(findAction);
+    findAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogContentsView));
     connect(findAction, &QAction::triggered, this, &MainWindow::showFindDialog);
 
-    // View Menu
-    QMenu* viewMenu = menuBar->addMenu("View");
-    QAction* wrapAction = new QAction("Word Wrap", this);
+    wrapAction = new QAction("Word Wrap", this);
     wrapAction->setCheckable(true);
-    wrapAction->setChecked(true); // default QPlainTextEdit wraps
-    viewMenu->addAction(wrapAction);
+    wrapAction->setChecked(true);
     connect(wrapAction, &QAction::triggered, this, [this](bool checked) {
         if (auto editor = activeEditor()) {
             editor->setLineWrapMode(checked ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
         }
     });
 
-    // Toolbar
-    QToolBar* toolbar = addToolBar("Filter");
-    filterInput = new QLineEdit(this);
-    filterInput->setPlaceholderText("Enter keywords separated by |");
-    logicCombo = new QComboBox(this);
-    logicCombo->addItems({"OR", "AND"});
-    filterBtn = new QPushButton("Filter", this);
+    // Menu Bar
+    QMenuBar* menuBar = new QMenuBar(this);
+    menuBar->setNativeMenuBar(false); // Force menu bar to appear inside the window on macOS
+    setMenuBar(menuBar);
 
-    toolbar->addWidget(filterInput);
-    toolbar->addWidget(logicCombo);
-    toolbar->addWidget(filterBtn);
+    QMenu* fileMenu = menuBar->addMenu("File");
+    fileMenu->addAction(newAction);
+    fileMenu->addAction(openAction);
+    fileMenu->addAction(saveAction);
+
+    QMenu* editMenu = menuBar->addMenu("Edit");
+    editMenu->addAction(undoAction);
+    editMenu->addAction(redoAction);
+    editMenu->addSeparator();
+    editMenu->addAction(cutAction);
+    editMenu->addAction(copyAction);
+    editMenu->addAction(pasteAction);
+    editMenu->addSeparator();
+    editMenu->addAction(findAction);
+
+    QMenu* viewMenu = menuBar->addMenu("View");
+    viewMenu->addAction(wrapAction);
+
+    // Toolbars
+    setupToolBar();
 
     // Filter Results Dock
     QDockWidget* dock = new QDockWidget("Filter Results", this);
@@ -138,11 +135,35 @@ void MainWindow::setupUI() {
     dock->setWidget(resultsList);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
 
-    connect(filterBtn, &QPushButton::clicked, this, &MainWindow::runFilter);
     connect(resultsList, &QListWidget::itemDoubleClicked, this, &MainWindow::onResultDoubleClicked);
 
     CodeEditor* initialEditor = new CodeEditor(this);
     tabWidget->addTab(initialEditor, "Untitled");
+}
+
+void MainWindow::setupToolBar() {
+    QToolBar* mainToolBar = addToolBar("Main");
+    mainToolBar->addAction(newAction);
+    mainToolBar->addAction(openAction);
+    mainToolBar->addAction(saveAction);
+    mainToolBar->addSeparator();
+    mainToolBar->addAction(undoAction);
+    mainToolBar->addAction(redoAction);
+    mainToolBar->addSeparator();
+    mainToolBar->addAction(findAction);
+
+    QToolBar* filterToolBar = addToolBar("Filter");
+    filterInput = new QLineEdit(this);
+    filterInput->setPlaceholderText("Enter keywords separated by |");
+    logicCombo = new QComboBox(this);
+    logicCombo->addItems({"OR", "AND"});
+    filterBtn = new QPushButton("Filter", this);
+
+    filterToolBar->addWidget(filterInput);
+    filterToolBar->addWidget(logicCombo);
+    filterToolBar->addWidget(filterBtn);
+
+    connect(filterBtn, &QPushButton::clicked, this, &MainWindow::runFilter);
 }
 
 void MainWindow::openFile() {
