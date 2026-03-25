@@ -36,7 +36,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: AlexCode-Windows
-        path: |
-          # Upload the deployed executable and its DLLs from the Release folder
-          build/src/Release/AlexCode.exe
-          build/src/Release/*.dll
+        path: build/src/Release/
