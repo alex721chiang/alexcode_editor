@@ -29,12 +29,14 @@ jobs:
 
     - name: Deploy Qt Dependencies
       run: |
-        windeployqt --release --no-translations --compiler-runtime build/src/AlexCode.exe
+        # The executable is generated inside the Release folder when using --config Release
+        windeployqt --release --no-translations --compiler-runtime build/src/Release/AlexCode.exe
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: AlexCode-Windows
         path: |
-          build/src/AlexCode.exe
-          build/src/*.dll
+          # Upload the deployed executable and its DLLs from the Release folder
+          build/src/Release/AlexCode.exe
+          build/src/Release/*.dll
