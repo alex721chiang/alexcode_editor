@@ -8,8 +8,10 @@
 #include <QDialog>
 #include <QAction>
 #include <QToolBar>
+#include <QFont>
 #include "FilterEngine.h"
 #include "CodeEditor.h"
+#include "FindInFilesDialog.h"
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -19,9 +21,15 @@ private slots:
     void runFilter();
     void onResultDoubleClicked(QListWidgetItem* item);
     void openFile();
+    void openFileByPath(const QString& filePath);
     void saveFile();
     void showFindDialog();
     void performFind();
+    void performReplace();
+    void performReplaceAll();
+    void showFontDialog();
+    void showFindInFilesDialog();
+    void onFindInFilesResultDoubleClicked(QListWidgetItem* item);
 private:
     QTabWidget* tabWidget;
     QListWidget* resultsList = nullptr;
@@ -32,6 +40,8 @@ private:
     
     QDialog* findDialog;
     QLineEdit* findInput;
+    QLineEdit* replaceInput;
+    FindInFilesDialog* findInFilesDialog;
 
     // Actions
     QAction* newAction;
@@ -43,7 +53,11 @@ private:
     QAction* copyAction;
     QAction* pasteAction;
     QAction* findAction;
+    QAction* findInFilesAction;
     QAction* wrapAction;
+    QAction* fontAction;
+    QFont defaultEditorFont;
+    bool isFontSet = false;
 
     void setupUI();
     void setupToolBar();

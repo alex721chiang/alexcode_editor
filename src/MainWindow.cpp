@@ -9,13 +9,16 @@
 #include <QFileDialog>
 #include <QFile>
 #include <QTextStream>
+#include <QFontDialog>
+#include <QGridLayout>
+#include <QMessageBox>
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QStyle>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), findDialog(nullptr) {
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), findDialog(nullptr), findInFilesDialog(nullptr) {
     setupUI();
     resize(800, 600);
 }
@@ -43,6 +46,7 @@ void MainWindow::setupUI() {
     newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     connect(newAction, &QAction::triggered, this, [this]() {
         CodeEditor* editor = new CodeEditor(this);
+        if (isFontSet) editor->setFont(defaultEditorFont);
         tabWidget->addTab(editor, "Untitled");
         tabWidget->setCurrentWidget(editor);
     });
@@ -94,7 +98,17 @@ void MainWindow::setupUI() {
     findAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogContentsView));
     connect(findAction, &QAction::triggered, this, &MainWindow::showFindDialog);
 
+    findInFilesAction = new QAction("Find in Files", this);
+    findInFilesAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
+    findInFilesAction->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
+    connect(findInFilesAction, &QAction::triggered, this, &MainWindow::showFindInFilesDialog);
+
+    
+    fontAction = new QAction("Font...", this);
+    connect(fontAction, &QAction::triggered, this, &MainWindow::showFontDialog);
+
     wrapAction = new QAction("Word Wrap", this);
+
     wrapAction->setCheckable(true);
     wrapAction->setChecked(true);
     connect(wrapAction, &QAction::triggered, this, [this](bool checked) {
@@ -122,9 +136,13 @@ void MainWindow::setupUI() {
     editMenu->addAction(pasteAction);
     editMenu->addSeparator();
     editMenu->addAction(findAction);
+    editMenu->addAction(findInFilesAction);
 
+    
     QMenu* viewMenu = menuBar->addMenu("View");
     viewMenu->addAction(wrapAction);
+    viewMenu->addAction(fontAction);
+
 
     // Toolbars
     setupToolBar();
@@ -138,6 +156,7 @@ void MainWindow::setupUI() {
     connect(resultsList, &QListWidget::itemDoubleClicked, this, &MainWindow::onResultDoubleClicked);
 
     CodeEditor* initialEditor = new CodeEditor(this);
+    if (isFontSet) initialEditor->setFont(defaultEditorFont);
     tabWidget->addTab(initialEditor, "Untitled");
 }
 
@@ -169,7 +188,10 @@ void MainWindow::setupToolBar() {
 void MainWindow::openFile() {
     QString fileName = QFileDialog::getOpenFileName(this, "Open File");
     if (fileName.isEmpty()) return;
+    openFileByPath(fileName);
+}
 
+void MainWindow::openFileByPath(const QString& fileName) {
     QFile file(fileName);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         QMessageBox::warning(this, "Error", "Cannot open file:\n" + file.errorString());
@@ -180,7 +202,17 @@ void MainWindow::openFile() {
     QString text = in.readAll();
     file.close();
 
+    // Check if already open
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        CodeEditor* editor = qobject_cast<CodeEditor*>(tabWidget->widget(i));
+        if (editor && editor->property("filePath").toString() == fileName) {
+            tabWidget->setCurrentIndex(i);
+            return;
+        }
+    }
+
     CodeEditor* newEditor = new CodeEditor(this);
+    if (isFontSet) newEditor->setFont(defaultEditorFont);
     newEditor->setPlainText(text);
     
     QFileInfo fileInfo(fileName);
@@ -219,14 +251,31 @@ void MainWindow::saveFile() {
 void MainWindow::showFindDialog() {
     if (!findDialog) {
         findDialog = new QDialog(this);
-        findDialog->setWindowTitle("Find");
-        QVBoxLayout* layout = new QVBoxLayout(findDialog);
+        findDialog->setWindowTitle("Find & Replace");
+        QGridLayout* layout = new QGridLayout(findDialog);
+        
+        layout->addWidget(new QLabel("Find:", findDialog), 0, 0);
         findInput = new QLineEdit(findDialog);
+        layout->addWidget(findInput, 0, 1);
+        
+        layout->addWidget(new QLabel("Replace:", findDialog), 1, 0);
+        replaceInput = new QLineEdit(findDialog);
+        layout->addWidget(replaceInput, 1, 1);
+        
         QPushButton* findNextBtn = new QPushButton("Find Next", findDialog);
-        layout->addWidget(new QLabel("Find:"));
-        layout->addWidget(findInput);
-        layout->addWidget(findNextBtn);
+        QPushButton* replaceBtn = new QPushButton("Replace", findDialog);
+        QPushButton* replaceAllBtn = new QPushButton("Replace All", findDialog);
+        
+        QHBoxLayout* btnLayout = new QHBoxLayout();
+        btnLayout->addWidget(findNextBtn);
+        btnLayout->addWidget(replaceBtn);
+        btnLayout->addWidget(replaceAllBtn);
+        
+        layout->addLayout(btnLayout, 2, 0, 1, 2);
+        
         connect(findNextBtn, &QPushButton::clicked, this, &MainWindow::performFind);
+        connect(replaceBtn, &QPushButton::clicked, this, &MainWindow::performReplace);
+        connect(replaceAllBtn, &QPushButton::clicked, this, &MainWindow::performReplaceAll);
     }
     findDialog->show();
     findDialog->raise();
@@ -286,4 +335,83 @@ void MainWindow::onResultDoubleClicked(QListWidgetItem* item) {
     editor->setTextCursor(cursor);
     editor->centerCursor();
     editor->setFocus();
+}
+
+void MainWindow::showFontDialog() {
+    bool ok;
+    QFont font = QFontDialog::getFont(&ok, isFontSet ? defaultEditorFont : QFont(), this);
+    if (ok) {
+        defaultEditorFont = font;
+        isFontSet = true;
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            if (auto editor = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
+                editor->setFont(font);
+            }
+        }
+    }
+}
+
+void MainWindow::performReplace() {
+    if (auto editor = activeEditor()) {
+        QString findText = findInput->text();
+        QString replaceText = replaceInput->text();
+        if (findText.isEmpty()) return;
+        
+        QTextCursor cursor = editor->textCursor();
+        if (cursor.hasSelection() && cursor.selectedText() == findText) {
+            cursor.insertText(replaceText);
+        }
+        performFind();
+    }
+}
+
+void MainWindow::performReplaceAll() {
+    if (auto editor = activeEditor()) {
+        QString findText = findInput->text();
+        QString replaceText = replaceInput->text();
+        if (findText.isEmpty()) return;
+        
+        QTextCursor cursor = editor->textCursor();
+        cursor.beginEditBlock();
+        cursor.movePosition(QTextCursor::Start);
+        editor->setTextCursor(cursor);
+        
+        int count = 0;
+        while (editor->find(findText)) {
+            editor->textCursor().insertText(replaceText);
+            count++;
+        }
+        cursor.endEditBlock();
+        QMessageBox::information(this, "Replace All", QString::number(count) + " replacements made.");
+    }
+}
+
+void MainWindow::showFindInFilesDialog() {
+    if (!findInFilesDialog) {
+        findInFilesDialog = new FindInFilesDialog(this);
+        connect(findInFilesDialog, &FindInFilesDialog::resultDoubleClicked, this, &MainWindow::onFindInFilesResultDoubleClicked);
+    }
+    findInFilesDialog->show();
+    findInFilesDialog->raise();
+    findInFilesDialog->activateWindow();
+}
+
+void MainWindow::onFindInFilesResultDoubleClicked(QListWidgetItem* item) {
+    QVariantMap data = item->data(Qt::UserRole).toMap();
+    if (data.isEmpty()) return;
+
+    QString filePath = data.value("filePath").toString();
+    int lineNum = data.value("lineNum").toInt();
+
+    openFileByPath(filePath);
+
+    if (auto editor = activeEditor()) {
+        QTextBlock block = editor->document()->findBlockByNumber(lineNum - 1); // 0-indexed internally
+        if (block.isValid()) {
+            QTextCursor cursor(block);
+            editor->setTextCursor(cursor);
+            editor->ensureCursorVisible();
+            editor->setFocus();
+        }
+    }
 }
