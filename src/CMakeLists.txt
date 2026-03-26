@@ -5,6 +5,7 @@ set(SRCS
     CodeEditor.cpp 
     SyntaxHighlighter.cpp 
     FindInFilesDialog.cpp
+    resources.qrc
 )
 
 if(WIN32)
