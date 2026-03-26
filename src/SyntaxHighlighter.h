@@ -8,12 +8,25 @@ class SyntaxHighlighter : public QSyntaxHighlighter {
     Q_OBJECT
 
 public:
+    enum class Language {
+        Unknown,
+        CPP,
+        Python
+    };
+
     explicit SyntaxHighlighter(QTextDocument *parent = nullptr);
+
+    void setLanguage(Language lang);
+    static Language detectLanguage(const QString &filePath);
 
 protected:
     void highlightBlock(const QString &text) override;
 
 private:
+    void setupCppRules();
+    void setupPythonRules();
+    void clearRules();
+
     struct HighlightingRule {
         QRegularExpression pattern;
         QTextCharFormat format;
@@ -26,7 +39,10 @@ private:
     QTextCharFormat multiLineCommentFormat;
     QTextCharFormat quotationFormat;
     QTextCharFormat functionFormat;
+    QTextCharFormat preprocessorFormat;
 
     QRegularExpression commentStartExpression;
     QRegularExpression commentEndExpression;
+
+    Language currentLanguage = Language::Unknown;
 };
