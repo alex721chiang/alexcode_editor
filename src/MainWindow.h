@@ -9,9 +9,11 @@
 #include <QAction>
 #include <QToolBar>
 #include <QFont>
+#include <QSettings>
 #include "FilterEngine.h"
 #include "CodeEditor.h"
 #include "FindInFilesDialog.h"
+#include "SyntaxHighlighter.h"
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -37,7 +39,7 @@ private:
     QComboBox* logicCombo;
     QPushButton* filterBtn;
     FilterEngine engine;
-    
+
     QDialog* findDialog;
     QLineEdit* findInput;
     QLineEdit* replaceInput;
@@ -62,4 +64,12 @@ private:
     void setupUI();
     void setupToolBar();
     CodeEditor* activeEditor();
+
+    // Feature 1: font persistence
+    void saveFont(const QFont& font);
+    QFont loadFont();
+    void applyFontToAllTabs(const QFont& font);
+
+    // Feature 2: auto syntax highlighting
+    void applyHighlighterForPath(CodeEditor* editor, const QString& filePath);
 };
