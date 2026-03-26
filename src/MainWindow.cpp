@@ -12,19 +12,56 @@
 #include <QFontDialog>
 #include <QGridLayout>
 #include <QMessageBox>
-#include <QMessageBox>
 #include <QFileInfo>
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QStyle>
+#include <QSettings>
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), findDialog(nullptr), findInFilesDialog(nullptr) {
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent), findDialog(nullptr), findInFilesDialog(nullptr)
+{
+    defaultEditorFont = loadFont();
+    isFontSet = true;
     setupUI();
     resize(800, 600);
 }
 
 CodeEditor* MainWindow::activeEditor() {
     return qobject_cast<CodeEditor*>(tabWidget->currentWidget());
+}
+
+void MainWindow::saveFont(const QFont& font) {
+    QSettings settings("AlexCode", "AlexCodeEditor");
+    settings.setValue("font/family", font.family());
+    settings.setValue("font/pointSize", font.pointSize());
+    settings.setValue("font/bold", font.bold());
+    settings.setValue("font/italic", font.italic());
+}
+
+QFont MainWindow::loadFont() {
+    QSettings settings("AlexCode", "AlexCodeEditor");
+    QFont font;
+    font.setFamily(settings.value("font/family", "Courier New").toString());
+    font.setPointSize(settings.value("font/pointSize", 11).toInt());
+    font.setBold(settings.value("font/bold", false).toBool());
+    font.setItalic(settings.value("font/italic", false).toBool());
+    return font;
+}
+
+void MainWindow::applyFontToAllTabs(const QFont& font) {
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        if (auto editor = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+            editor->setFont(font);
+    }
+}
+
+void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& filePath) {
+    if (!editor) return;
+    SyntaxHighlighter::Language lang = SyntaxHighlighter::detectLanguage(filePath);
+    if (lang == SyntaxHighlighter::Language::Unknown) return;
+    SyntaxHighlighter* highlighter = new SyntaxHighlighter(editor->document());
+    highlighter->setLanguage(lang);
 }
 
 void MainWindow::setupUI() {
@@ -40,13 +77,12 @@ void MainWindow::setupUI() {
     });
     setCentralWidget(tabWidget);
 
-    // Initialize Actions
     newAction = new QAction("New File", this);
     newAction->setShortcut(QKeySequence::New);
     newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
     connect(newAction, &QAction::triggered, this, [this]() {
         CodeEditor* editor = new CodeEditor(this);
-        if (isFontSet) editor->setFont(defaultEditorFont);
+        editor->setFont(defaultEditorFont);
         tabWidget->addTab(editor, "Untitled");
         tabWidget->setCurrentWidget(editor);
     });
@@ -103,23 +139,19 @@ void MainWindow::setupUI() {
     findInFilesAction->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
     connect(findInFilesAction, &QAction::triggered, this, &MainWindow::showFindInFilesDialog);
 
-    
     fontAction = new QAction("Font...", this);
     connect(fontAction, &QAction::triggered, this, &MainWindow::showFontDialog);
 
     wrapAction = new QAction("Word Wrap", this);
-
     wrapAction->setCheckable(true);
     wrapAction->setChecked(true);
     connect(wrapAction, &QAction::triggered, this, [this](bool checked) {
-        if (auto editor = activeEditor()) {
+        if (auto editor = activeEditor())
             editor->setLineWrapMode(checked ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
-        }
     });
 
-    // Menu Bar
     QMenuBar* menuBar = new QMenuBar(this);
-    menuBar->setNativeMenuBar(false); // Force menu bar to appear inside the window on macOS
+    menuBar->setNativeMenuBar(false);
     setMenuBar(menuBar);
 
     QMenu* fileMenu = menuBar->addMenu("File");
@@ -138,25 +170,20 @@ void MainWindow::setupUI() {
     editMenu->addAction(findAction);
     editMenu->addAction(findInFilesAction);
 
-    
     QMenu* viewMenu = menuBar->addMenu("View");
     viewMenu->addAction(wrapAction);
     viewMenu->addAction(fontAction);
 
-
-    // Toolbars
     setupToolBar();
 
-    // Filter Results Dock
     QDockWidget* dock = new QDockWidget("Filter Results", this);
     resultsList = new QListWidget(this);
     dock->setWidget(resultsList);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
-
     connect(resultsList, &QListWidget::itemDoubleClicked, this, &MainWindow::onResultDoubleClicked);
 
     CodeEditor* initialEditor = new CodeEditor(this);
-    if (isFontSet) initialEditor->setFont(defaultEditorFont);
+    initialEditor->setFont(defaultEditorFont);
     tabWidget->addTab(initialEditor, "Untitled");
 }
 
@@ -177,11 +204,9 @@ void MainWindow::setupToolBar() {
     logicCombo = new QComboBox(this);
     logicCombo->addItems({"OR", "AND"});
     filterBtn = new QPushButton("Filter", this);
-
     filterToolBar->addWidget(filterInput);
     filterToolBar->addWidget(logicCombo);
     filterToolBar->addWidget(filterBtn);
-
     connect(filterBtn, &QPushButton::clicked, this, &MainWindow::runFilter);
 }
 
@@ -197,12 +222,10 @@ void MainWindow::openFileByPath(const QString& fileName) {
         QMessageBox::warning(this, "Error", "Cannot open file:\n" + file.errorString());
         return;
     }
-
     QTextStream in(&file);
     QString text = in.readAll();
     file.close();
 
-    // Check if already open
     for (int i = 0; i < tabWidget->count(); ++i) {
         CodeEditor* editor = qobject_cast<CodeEditor*>(tabWidget->widget(i));
         if (editor && editor->property("filePath").toString() == fileName) {
@@ -212,14 +235,16 @@ void MainWindow::openFileByPath(const QString& fileName) {
     }
 
     CodeEditor* newEditor = new CodeEditor(this);
-    if (isFontSet) newEditor->setFont(defaultEditorFont);
+    newEditor->setFont(defaultEditorFont);
     newEditor->setPlainText(text);
-    
+
     QFileInfo fileInfo(fileName);
     int tabIndex = tabWidget->addTab(newEditor, fileInfo.fileName());
     newEditor->setProperty("filePath", fileName);
     tabWidget->setTabToolTip(tabIndex, fileName);
     tabWidget->setCurrentIndex(tabIndex);
+
+    applyHighlighterForPath(newEditor, fileName);
 }
 
 void MainWindow::saveFile() {
@@ -230,11 +255,11 @@ void MainWindow::saveFile() {
     if (fileName.isEmpty()) {
         fileName = QFileDialog::getSaveFileName(this, "Save File");
         if (fileName.isEmpty()) return;
-        
         QFileInfo fileInfo(fileName);
         tabWidget->setTabText(tabWidget->currentIndex(), fileInfo.fileName());
         currentEditor->setProperty("filePath", fileName);
         tabWidget->setTabToolTip(tabWidget->currentIndex(), fileName);
+        applyHighlighterForPath(currentEditor, fileName);
     }
 
     QFile file(fileName);
@@ -242,7 +267,6 @@ void MainWindow::saveFile() {
         QMessageBox::warning(this, "Error", "Cannot save file:\n" + file.errorString());
         return;
     }
-
     QTextStream out(&file);
     out << currentEditor->toPlainText();
     file.close();
@@ -253,28 +277,22 @@ void MainWindow::showFindDialog() {
         findDialog = new QDialog(this);
         findDialog->setWindowTitle("Find & Replace");
         QGridLayout* layout = new QGridLayout(findDialog);
-        
         layout->addWidget(new QLabel("Find:", findDialog), 0, 0);
         findInput = new QLineEdit(findDialog);
         layout->addWidget(findInput, 0, 1);
-        
         layout->addWidget(new QLabel("Replace:", findDialog), 1, 0);
         replaceInput = new QLineEdit(findDialog);
         layout->addWidget(replaceInput, 1, 1);
-        
-        QPushButton* findNextBtn = new QPushButton("Find Next", findDialog);
-        QPushButton* replaceBtn = new QPushButton("Replace", findDialog);
+        QPushButton* findNextBtn   = new QPushButton("Find Next", findDialog);
+        QPushButton* replaceBtn    = new QPushButton("Replace", findDialog);
         QPushButton* replaceAllBtn = new QPushButton("Replace All", findDialog);
-        
         QHBoxLayout* btnLayout = new QHBoxLayout();
         btnLayout->addWidget(findNextBtn);
         btnLayout->addWidget(replaceBtn);
         btnLayout->addWidget(replaceAllBtn);
-        
         layout->addLayout(btnLayout, 2, 0, 1, 2);
-        
-        connect(findNextBtn, &QPushButton::clicked, this, &MainWindow::performFind);
-        connect(replaceBtn, &QPushButton::clicked, this, &MainWindow::performReplace);
+        connect(findNextBtn,   &QPushButton::clicked, this, &MainWindow::performFind);
+        connect(replaceBtn,    &QPushButton::clicked, this, &MainWindow::performReplace);
         connect(replaceAllBtn, &QPushButton::clicked, this, &MainWindow::performReplaceAll);
     }
     findDialog->show();
@@ -287,13 +305,11 @@ void MainWindow::performFind() {
     if (auto editor = activeEditor()) {
         QString textToFind = findInput->text();
         if (!editor->find(textToFind)) {
-            // Restart from top if not found
             QTextCursor cursor = editor->textCursor();
             cursor.movePosition(QTextCursor::Start);
             editor->setTextCursor(cursor);
-            if (!editor->find(textToFind)) {
+            if (!editor->find(textToFind))
                 QMessageBox::information(this, "Find", "Cannot find \"" + textToFind + "\"");
-            }
         }
     }
 }
@@ -302,34 +318,31 @@ void MainWindow::runFilter() {
     resultsList->clear();
     QStringList keywords = filterInput->text().split("|", Qt::SkipEmptyParts);
     for (int i = 0; i < keywords.size(); ++i) keywords[i] = keywords[i].trimmed();
-    
     engine.setKeywords(keywords);
     engine.setLogic(logicCombo->currentText() == "AND" ? FilterLogic::AND : FilterLogic::OR);
-    
+
     CodeEditor* editor = activeEditor();
     if (!editor) return;
 
     resultsList->setUpdatesEnabled(false);
-    
     QTextBlock block = editor->document()->begin();
     int lineIndex = 0;
     while (block.isValid()) {
         if (engine.matchLine(block.text())) {
-            QListWidgetItem* item = new QListWidgetItem(QString("Line %1: %2").arg(lineIndex + 1).arg(block.text()));
+            QListWidgetItem* item = new QListWidgetItem(
+                QString("Line %1: %2").arg(lineIndex + 1).arg(block.text()));
             item->setData(Qt::UserRole, lineIndex);
             resultsList->addItem(item);
         }
         block = block.next();
         lineIndex++;
     }
-
     resultsList->setUpdatesEnabled(true);
 }
 
 void MainWindow::onResultDoubleClicked(QListWidgetItem* item) {
     CodeEditor* editor = activeEditor();
     if (!editor) return;
-
     int line = item->data(Qt::UserRole).toInt();
     QTextCursor cursor(editor->document()->findBlockByNumber(line));
     editor->setTextCursor(cursor);
@@ -339,57 +352,52 @@ void MainWindow::onResultDoubleClicked(QListWidgetItem* item) {
 
 void MainWindow::showFontDialog() {
     bool ok;
-    QFont font = QFontDialog::getFont(&ok, isFontSet ? defaultEditorFont : QFont(), this);
+    QFont font = QFontDialog::getFont(&ok, defaultEditorFont, this);
     if (ok) {
         defaultEditorFont = font;
         isFontSet = true;
-        for (int i = 0; i < tabWidget->count(); ++i) {
-            if (auto editor = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
-                editor->setFont(font);
-            }
-        }
+        applyFontToAllTabs(font);
+        saveFont(font);
     }
 }
 
 void MainWindow::performReplace() {
     if (auto editor = activeEditor()) {
-        QString findText = findInput->text();
+        QString findText    = findInput->text();
         QString replaceText = replaceInput->text();
         if (findText.isEmpty()) return;
-        
         QTextCursor cursor = editor->textCursor();
-        if (cursor.hasSelection() && cursor.selectedText() == findText) {
+        if (cursor.hasSelection() && cursor.selectedText() == findText)
             cursor.insertText(replaceText);
-        }
         performFind();
     }
 }
 
 void MainWindow::performReplaceAll() {
     if (auto editor = activeEditor()) {
-        QString findText = findInput->text();
+        QString findText    = findInput->text();
         QString replaceText = replaceInput->text();
         if (findText.isEmpty()) return;
-        
         QTextCursor cursor = editor->textCursor();
         cursor.beginEditBlock();
         cursor.movePosition(QTextCursor::Start);
         editor->setTextCursor(cursor);
-        
         int count = 0;
         while (editor->find(findText)) {
             editor->textCursor().insertText(replaceText);
             count++;
         }
         cursor.endEditBlock();
-        QMessageBox::information(this, "Replace All", QString::number(count) + " replacements made.");
+        QMessageBox::information(this, "Replace All",
+            QString::number(count) + " replacements made.");
     }
 }
 
 void MainWindow::showFindInFilesDialog() {
     if (!findInFilesDialog) {
         findInFilesDialog = new FindInFilesDialog(this);
-        connect(findInFilesDialog, &FindInFilesDialog::resultDoubleClicked, this, &MainWindow::onFindInFilesResultDoubleClicked);
+        connect(findInFilesDialog, &FindInFilesDialog::resultDoubleClicked,
+                this, &MainWindow::onFindInFilesResultDoubleClicked);
     }
     findInFilesDialog->show();
     findInFilesDialog->raise();
@@ -399,14 +407,11 @@ void MainWindow::showFindInFilesDialog() {
 void MainWindow::onFindInFilesResultDoubleClicked(QListWidgetItem* item) {
     QVariantMap data = item->data(Qt::UserRole).toMap();
     if (data.isEmpty()) return;
-
     QString filePath = data.value("filePath").toString();
-    int lineNum = data.value("lineNum").toInt();
-
+    int lineNum      = data.value("lineNum").toInt();
     openFileByPath(filePath);
-
     if (auto editor = activeEditor()) {
-        QTextBlock block = editor->document()->findBlockByNumber(lineNum - 1); // 0-indexed internally
+        QTextBlock block = editor->document()->findBlockByNumber(lineNum - 1);
         if (block.isValid()) {
             QTextCursor cursor(block);
             editor->setTextCursor(cursor);
