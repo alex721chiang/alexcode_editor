@@ -1,0 +1,84 @@
+#include <QProcess>
+#include <QMessageBox>
+
+void MainWindow::saveFile() {
+    CodeEditor* currentEditor = activeEditor();
+    if (!currentEditor) return;
+
+    QString fileName = currentEditor->property("filePath").toString();
+    if (fileName.isEmpty()) {
+        fileName = QFileDialog::getSaveFileName(this, "Save File");
+        if (fileName.isEmpty()) return;
+        QFileInfo fileInfo(fileName);
+        tabWidget->setTabText(tabWidget->currentIndex(), fileInfo.fileName());
+        currentEditor->setProperty("filePath", fileName);
+        tabWidget->setTabToolTip(tabWidget->currentIndex(), fileName);
+        applyHighlighterForPath(currentEditor, fileName);
+    }
+
+    // --- 攔截：Auto-Format On Save (方案三實作) ---
+    // 1. 取得當前未格式化的程式碼
+    QString originalText = currentEditor->toPlainText();
+
+    // 2. 設定 QProcess 來呼叫 clang-format
+    QProcess formatProcess;
+    formatProcess.setProgram("clang-format");
+    
+    // 如果有特定 style，可加參數： formatProcess.setArguments({"-style=file"});
+    formatProcess.start();
+
+    if (formatProcess.waitForStarted(1000)) {
+        // 3. 透過 stdin 把程式碼餵給 clang-format
+        formatProcess.write(originalText.toUtf8());
+        formatProcess.closeWriteChannel(); // 關閉寫入通道，讓 clang-format 知道我們傳完了
+
+        // 4. 等待 clang-format 處理完畢 (加上超時保護，避免 UI 卡死)
+        if (formatProcess.waitForFinished(2000) && formatProcess.exitStatus() == QProcess::NormalExit) {
+            QString formattedText = QString::fromUtf8(formatProcess.readAllStandardOutput());
+            
+            // 5. 優雅降級 (Graceful Degradation)：檢查輸出是否為空，或與原本相同
+            if (!formattedText.isEmpty() && formattedText != originalText) {
+                // 6. 使用 QTextCursor 替換文字，確保 Undo 歷史乾淨
+                QTextCursor cursor = currentEditor->textCursor();
+                cursor.beginEditBlock(); // 開始 Undo 區塊
+                
+                // 記錄游標原本的位置比例，避免格式化後游標亂跳
+                int position = cursor.position();
+                
+                cursor.select(QTextCursor::Document);
+                cursor.insertText(formattedText);
+                
+                // 嘗試將游標放回原處 (如果長度允許)
+                cursor.setPosition(qMin(position, currentEditor->document()->characterCount() - 1));
+                currentEditor->setTextCursor(cursor);
+                
+                cursor.endEditBlock();   // 結束 Undo 區塊
+                qDebug() << "Auto-Format successful!";
+            }
+        } else {
+            // 超時或執行失敗時的優雅降級
+            qWarning() << "clang-format process failed or timed out.";
+            QString errorOutput = QString::fromUtf8(formatProcess.readAllStandardError());
+            if (!errorOutput.isEmpty()) {
+                qDebug() << "clang-format error:" << errorOutput;
+            }
+            // 這裡可以選擇不彈出警告打斷使用者，直接繼續原樣儲存
+        }
+    } else {
+        // 找不到 clang-format 執行檔時的優雅降級
+        qWarning() << "Could not start clang-format. Is it installed and in PATH?";
+        // 同樣不打斷使用者，維持原始程式碼儲存
+    }
+    // --- Auto-Format On Save 結束 ---
+
+    // 7. 執行實際的檔案寫入 (寫入磁碟)
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "Error", "Cannot save file:\n" + file.errorString());
+        return;
+    }
+    QTextStream out(&file);
+    // 此時編輯器內的文字可能是已經排版過 (或因降級而保持原樣) 的文字
+    out << currentEditor->toPlainText();
+    file.close();
+}

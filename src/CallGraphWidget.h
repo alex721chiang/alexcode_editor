@@ -14,6 +14,9 @@ public:
     // 建立並繪製圖譜
     void buildGraph(const QString& rootNode, const QSet<QString>& dependencies);
 
+signals:
+    void nodeDoubleClicked(const QString& functionName);
+
 private:
     QGraphicsView* view;
     QGraphicsScene* scene;

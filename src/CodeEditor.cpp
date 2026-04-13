@@ -181,6 +181,14 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent *event) {
         }
 
         CallGraphWidget *graphWidget = new CallGraphWidget(this);
+        connect(graphWidget, &CallGraphWidget::nodeDoubleClicked, this, [this](const QString& funcName) {
+            QTextCursor cursor = document()->find(QRegularExpression("\\b" + funcName + "\\b"));
+            if (!cursor.isNull()) {
+                setTextCursor(cursor);
+                centerCursor();
+                setFocus();
+            }
+        });
         graphWidget->buildGraph(word, deps);
         graphWidget->setAttribute(Qt::WA_DeleteOnClose);
         graphWidget->show();

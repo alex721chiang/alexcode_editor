@@ -3,7 +3,25 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsTextItem>
 #include <QGraphicsLineItem>
+#include <QGraphicsSceneMouseEvent>
 #include <cmath>
+
+class ClickableTextItem : public QGraphicsTextItem {
+public:
+    ClickableTextItem(const QString& text, CallGraphWidget* parentWidget)
+        : QGraphicsTextItem(text), m_parent(parentWidget), m_text(text) {
+        setToolTip("Double click to jump to source");
+        setCursor(Qt::PointingHandCursor);
+    }
+protected:
+    void mouseDoubleClickEvent(QGraphicsSceneMouseEvent *event) override {
+        Q_UNUSED(event);
+        emit m_parent->nodeDoubleClicked(m_text);
+    }
+private:
+    CallGraphWidget* m_parent;
+    QString m_text;
+};
 
 CallGraphWidget::CallGraphWidget(QWidget *parent) : QDialog(parent) {
     setWindowTitle("Call Graph (Navigation 2.0)");
@@ -26,7 +44,8 @@ void CallGraphWidget::buildGraph(const QString& rootNode, const QSet<QString>& d
     // 繪製中心節點 (Root)
     QGraphicsEllipseItem* rootItem = scene->addEllipse(centerX - 50, centerY - 25, 100, 50, QPen(Qt::black), QBrush(Qt::yellow));
     rootItem->setZValue(1);
-    QGraphicsTextItem* rootText = scene->addText(rootNode);
+    ClickableTextItem* rootText = new ClickableTextItem(rootNode, this);
+    scene->addItem(rootText);
     rootText->setDefaultTextColor(Qt::black);
     rootText->setPos(centerX - rootText->boundingRect().width() / 2, centerY - rootText->boundingRect().height() / 2);
     rootText->setZValue(2);
@@ -48,7 +67,8 @@ void CallGraphWidget::buildGraph(const QString& rootNode, const QSet<QString>& d
         // 繪製依賴節點 (Callees)
         QGraphicsEllipseItem* nodeItem = scene->addEllipse(nodeX - 45, nodeY - 20, 90, 40, QPen(Qt::darkBlue), QBrush(QColor(173, 216, 230))); // 淺藍色
         nodeItem->setZValue(1);
-        QGraphicsTextItem* nodeText = scene->addText(dep);
+        ClickableTextItem* nodeText = new ClickableTextItem(dep, this);
+        scene->addItem(nodeText);
         nodeText->setDefaultTextColor(Qt::black);
         nodeText->setPos(nodeX - nodeText->boundingRect().width() / 2, nodeY - nodeText->boundingRect().height() / 2);
         nodeText->setZValue(2);
