@@ -17,6 +17,9 @@
 #include <QLabel>
 #include <QStyle>
 #include <QSettings>
+#include <QProcess>
+#include <QPointer>
+#include <QTimer>
 #include "AICompletionProvider.h"
 
 MainWindow::MainWindow(QWidget *parent)
@@ -268,14 +271,86 @@ void MainWindow::saveFile() {
         applyHighlighterForPath(currentEditor, fileName);
     }
 
-    QFile file(fileName);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        QMessageBox::warning(this, "Error", "Cannot save file:\n" + file.errorString());
-        return;
+    QString originalText = currentEditor->toPlainText();
+
+    auto doSave = [this](const QString& fileToSave, const QString& textToSave) {
+        QFile file(fileToSave);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QMessageBox::warning(this, "Error", "Cannot save file:\n" + file.errorString());
+            return;
+        }
+        QTextStream out(&file);
+        out << textToSave;
+        file.close();
+    };
+
+    if (fileName.endsWith(".cpp") || fileName.endsWith(".h") || fileName.endsWith(".hpp") || fileName.endsWith(".c")) {
+        QProcess* formatProcess = new QProcess(this);
+        formatProcess->setProgram("clang-format");
+
+        QPointer<CodeEditor> safeEditor(currentEditor);
+
+        connect(formatProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, [this, safeEditor, fileName, originalText, formatProcess](int exitCode, QProcess::ExitStatus exitStatus) {
+            
+            QString textToSave = originalText;
+            
+            if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+                QString formattedText = QString::fromUtf8(formatProcess->readAllStandardOutput());
+                if (!formattedText.isEmpty() && formattedText != originalText) {
+                    if (safeEditor) {
+                        QTextCursor cursor = safeEditor->textCursor();
+                        cursor.beginEditBlock();
+                        int position = cursor.position();
+                        cursor.select(QTextCursor::Document);
+                        cursor.insertText(formattedText);
+                        cursor.setPosition(qMin(position, safeEditor->document()->characterCount() - 1));
+                        safeEditor->setTextCursor(cursor);
+                        cursor.endEditBlock();
+                        textToSave = safeEditor->toPlainText();
+                    } else {
+                        textToSave = formattedText;
+                    }
+                } else if (safeEditor) {
+                    textToSave = safeEditor->toPlainText();
+                }
+            } else if (safeEditor) {
+                textToSave = safeEditor->toPlainText();
+            }
+
+            QFile file(fileName);
+            if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&file);
+                out << textToSave;
+                file.close();
+            } else {
+                qWarning() << "Cannot save file:" << file.errorString();
+            }
+
+            formatProcess->deleteLater();
+        });
+
+        // 處理超時保護
+        QTimer* timeoutTimer = new QTimer(formatProcess);
+        timeoutTimer->setSingleShot(true);
+        connect(timeoutTimer, &QTimer::timeout, formatProcess, [formatProcess]() {
+            if (formatProcess->state() == QProcess::Running) {
+                formatProcess->kill();
+            }
+        });
+
+        formatProcess->start();
+        if (formatProcess->waitForStarted(500)) {
+            formatProcess->write(originalText.toUtf8());
+            formatProcess->closeWriteChannel();
+            timeoutTimer->start(2000); // 2秒超時
+        } else {
+            doSave(fileName, originalText);
+            formatProcess->deleteLater();
+        }
+    } else {
+        doSave(fileName, originalText);
     }
-    QTextStream out(&file);
-    out << currentEditor->toPlainText();
-    file.close();
 }
 
 void MainWindow::showFindDialog() {
