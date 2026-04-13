@@ -6,6 +6,7 @@ set(SRCS
     SyntaxHighlighter.cpp 
     AICompletionProvider.cpp
     SuggestionWidget.cpp
+    CallGraphWidget.cpp
     FindInFilesDialog.cpp
     resources.qrc
 )

@@ -3,9 +3,13 @@
 #include <QTextBlock>
 #include <QWheelEvent>
 #include <QKeyEvent>
+#include <QContextMenuEvent>
+#include <QMenu>
+#include <QRegularExpression>
 #include <QDebug>
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
+#include "CallGraphWidget.h"
 
 CodeEditor::CodeEditor(QWidget *parent) : QPlainTextEdit(parent) {
     lineNumberArea = new LineNumberArea(this);
@@ -144,3 +148,45 @@ void CodeEditor::onAICompletionReady(const QStringList &suggestions) {
 void CodeEditor::insertSuggestion(const QString &text) {
     insertPlainText(text);
 }
+
+void CodeEditor::contextMenuEvent(QContextMenuEvent *event) {
+    QMenu *menu = createStandardContextMenu();
+    menu->addSeparator();
+
+    QAction *callGraphAction = menu->addAction("Show Call Graph");
+    connect(callGraphAction, &QAction::triggered, this, [this, event]() {
+        QTextCursor cursor = cursorForPosition(event->pos());
+        cursor.select(QTextCursor::WordUnderCursor);
+        QString word = cursor.selectedText();
+
+        if (word.isEmpty()) {
+            word = "CurrentDocument";
+        }
+
+        // MVP 階段：簡單地掃描文件內容，抓取可能是函式呼叫的字眼 (字首 + 括號)
+        QString text = toPlainText();
+        QRegularExpression re("\\b([a-zA-Z_]\\w*)\\s*\\(");
+        QRegularExpressionMatchIterator i = re.globalMatch(text);
+        
+        QSet<QString> deps;
+        int count = 0;
+        while (i.hasNext() && deps.size() < 10) { // 限制最多抓 10 個獨立依賴以確保視覺整潔
+            QRegularExpressionMatch match = i.next();
+            QString func = match.captured(1);
+            // 排除基本控制流的關鍵字
+            if (func != word && func != "if" && func != "while" && func != "for" && func != "switch" && func != "catch" && func != "return" && func != "sizeof") {
+                deps.insert(func);
+                count++;
+            }
+        }
+
+        CallGraphWidget *graphWidget = new CallGraphWidget(this);
+        graphWidget->buildGraph(word, deps);
+        graphWidget->setAttribute(Qt::WA_DeleteOnClose);
+        graphWidget->show();
+    });
+
+    menu->exec(event->globalPos());
+    delete menu;
+}
+
