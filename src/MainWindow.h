@@ -32,6 +32,7 @@ private slots:
     void showFontDialog();
     void showFindInFilesDialog();
     void onFindInFilesResultDoubleClicked(QListWidgetItem* item);
+    void openRecentFile();
 private:
     QTabWidget* tabWidget;
     QListWidget* resultsList = nullptr;
@@ -45,6 +46,15 @@ private:
     QLineEdit* findInput;
     QLineEdit* replaceInput;
     FindInFilesDialog* findInFilesDialog;
+
+    // Recent Files
+    QMenu* recentFilesMenu;
+    QAction* recentFileActions[15];
+    QStringList recentFiles;
+    void updateRecentFileActions();
+    void saveRecentFiles();
+    void loadRecentFiles();
+    void addToRecentFiles(const QString& filePath);
 
     // Actions
     QAction* newAction;

@@ -27,6 +27,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     defaultEditorFont = loadFont();
     isFontSet = true;
+    loadRecentFiles();
     setupUI();
     resize(800, 600);
 }
@@ -162,6 +163,16 @@ void MainWindow::setupUI() {
     QMenu* fileMenu = menuBar->addMenu("File");
     fileMenu->addAction(newAction);
     fileMenu->addAction(openAction);
+    
+    recentFilesMenu = fileMenu->addMenu("Open Recent");
+    for (int i = 0; i < 15; ++i) {
+        recentFileActions[i] = new QAction(this);
+        recentFileActions[i]->setVisible(false);
+        connect(recentFileActions[i], &QAction::triggered, this, &MainWindow::openRecentFile);
+        recentFilesMenu->addAction(recentFileActions[i]);
+    }
+    updateRecentFileActions();
+
     fileMenu->addAction(saveAction);
 
     QMenu* editMenu = menuBar->addMenu("Edit");
@@ -254,6 +265,7 @@ void MainWindow::openFileByPath(const QString& fileName) {
     tabWidget->setCurrentIndex(tabIndex);
 
     applyHighlighterForPath(newEditor, fileName);
+    addToRecentFiles(fileName);
 }
 
 void MainWindow::saveFile() {
@@ -500,4 +512,44 @@ void MainWindow::onFindInFilesResultDoubleClicked(QListWidgetItem* item) {
             editor->setFocus();
         }
     }
+}
+
+void MainWindow::openRecentFile() {
+    QAction* action = qobject_cast<QAction*>(sender());
+    if (action) {
+        openFileByPath(action->data().toString());
+    }
+}
+
+void MainWindow::updateRecentFileActions() {
+    int numRecentFiles = qMin(recentFiles.size(), 15);
+    for (int i = 0; i < numRecentFiles; ++i) {
+        QString text = tr("&%1 %2").arg(i + 1).arg(QFileInfo(recentFiles[i]).fileName());
+        recentFileActions[i]->setText(text);
+        recentFileActions[i]->setData(recentFiles[i]);
+        recentFileActions[i]->setVisible(true);
+    }
+    for (int j = numRecentFiles; j < 15; ++j) {
+        recentFileActions[j]->setVisible(false);
+    }
+}
+
+void MainWindow::saveRecentFiles() {
+    QSettings settings("AlexCode", "AlexCodeEditor");
+    settings.setValue("recentFileList", recentFiles);
+}
+
+void MainWindow::loadRecentFiles() {
+    QSettings settings("AlexCode", "AlexCodeEditor");
+    recentFiles = settings.value("recentFileList").toStringList();
+}
+
+void MainWindow::addToRecentFiles(const QString& filePath) {
+    recentFiles.removeAll(filePath);
+    recentFiles.prepend(filePath);
+    while (recentFiles.size() > 15) {
+        recentFiles.removeLast();
+    }
+    saveRecentFiles();
+    updateRecentFileActions();
 }
