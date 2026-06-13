@@ -8,12 +8,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install Qt
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@v4
       with:
-        version: '6.5.3'
+        version: '6.8.3'
         host: 'windows'
         target: 'desktop'
         arch: 'win64_msvc2019_64'
+        modules: 'qt5compat'      # 提供 Core5Compat，CMake find_package 需要
         # QtNetwork is included in the base installation for desktop
         install-deps: 'true'
     - name: Set up MSVC

@@ -14,12 +14,13 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install Qt
-      uses: jurplel/install-qt-action@v3
+      uses: jurplel/install-qt-action@v4
       with:
-        version: '6.5.0'
+        version: '6.8.3'
         host: 'windows'
         target: 'desktop'
         arch: 'win64_msvc2019_64'
+        modules: 'qt5compat'      # 提供 Core5Compat（QTextCodec 等），CMake find_package 需要
 
     - name: Configure CMake
       run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
