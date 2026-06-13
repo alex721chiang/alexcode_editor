@@ -14,6 +14,7 @@
 #include <QTimer>
 #include <QToolTip>
 #include <QHelpEvent>
+#include <algorithm>
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
 #include "CallGraphWidget.h"
