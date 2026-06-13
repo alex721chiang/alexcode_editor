@@ -60,6 +60,10 @@ public:
     // 大檔案模式（停用高亮/補全/括號配對）
     void setLargeFileMode(bool on) { m_largeFile = on; }
 
+    // 語法高亮（重用編輯器自有的 highlighter，避免在同一文件重複附掛）
+    void setSyntaxLanguage(SyntaxHighlighter::Language lang) { if (highlighter) highlighter->setLanguage(lang); }
+    void refreshSyntaxTheme() { if (highlighter) highlighter->refreshTheme(); }
+
     // ---- Snippet 樣板（trigger + Tab 展開）----
     void setSnippets(const QHash<QString, QString>& snippets) { m_snippets = snippets; }
 

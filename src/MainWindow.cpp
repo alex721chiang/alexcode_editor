@@ -363,21 +363,19 @@ void MainWindow::applyFontToAllTabs(const QFont& font) {
 
 void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& filePath) {
     if (!editor) return;
-    SyntaxHighlighter::Language lang = SyntaxHighlighter::detectLanguage(filePath);
+    const SyntaxHighlighter::Language lang = SyntaxHighlighter::detectLanguage(filePath);
 
-    // 設定語言屬性 + 註解前綴（給狀態列與 Toggle Comment 用）
-    QString langName = "Plain Text";
+    // 註解前綴（給 Toggle Comment 用）：# 系列 vs // 系列
     QString commentPrefix = "//";
-    if (lang == SyntaxHighlighter::Language::CPP)    { langName = "C/C++";  commentPrefix = "//"; }
-    if (lang == SyntaxHighlighter::Language::Python) { langName = "Python"; commentPrefix = "#"; }
-    editor->setProperty("language", langName);
+    if (lang == SyntaxHighlighter::Language::Python ||
+        lang == SyntaxHighlighter::Language::CMakeLang ||
+        lang == SyntaxHighlighter::Language::Bash)
+        commentPrefix = "#";
+    editor->setProperty("language", SyntaxHighlighter::languageName(lang));
     editor->setCommentPrefix(commentPrefix);
+    editor->setSyntaxLanguage(lang);                // 重用編輯器自有 highlighter（含 Unknown 清空）
     applySnippetsToEditor(editor);                  // 語言確定後注入對應 snippet
     updateStatusBar();
-
-    if (lang == SyntaxHighlighter::Language::Unknown) return;
-    SyntaxHighlighter* highlighter = new SyntaxHighlighter(editor->document());
-    highlighter->setLanguage(lang);
 }
 
 // ----------------------------------------------------------------
@@ -2528,8 +2526,10 @@ void MainWindow::showPreferences() {
         Theme::setTheme(themeCombo->currentText());
         qApp->setStyleSheet(Theme::stylesheet());
         for (int i = 0; i < tabWidget->count(); ++i)
-            if (auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+            if (auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
+                e->refreshSyntaxTheme();              // 語法高亮色票跟隨主題
                 e->viewport()->update();              // 重繪 current line / gutter 等程式內取色
+            }
     }
     for (int i = 0; i < tabWidget->count(); ++i)
         if (auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))

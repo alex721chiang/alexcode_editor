@@ -25,6 +25,10 @@ Qt 6 程式碼編輯器，目標是接近 Notepad++ 的日常編輯體驗，並�
 可拖曳排序分頁、書籤（Ctrl+F2 / F2 / Shift+F2）、巨集錄製重播、導覽歷史（Alt+←/→）、
 Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF 偵測切換、大檔案模式（>50MB 自動降級）。
 
+### 語法高亮
+依副檔名自動選擇：C/C++、Python、JavaScript/TypeScript、JSON、XML/HTML、Markdown、CMake、Shell。
+色票跟隨目前主題（Neon Grid / Paper Light / Matrix），切換主題即時重繪。
+
 ### 進階編輯（v4.3）
 | 功能 | 操作 |
 |---|---|

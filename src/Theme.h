@@ -16,6 +16,8 @@ struct Palette {
     QString fg, fgDim, fgDim2, fgList, faint;
     QString hover, pressed, currentLine, selBg;
     QString searchBg, searchFg, bracketBg, warn;
+    // 語法高亮（keyword / type / comment / string / function / preprocessor / number）
+    QString synKw, synType, synComment, synString, synFunc, synPre, synNum;
 };
 
 inline const QHash<QString, Palette>& palettes() {
@@ -24,17 +26,20 @@ inline const QHash<QString, Palette>& palettes() {
             "#0a0e17", "#0d1420", "#1c2940", "#00e5ff", "#00b8d4", "#ff2d95",
             "#d6e4ff", "#9db4d8", "#7d93b8", "#b8cdf0", "#3d5a80",
             "#15233a", "#1a2c47", "#101a2e", "#234a7d",
-            "#3a2a55", "#ffd166", "#1a3a4a", "#ffd166" } },
+            "#3a2a55", "#ffd166", "#1a3a4a", "#ffd166",
+            "#00e5ff", "#ff79c6", "#5c6f8a", "#c3f73a", "#ffd166", "#ff9e64", "#bd93f9" } },
         { QStringLiteral("Paper Light"), {
             "#fafafa", "#f0f0f0", "#d0d0d0", "#0066cc", "#0052a3", "#d81b60",
             "#1a1a1a", "#444444", "#555555", "#333333", "#999999",
             "#e3eefc", "#d0e2f7", "#eef4fb", "#bcd6f5",
-            "#ffe9a8", "#5a4500", "#cfe6ff", "#b8860b" } },
+            "#ffe9a8", "#5a4500", "#cfe6ff", "#b8860b",
+            "#0000cc", "#267f99", "#008000", "#a31515", "#795e26", "#af00db", "#098658" } },
         { QStringLiteral("Matrix"), {
             "#050905", "#0a120a", "#143814", "#00ff66", "#00cc52", "#ffaa00",
             "#c8efc8", "#8fbf8f", "#7aa97a", "#b0dcb0", "#3f6f3f",
             "#0f2410", "#143514", "#0c1a0c", "#1d4d28",
-            "#2c4d10", "#eaff90", "#15402a", "#ffd166" } },
+            "#2c4d10", "#eaff90", "#15402a", "#ffd166",
+            "#00ff66", "#7af0a0", "#3f6f3f", "#eaff90", "#b0dcb0", "#ffaa00", "#00cc52" } },
     };
     return p;
 }
@@ -59,6 +64,14 @@ inline QString LSP_WARNING      = "#ffd166";   // 診斷波浪底線：警告
 inline QString GIT_ADDED        = "#00e5ff";   // gutter：新增行
 inline QString GIT_MODIFIED     = "#ffd166";   // gutter：修改行
 inline QString GIT_DELETED      = "#ff2d95";   // gutter：刪除標記
+// 語法高亮色票（setTheme 時更新）
+inline QString SYN_KEYWORD      = "#00e5ff";
+inline QString SYN_TYPE         = "#ff79c6";
+inline QString SYN_COMMENT      = "#5c6f8a";
+inline QString SYN_STRING       = "#c3f73a";
+inline QString SYN_FUNCTION     = "#ffd166";
+inline QString SYN_PREPROC      = "#ff9e64";
+inline QString SYN_NUMBER       = "#bd93f9";
 
 inline QString currentThemeName = QStringLiteral("Neon Grid");
 
@@ -74,6 +87,9 @@ inline void setTheme(const QString& name) {
     LSP_ERROR = pal.accent2;        LSP_WARNING = pal.warn;
     GIT_ADDED = pal.accent;         GIT_MODIFIED = pal.warn;
     GIT_DELETED = pal.accent2;
+    SYN_KEYWORD = pal.synKw;   SYN_TYPE = pal.synType;   SYN_COMMENT = pal.synComment;
+    SYN_STRING = pal.synString; SYN_FUNCTION = pal.synFunc; SYN_PREPROC = pal.synPre;
+    SYN_NUMBER = pal.synNum;
 }
 
 inline QString stylesheet() {
