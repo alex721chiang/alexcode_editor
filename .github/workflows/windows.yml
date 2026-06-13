@@ -16,10 +16,10 @@ jobs:
     - name: Install Qt
       uses: jurplel/install-qt-action@v4
       with:
-        version: '6.5.3'          # 6.5 LTS：win64_msvc2019_64 存在；6.8 已改 msvc2022
+        version: '6.8.3'          # 6.8：對應 arch 為 msvc2022_64；舊版 6.5.x 的標頭用到已被新 MSVC 移除的 stdext，無法編譯
         host: 'windows'
         target: 'desktop'
-        arch: 'win64_msvc2019_64'
+        arch: 'win64_msvc2022_64'
         modules: 'qt5compat'      # 提供 Core5Compat（QTextCodec 等），CMake find_package 需要
 
     - name: Configure CMake
