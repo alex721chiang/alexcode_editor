@@ -1,1 +1,20 @@
+# Build output
 build/
+/build*/
+
+# Logs / local tooling
+*.log
+aqtinstall.log
+
+# Portable-mode runtime data
+data/
+
+# Editor / OS cruft
+.DS_Store
+*.user
+*.autosave
+
+# Qt / CMake intermediates
+CMakeCache.txt
+CMakeFiles/
+*_autogen/

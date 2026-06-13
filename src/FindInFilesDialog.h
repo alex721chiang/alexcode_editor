@@ -25,14 +25,17 @@ signals:
 private slots:
     void browseDirectory();
     void performSearch();
+    void performReplaceAll();          // 2.8 Replace in Files
 
 private:
     QLineEdit* dirInput;
     QPushButton* browseBtn;
     QLineEdit* filterInput;
     QLineEdit* searchInput;
+    QLineEdit* replaceInput;
     QListWidget* resultsList;
     QPushButton* searchBtn;
+    QPushButton* replaceBtn;
 
     void setupUI();
 };
