@@ -11,7 +11,7 @@ class TimelineBar : public QWidget {
 public:
     explicit TimelineBar(QWidget* parent = nullptr) : QWidget(parent) {
         setFixedHeight(18);
-        setToolTip(QString::fromUtf8("命中分布（點擊跳至該區段）"));
+        setToolTip(tr("命中分布（點擊跳至該區段）"));
         setCursor(Qt::PointingHandCursor);
     }
 

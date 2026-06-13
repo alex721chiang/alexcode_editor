@@ -2,4 +2,8 @@
 <qresource>
     <file>icon.png</file>
 </qresource>
+<qresource prefix="/i18n">
+    <file alias="app_en.qm">i18n/app_en.qm</file>
+    <file alias="app_zh_TW.qm">i18n/app_zh_TW.qm</file>
+</qresource>
 </RCC>

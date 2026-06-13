@@ -263,7 +263,7 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event) {
                     painter.setPen(folded ? QColor("#00e5ff") : QColor(Theme::LINE_NUM_FG));
                     painter.drawText(lineNumberArea->width() - 16, top, 14, fontMetrics().height(),
                                      Qt::AlignCenter,
-                                     folded ? QString::fromUtf8("▸") : QString::fromUtf8("▾"));
+                                     folded ? tr("▸") : tr("▾"));
                 }
             }
             if (marked.contains(blockNumber)) {                 // 書籤：洋紅圓點
@@ -1068,22 +1068,22 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent *event) {
     if (m_lspEnabled) {
         const QTextCursor c = cursorForPosition(event->pos());
         const int line = c.blockNumber(), ch = c.positionInBlock();
-        menu->addAction(QString::fromUtf8("跳至定義\tF12"), this, [this, line, ch]() {
+        menu->addAction(tr("跳至定義\tF12"), this, [this, line, ch]() {
             emit lspDefinitionRequested(line, ch);
         });
-        menu->addAction(QString::fromUtf8("全部引用\tShift+F12"), this, [this, line, ch]() {
+        menu->addAction(tr("全部引用\tShift+F12"), this, [this, line, ch]() {
             emit lspReferencesRequested(line, ch);
         });
-        menu->addAction(QString::fromUtf8("重新命名符號\tCtrl+Alt+R"), this, [this, line, ch]() {
+        menu->addAction(tr("重新命名符號\tCtrl+Alt+R"), this, [this, line, ch]() {
             emit lspRenameRequested(line, ch);
         });
-        menu->addAction(QString::fromUtf8("格式化文件\tShift+Alt+F"), this, [this]() {
+        menu->addAction(tr("格式化文件\tShift+Alt+F"), this, [this]() {
             emit lspFormatRequested();
         });
         menu->addSeparator();
     }
 
-    QAction *callGraphAction = menu->addAction("Show Call Graph");
+    QAction *callGraphAction = menu->addAction(tr("Show Call Graph"));
     connect(callGraphAction, &QAction::triggered, this, [this, event]() {
         QTextCursor cursor = cursorForPosition(event->pos());
         cursor.select(QTextCursor::WordUnderCursor);

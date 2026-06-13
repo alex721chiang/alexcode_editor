@@ -15,7 +15,7 @@ QuickOpenDialog::QuickOpenDialog(QWidget* parent)
     layout->setContentsMargins(8, 8, 8, 8);
 
     input = new QLineEdit(this);
-    input->setPlaceholderText(QString::fromUtf8("輸入檔名（支援模糊比對，例如 mwcpp → MainWindow.cpp）"));
+    input->setPlaceholderText(tr("輸入檔名（支援模糊比對，例如 mwcpp → MainWindow.cpp）"));
     list = new QListWidget(this);
     layout->addWidget(input);
     layout->addWidget(list);

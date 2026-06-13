@@ -81,8 +81,11 @@ Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF
 調色盤集中於 `src/Theme.h`，以單一 `Palette` 結構驅動全套 QSS 與編輯器色票。
 
 ### 自訂與可攜
+- **介面語言（i18n）**：設定中心可選 系統預設 / English / 繁體中文，選單、對話框、狀態列訊息全面雙語化（Qt `tr()` + 內嵌 `.qm`），重新啟動後生效。
 - **快捷鍵自訂**：Tools → 外部工具 →「編輯快捷鍵設定檔」（`alexcode-keys.json`，首次自動輸出現況模板），含衝突偵測，存檔即生效。
 - **可攜模式**：執行檔旁放 `portable.ini`，所有設定 / Session / 組態改存 `./data`，解壓即用、不碰系統登錄檔。一般模式則存於使用者 AppData（`settings.ini`）。
+
+翻譯來源為 `src/i18n/app_en.ts`、`app_zh_TW.ts`，以 `lupdate` 抽取、`lrelease` 編譯為 `.qm` 後經 `resources.qrc` 內嵌。
 
 ## 建置
 

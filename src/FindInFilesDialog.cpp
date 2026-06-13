@@ -32,7 +32,7 @@ void FindInFilesDialog::setupUI() {
     auto searchLayout = new QHBoxLayout();
     searchLayout->addWidget(new QLabel("Search Term:"));
     searchInput = new QLineEdit();
-    searchInput->setPlaceholderText(QString::fromUtf8("\u53ef\u7528 || \u5206\u9694\u591a\u500b\u95dc\u9375\u5b57 (OR)"));
+    searchInput->setPlaceholderText(tr("\u53ef\u7528 || \u5206\u9694\u591a\u500b\u95dc\u9375\u5b57 (OR)"));
     searchLayout->addWidget(searchInput);
     mainLayout->addLayout(searchLayout);
 
@@ -40,7 +40,7 @@ void FindInFilesDialog::setupUI() {
     auto replaceLayout = new QHBoxLayout();
     replaceLayout->addWidget(new QLabel("Replace With:"));
     replaceInput = new QLineEdit();
-    replaceInput->setPlaceholderText(QString::fromUtf8("逐字取代（不分大小寫；Search Term 視為單一字串）"));
+    replaceInput->setPlaceholderText(tr("逐字取代（不分大小寫；Search Term 視為單一字串）"));
     replaceLayout->addWidget(replaceInput);
     mainLayout->addLayout(replaceLayout);
 
@@ -104,11 +104,11 @@ void FindInFilesDialog::performReplaceAll() {
         totalCount += count;
     }
     if (hits.isEmpty()) {
-        QMessageBox::information(this, "Replace in Files", QString::fromUtf8("找不到符合的內容"));
+        QMessageBox::information(this, "Replace in Files", tr("找不到符合的內容"));
         return;
     }
     const auto ret = QMessageBox::question(this, "Replace in Files",
-        QString::fromUtf8("將取代 %1 個檔案中的 %2 處：\n\"%3\" → \"%4\"\n\n確定執行？（無法復原）")
+        tr("將取代 %1 個檔案中的 %2 處：\n\"%3\" → \"%4\"\n\n確定執行？（無法復原）")
             .arg(hits.size()).arg(totalCount).arg(searchTerm).arg(replacement),
         QMessageBox::Yes | QMessageBox::No);
     if (ret != QMessageBox::Yes) return;
@@ -122,7 +122,7 @@ void FindInFilesDialog::performReplaceAll() {
         }
     }
     QMessageBox::information(this, "Replace in Files",
-        QString::fromUtf8("完成：%1 個檔案、%2 處取代").arg(written).arg(totalCount));
+        tr("完成：%1 個檔案、%2 處取代").arg(written).arg(totalCount));
     performSearch();                                     // 重新整理結果
 }
 
