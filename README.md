@@ -1,4 +1,4 @@
-# AlexCode — Neon Edition (v4.3)
+# AlexCode — Neon Edition (v4.4)
 
 Qt 6 程式碼編輯器，目標是接近 Notepad++ 的日常編輯體驗，並整合 LSP 語言伺服器、Git、
 強大的 log 行篩選與多套未來感主題。
@@ -29,13 +29,20 @@ Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF
 依副檔名自動選擇：C/C++、Python、JavaScript/TypeScript、JSON、XML/HTML、Markdown、CMake、Shell。
 色票跟隨目前主題（Neon Grid / Paper Light / Matrix），切換主題即時重繪。
 
-### 進階編輯（v4.3）
+### 進階編輯
 | 功能 | 操作 |
 |---|---|
 | 程式碼摺疊 | 行號區 ▾/▸ 點擊、Ctrl+Shift+[ / ]（大括號 + 縮排混合判斷） |
 | 分割視窗 | Ctrl+\（同文件雙視圖，編輯與 Undo 即時同步） |
 | 多游標 | 選字後 Ctrl+Shift+D 逐一加選相同字串，輸入同步套用，Esc 結束 |
+| 欄位／矩形編輯 | Alt + 滑鼠拖曳選取跨行同欄區塊，輸入/刪除同步套用至每一行 |
+| 本地智慧補全 | 未啟用 LSP 時 Ctrl+Space：從文件擷取識別字，依前綴/模糊 × 出現頻率 × 與游標就近度排序（離線、免金鑰） |
 | Snippet 樣板 | trigger + Tab 展開（`alexcode-snippets.json`，支援 `${1:預設}` / `$0`、跟隨縮排） |
+
+### 整合終端機
+Ctrl+\` 開啟互動式終端機（停靠面板）。Windows 透過 ConPTY 接 PowerShell，支援 VT100/ANSI
+色彩與粗體、游標控制、鍵盤轉送（含 Ctrl+C、方向鍵、Home/End）、視窗縮放同步、滾輪捲動回看。
+另保留第一版「輸出面板＋」（F5 建置任務輸出、雙擊錯誤跳行）。
 
 ### LSP 語言伺服器（v1 + v2）
 開啟 C/C++ 或 Python 檔案時自動連線對應語言伺服器：
@@ -110,7 +117,10 @@ windeployqt --release --compiler-runtime build\src\AlexCode.exe
 ```bash
 cd build && ctest   # 或直接執行 ./tests/AlexCodeTests
 ```
-48 項單元測試，涵蓋篩選引擎（OR/AND、`||` 解析與舊式 `|` 相容、模糊比對、`re:` regex）、
+75 項單元測試，涵蓋篩選引擎（OR/AND、`||` 解析與舊式 `|` 相容、模糊比對、`re:` regex）、
 LSP 協定層（框架切割/重組、診斷/補全/定義/hover/references/rename/formatting 解析、增量同步 diff、
-伺服器能力解析）、Git gutter 行級 diff、與 10 萬行效能測試。
-另有真實 clangd 無頭整合測試（`tests/lsp_smoke.cpp`，需系統已安裝 clangd）。
+伺服器能力解析）、Git gutter 行級 diff、VT100/ANSI 解析器（游標/清除/SGR/跨封包切割）、
+矩形選取邏輯、本地補全排序、與 10 萬行效能測試。
+另有無頭整合測試：真實 clangd（`tests/lsp_smoke.cpp`）與 ConPTY（`tests/pty_smoke.cpp`，Windows）。
+
+開發輔助：`AlexCode --screenshot out.png [檔案…]` 讓程式以 Qt 自我渲染存圖（不需實體螢幕、桌面鎖定亦可），方便自動化驗證 GUI。
