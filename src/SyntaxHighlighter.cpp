@@ -179,7 +179,7 @@ void SyntaxHighlighter::setupPythonRules()
         "try","while","with","yield","self","cls"
     });
     HighlightingRule rule;
-    for (const QString &t : {"int","float","str","bool","list","dict","set","tuple","bytes","object"}) {
+    for (const auto* t : {"int","float","str","bool","list","dict","set","tuple","bytes","object"}) {
         rule.pattern = QRegularExpression(QStringLiteral("\\b%1\\b").arg(t));
         rule.format  = typeFormat;
         highlightingRules.append(rule);
@@ -226,7 +226,7 @@ void SyntaxHighlighter::setupJsonRules()
     rule.pattern = QRegularExpression("\"(?:[^\"\\\\]|\\\\.)*\"");        // 值字串
     rule.format  = stringFormat;
     highlightingRules.append(rule);
-    for (const QString &w : {"true","false","null"}) {
+    for (const auto* w : {"true","false","null"}) {
         rule.pattern = QRegularExpression(QStringLiteral("\\b%1\\b").arg(w));
         rule.format  = keywordFormat;
         highlightingRules.append(rule);
