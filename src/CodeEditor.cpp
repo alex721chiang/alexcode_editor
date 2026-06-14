@@ -16,6 +16,7 @@
 #include <QHelpEvent>
 #include <algorithm>
 #include "BoxSelect.h"
+#include "LocalCompletion.h"
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
 #include "CallGraphWidget.h"
@@ -430,6 +431,12 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
     if (m_lspEnabled && (e->modifiers() & Qt::ControlModifier) && e->key() == Qt::Key_Space) {
         const QTextCursor c = textCursor();
         emit lspCompletionRequested(c.blockNumber(), c.positionInBlock());
+        e->accept();
+        return;
+    }
+    // 未啟用 LSP 時：Ctrl+Space 觸發離線智慧補全
+    if (!m_lspEnabled && (e->modifiers() & Qt::ControlModifier) && e->key() == Qt::Key_Space) {
+        triggerLocalCompletion();
         e->accept();
         return;
     }
@@ -1112,6 +1119,15 @@ bool CodeEditor::event(QEvent* e) {
 void CodeEditor::showHoverText(const QString& text) {
     if (!text.isEmpty())
         QToolTip::showText(m_lastHoverGlobalPos, text, this);
+}
+
+void CodeEditor::triggerLocalCompletion() {
+    if (m_largeFile) return;
+    const QString prefix = wordUnderCursor();
+    const QStringList items =
+        LocalCompletion::suggest(toPlainText(), textCursor().position(), prefix, 30);
+    if (!items.isEmpty())
+        showLspCompletions(items);     // 重用 SuggestionWidget：插入時取代游標下字詞前綴
 }
 
 void CodeEditor::showLspCompletions(const QStringList& items) {

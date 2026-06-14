@@ -125,6 +125,7 @@ private:
     void setupCompleter();
     void rebuildCompleterModel();
     QString wordUnderCursor() const;
+    void triggerLocalCompletion();          // 離線智慧補全（LSP 未啟用時的 Ctrl+Space）
 
     QWidget *lineNumberArea;
     SyntaxHighlighter *highlighter;
