@@ -55,6 +55,7 @@
 #include "LspManager.h"
 #include "GitGutter.h"
 #include "TimelineBar.h"
+#include "TerminalWidget.h"
 #include "Theme.h"
 #include "Portable.h"
 
@@ -1099,6 +1100,17 @@ void MainWindow::setupUI() {
         if (on) refreshMarkdownPreview();
     });
     viewMenu->addAction(mdAction);
+    QAction* termAction = new QAction(tr("終端機"), this);
+    termAction->setCheckable(true);
+    termAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));   // Ctrl+`
+    connect(termAction, &QAction::toggled, this, [this](bool on) {
+        termDock->setVisible(on);
+        if (on) {
+            terminal->startShell(projectFolder);   // 首次顯示時才啟動 shell
+            terminal->setFocus();
+        }
+    });
+    viewMenu->addAction(termAction);
     viewMenu->addSeparator();
     viewMenu->addAction(zoomInAction);
     viewMenu->addAction(zoomOutAction);
@@ -1163,6 +1175,13 @@ void MainWindow::setupUI() {
     mdTimer->setSingleShot(true);
     mdTimer->setInterval(500);
     connect(mdTimer, &QTimer::timeout, this, &MainWindow::refreshMarkdownPreview);
+
+    // ---------- 互動式終端機（ConPTY；首次顯示時才啟動 shell）----------
+    termDock = new QDockWidget("TERMINAL", this);
+    terminal = new TerminalWidget(this);
+    termDock->setWidget(terminal);
+    addDockWidget(Qt::BottomDockWidgetArea, termDock);
+    termDock->hide();
 
     // ---------- 分割視窗（共用 QTextDocument 的第二視圖，編輯即時同步）----------
     splitDock = new QDockWidget("SPLIT VIEW", this);

@@ -170,6 +170,10 @@ private:
     void setEditorEncoding(CodeEditor* e, const QString& enc);
     QTimer* autosaveTimer = nullptr;
 
+    // 互動式終端機（ConPTY）
+    QDockWidget* termDock = nullptr;
+    class TerminalWidget* terminal = nullptr;
+
     // 輸出面板 / 建置任務 / Git
     QDockWidget* outputDock = nullptr;
     QPlainTextEdit* outputView = nullptr;
