@@ -3,6 +3,8 @@
 #include <QFileInfo>
 #include <QTranslator>
 #include <QLocale>
+#include <QTimer>
+#include <QPixmap>
 #include "MainWindow.h"
 #include "Theme.h"
 #include "Portable.h"
@@ -39,11 +41,26 @@ int main(int argc, char *argv[]) {
     a.setWindowIcon(QIcon(":/icon.png"));
     MainWindow w;
     w.show();
-    // 命令列開檔（含「以 AlexCode 開啟」檔案關聯）
+
+    // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
+    // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
     const QStringList args = a.arguments();
+    QString shotPath, termCmd;
     for (int i = 1; i < args.size(); ++i) {
-        if (QFileInfo::exists(args[i]))
+        if (args[i] == "--screenshot" && i + 1 < args.size()) shotPath = args[++i];
+        else if (args[i] == "--termcmd" && i + 1 < args.size()) termCmd = args[++i];
+        else if (QFileInfo::exists(args[i]))
             QMetaObject::invokeMethod(&w, "openFileByPath", Q_ARG(QString, args[i]));
+    }
+
+    if (!shotPath.isEmpty()) {
+        w.resize(1200, 800);
+        if (!termCmd.isEmpty()) w.openTerminalForShot(termCmd);
+        const int delayMs = termCmd.isEmpty() ? 1500 : 3000;   // 終端機需等子行程輸出
+        QTimer::singleShot(delayMs, &w, [&w, shotPath, &a]() {
+            w.grab().save(shotPath);                            // Qt 自我渲染，與螢幕/鎖定無關
+            a.quit();
+        });
     }
     return a.exec();
 }

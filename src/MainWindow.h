@@ -33,6 +33,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+    void openTerminalForShot(const QString& cmd);   // 截圖模式：開終端機並（可選）執行指令
 
 protected:
     void closeEvent(QCloseEvent* event) override;

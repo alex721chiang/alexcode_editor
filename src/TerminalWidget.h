@@ -11,6 +11,7 @@ public:
     explicit TerminalWidget(QWidget* parent = nullptr);
 
     void startShell(const QString& workingDir = QString());
+    void sendText(const QByteArray& data) { m_pty.writeData(data); }   // 供截圖示範等程式化輸入
     bool isRunning() const { return m_pty.isRunning(); }
 
 protected:

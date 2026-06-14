@@ -1418,6 +1418,12 @@ void MainWindow::newFile() {
     createEditorTab("Untitled");
 }
 
+void MainWindow::openTerminalForShot(const QString& cmd) {
+    termDock->show();
+    terminal->startShell(projectFolder);
+    if (!cmd.isEmpty()) terminal->sendText((cmd + QStringLiteral("\r")).toUtf8());
+}
+
 void MainWindow::syncSplitView() {
     if (!splitDock || !splitDock->isVisible()) return;
     CodeEditor* e = activeEditor();
