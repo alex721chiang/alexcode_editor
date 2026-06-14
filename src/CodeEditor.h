@@ -107,7 +107,9 @@ protected:
     void keyPressEvent(QKeyEvent *e) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void paintEvent(QPaintEvent *event) override;        // 多游標 caret 繪製
-    void mousePressEvent(QMouseEvent *event) override;   // 點擊清除多游標
+    void mousePressEvent(QMouseEvent *event) override;   // 點擊清除多游標 / Alt 起始矩形選取
+    void mouseMoveEvent(QMouseEvent *event) override;    // Alt 拖曳更新矩形選取
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
@@ -159,6 +161,10 @@ private:
     // 多游標（持久游標，編輯後位置自動跟隨）
     QList<QTextCursor> m_extraCursors;
     bool handleMultiCursorKey(QKeyEvent* e);             // true = 已處理
+    // 矩形（欄位）選取
+    bool m_boxSelecting = false;
+    int m_boxAnchorLine = 0, m_boxAnchorCol = 0;
+    void applyBoxSelection(int curLine, int curCol);     // 依錨點→目前點建立每行選取
 
     // 程式碼摺疊（持久游標，編輯後位置自動跟隨）
     struct Fold { QTextCursor start, end; };

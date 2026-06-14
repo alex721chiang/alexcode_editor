@@ -15,6 +15,7 @@
 #include <QToolTip>
 #include <QHelpEvent>
 #include <algorithm>
+#include "BoxSelect.h"
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
 #include "CallGraphWidget.h"
@@ -790,8 +791,66 @@ void CodeEditor::paintEvent(QPaintEvent* event) {
 }
 
 void CodeEditor::mousePressEvent(QMouseEvent* event) {
+    // Alt + 左鍵：開始矩形（欄位）選取
+    if (!m_largeFile && (event->modifiers() & Qt::AltModifier)
+        && event->button() == Qt::LeftButton) {
+        clearExtraCursors();
+        const QTextCursor c = cursorForPosition(event->pos());
+        m_boxSelecting = true;
+        m_boxAnchorLine = c.blockNumber();
+        m_boxAnchorCol  = c.positionInBlock();
+        setTextCursor(c);
+        event->accept();
+        return;
+    }
     clearExtraCursors();
     QPlainTextEdit::mousePressEvent(event);
+}
+
+void CodeEditor::mouseMoveEvent(QMouseEvent* event) {
+    if (m_boxSelecting) {
+        const QTextCursor c = cursorForPosition(event->pos());
+        applyBoxSelection(c.blockNumber(), c.positionInBlock());
+        event->accept();
+        return;
+    }
+    QPlainTextEdit::mouseMoveEvent(event);
+}
+
+void CodeEditor::mouseReleaseEvent(QMouseEvent* event) {
+    if (m_boxSelecting) {
+        m_boxSelecting = false;
+        event->accept();
+        return;
+    }
+    QPlainTextEdit::mouseReleaseEvent(event);
+}
+
+// 依錨點→目前點建立每行一個 QTextCursor（重用多游標基礎建設）
+void CodeEditor::applyBoxSelection(int curLine, int curCol) {
+    QTextDocument* doc = document();
+    QVector<int> lineLengths;
+    lineLengths.reserve(doc->blockCount());
+    for (QTextBlock b = doc->begin(); b.isValid(); b = b.next())
+        lineLengths.append(b.length() - 1);          // 不含區塊結尾換行
+
+    const QList<BoxSelect::Range> ranges =
+        BoxSelect::compute(m_boxAnchorLine, m_boxAnchorCol, curLine, curCol, lineLengths);
+    if (ranges.isEmpty()) return;
+
+    m_extraCursors.clear();
+    bool first = true;
+    for (const BoxSelect::Range& r : ranges) {
+        const QTextBlock blk = doc->findBlockByNumber(r.line);
+        if (!blk.isValid()) continue;
+        QTextCursor cur(doc);
+        cur.setPosition(blk.position() + r.start);
+        cur.setPosition(blk.position() + r.end, QTextCursor::KeepAnchor);
+        if (first) { setTextCursor(cur); first = false; }   // 主游標
+        else       { m_extraCursors.append(cur); }          // 其餘為額外游標
+    }
+    updateExtraHighlights();
+    viewport()->update();
 }
 
 // ----------------------------------------------------------------
