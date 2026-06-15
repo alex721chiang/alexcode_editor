@@ -56,6 +56,7 @@
 #include "GitGutter.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
+#include "TextTools.h"
 #include "Theme.h"
 #include "Portable.h"
 
@@ -764,29 +765,19 @@ void MainWindow::setupUI() {
             c.insertText(fn(e->toPlainText()));
         }
     };
-    auto splitLines = [](const QString& t) { return t.split('\n'); };
-
     QMenu* lineMenu = toolsMenu->addMenu(tr("行整理"));
     lineMenu->addAction(tr("排序（遞增）"), this, [=]() {
-        editorOp([&](const QString& t) { auto L = splitLines(t); std::sort(L.begin(), L.end()); return L.join('\n'); }); });
+        editorOp([](const QString& t) { return TextTools::sortLines(t, false); }); });
     lineMenu->addAction(tr("排序（遞減）"), this, [=]() {
-        editorOp([&](const QString& t) { auto L = splitLines(t); std::sort(L.begin(), L.end(), std::greater<QString>()); return L.join('\n'); }); });
+        editorOp([](const QString& t) { return TextTools::sortLines(t, true); }); });
     lineMenu->addAction(tr("移除重複行"), this, [=]() {
-        editorOp([&](const QString& t) {
-            auto L = splitLines(t); QStringList out; QSet<QString> seen;
-            for (const auto& l : L) if (!seen.contains(l)) { seen.insert(l); out << l; }
-            return out.join('\n'); }); });
+        editorOp([](const QString& t) { return TextTools::removeDuplicateLines(t); }); });
     lineMenu->addAction(tr("移除空白行"), this, [=]() {
-        editorOp([&](const QString& t) {
-            auto L = splitLines(t); QStringList out;
-            for (const auto& l : L) if (!l.trimmed().isEmpty()) out << l;
-            return out.join('\n'); }); });
+        editorOp([](const QString& t) { return TextTools::removeBlankLines(t); }); });
     lineMenu->addAction(tr("反轉行順序"), this, [=]() {
-        editorOp([&](const QString& t) { auto L = splitLines(t); std::reverse(L.begin(), L.end()); return L.join('\n'); }); });
+        editorOp([](const QString& t) { return TextTools::reverseLines(t); }); });
     lineMenu->addAction(tr("修剪行尾空白"), this, [=]() {
-        editorOp([](const QString& t) {
-            static const QRegularExpression re(QStringLiteral("[ \\t]+(?=\\n)|[ \\t]+$"));
-            QString r = t; r.remove(re); return r; }); });
+        editorOp([](const QString& t) { return TextTools::trimTrailingWhitespace(t); }); });
 
     QMenu* jsonMenu = toolsMenu->addMenu(tr("JSON"));
     jsonMenu->addAction(tr("格式化（Pretty）"), this, [=]() {
@@ -825,24 +816,9 @@ void MainWindow::setupUI() {
         editorOp([](const QString& t) {
             return QTextDocumentFragment::fromHtml(t).toPlainText(); }, true); });
     encMenu->addAction(tr("Unicode Escape (\\uXXXX)"), this, [=]() {
-        editorOp([](const QString& t) {
-            QString out;
-            for (const QChar& c : t) {
-                if (c.unicode() < 0x80) out += c;
-                else out += QStringLiteral("\\u%1").arg(c.unicode(), 4, 16, QLatin1Char('0'));
-            }
-            return out; }, true); });
+        editorOp([](const QString& t) { return TextTools::unicodeEscape(t); }, true); });
     encMenu->addAction(tr("Unicode Unescape"), this, [=]() {
-        editorOp([](const QString& t) {
-            static const QRegularExpression re(QStringLiteral("\\\\u([0-9a-fA-F]{4})"));
-            QString out = t;
-            int from = 0;
-            QRegularExpressionMatch m;
-            while ((m = re.match(out, from)).hasMatch()) {
-                out.replace(m.capturedStart(), 6, QChar(ushort(m.captured(1).toUInt(nullptr, 16))));
-                from = m.capturedStart() + 1;
-            }
-            return out; }, true); });
+        editorOp([](const QString& t) { return TextTools::unicodeUnescape(t); }, true); });
 
     toolsMenu->addAction(tr("時間戳 ↔ 時間（選取）"), this, [=]() {
         editorOp([](const QString& t) {
@@ -920,15 +896,9 @@ void MainWindow::setupUI() {
             statusBar()->showMessage(tr("請先選取數字"), 2500);
             return;
         }
-        QString s = e->textCursor().selectedText().trimmed();
-        bool ok = false;
+        const QString s = e->textCursor().selectedText().trimmed();
         qlonglong v = 0;
-        if (s.startsWith("0x", Qt::CaseInsensitive))      v = s.mid(2).toLongLong(&ok, 16);
-        else if (s.startsWith("0b", Qt::CaseInsensitive)) v = s.mid(2).toLongLong(&ok, 2);
-        else if (s.startsWith('0') && s.size() > 1 && !s.contains('.'))
-                                                          v = s.mid(1).toLongLong(&ok, 8);
-        if (!ok) v = s.toLongLong(&ok, 10);
-        if (!ok) { statusBar()->showMessage(tr("無法解析數字：") + s, 3000); return; }
+        if (!TextTools::parseInteger(s, &v)) { statusBar()->showMessage(tr("無法解析數字：") + s, 3000); return; }
         QInputDialog dlg(this);
         dlg.setWindowTitle(tr("底數轉換"));
         dlg.setLabelText(tr("十進位 / 十六進位 / 二進位 / 八進位："));
@@ -941,25 +911,9 @@ void MainWindow::setupUI() {
     // 全形 ↔ 半形
     QMenu* widthMenu = toolsMenu->addMenu(tr("全形半形轉換"));
     widthMenu->addAction(tr("全形 → 半形"), this, [=]() {
-        editorOp([](const QString& t) {
-            QString out;
-            for (QChar c : t) {
-                const ushort u = c.unicode();
-                if (u == 0x3000) out += QChar(' ');
-                else if (u >= 0xFF01 && u <= 0xFF5E) out += QChar(ushort(u - 0xFEE0));
-                else out += c;
-            }
-            return out; }); });
+        editorOp([](const QString& t) { return TextTools::toHalfWidth(t); }); });
     widthMenu->addAction(tr("半形 → 全形"), this, [=]() {
-        editorOp([](const QString& t) {
-            QString out;
-            for (QChar c : t) {
-                const ushort u = c.unicode();
-                if (u == ' ') out += QChar(0x3000);
-                else if (u >= 0x21 && u <= 0x7E) out += QChar(ushort(u + 0xFEE0));
-                else out += c;
-            }
-            return out; }); });
+        editorOp([](const QString& t) { return TextTools::toFullWidth(t); }); });
 
     // 摘要統計
     toolsMenu->addAction(tr("摘要統計（選取或全文）"), this, [this]() {

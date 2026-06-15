@@ -13,6 +13,7 @@ set(SRCS
     LspClient.cpp
     LspManager.cpp
     GitGutter.cpp
+    TextTools.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp
