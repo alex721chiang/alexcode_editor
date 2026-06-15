@@ -973,6 +973,18 @@ void CodeEditor::applyFoldVisibility() {
     lineNumberArea->update();
 }
 
+QList<int> CodeEditor::foldedStartLines() const {
+    QList<int> out;
+    for (const Fold& f : m_folds) out << f.start.blockNumber();
+    return out;
+}
+
+void CodeEditor::applyFolds(const QList<int>& lines) {
+    for (int line : lines)
+        if (foldIndexAtStart(line) < 0)     // 尚未摺疊才摺
+            toggleFoldAt(line);
+}
+
 void CodeEditor::toggleFoldAt(int line) {
     if (m_largeFile) return;
     const int existing = foldIndexAtStart(line);

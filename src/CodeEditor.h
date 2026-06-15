@@ -77,6 +77,8 @@ public:
     void foldCurrentRegion();                    // Ctrl+Shift+[
     void unfoldCurrentRegion();                  // Ctrl+Shift+]
     void lineNumberAreaMousePress(QMouseEvent* e);
+    QList<int> foldedStartLines() const;         // 已摺疊區域的起始行（給 Session 保存）
+    void applyFolds(const QList<int>& lines);    // 還原摺疊（內容載入後呼叫）
 
     // ---- LSP（語言伺服器）----
     void setLspEnabled(bool on) { m_lspEnabled = on && !m_largeFile; }

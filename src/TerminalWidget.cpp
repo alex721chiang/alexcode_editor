@@ -1,9 +1,14 @@
 #include "TerminalWidget.h"
 #include "Theme.h"
+#include "TerminalSelection.h"
 #include <QPainter>
 #include <QKeyEvent>
 #include <QWheelEvent>
+#include <QMouseEvent>
 #include <QFontDatabase>
+#include <QTimer>
+#include <QApplication>
+#include <QClipboard>
 
 TerminalWidget::TerminalWidget(QWidget* parent) : QWidget(parent) {
     QFont f("Consolas");
@@ -17,11 +22,47 @@ TerminalWidget::TerminalWidget(QWidget* parent) : QWidget(parent) {
     m_cellW = fm.horizontalAdvance(QLatin1Char('M'));
     m_cellH = fm.height();
 
+    m_blinkTimer = new QTimer(this);
+    m_blinkTimer->setInterval(530);
+    connect(m_blinkTimer, &QTimer::timeout, this, [this]() {
+        m_cursorOn = !m_cursorOn;
+        update();
+    });
+
     connect(&m_pty, &PtySession::dataReceived, this, [this](const QByteArray& d) {
         m_vt.feed(d);
+        m_cursorOn = true;          // 有輸出時游標亮起
         update();
     });
     connect(&m_pty, &PtySession::exited, this, [this]() { update(); });
+}
+
+QStringList TerminalWidget::visibleLines() const {
+    QStringList out;
+    if (m_scrollOffset == 0) {
+        for (int r = 0; r < m_vt.rows(); ++r) out << m_vt.lineText(r);
+    } else {
+        QStringList all;
+        for (int i = 0; i < m_vt.scrollbackCount(); ++i) all << m_vt.scrollbackLine(i);
+        for (int r = 0; r < m_vt.rows(); ++r) all << m_vt.lineText(r);
+        const int bottom = all.size() - 1 - m_scrollOffset;
+        for (int vr = 0; vr < m_vt.rows(); ++vr) {
+            const int idx = bottom - (m_vt.rows() - 1 - vr);
+            out << ((idx >= 0 && idx < all.size()) ? all[idx] : QString());
+        }
+    }
+    return out;
+}
+
+void TerminalWidget::cellAtPos(const QPoint& pos, int* row, int* col) const {
+    *row = qBound(0, int(pos.y() / m_cellH), m_vt.rows() - 1);
+    *col = qMax(0, int((pos.x() + m_cellW / 2) / m_cellW));
+}
+
+void TerminalWidget::copySelection() const {
+    if (!m_hasSelection) return;
+    const QString text = TermSelection::extractText(visibleLines(), m_selR0, m_selC0, m_selR1, m_selC1);
+    if (!text.isEmpty()) QApplication::clipboard()->setText(text);
 }
 
 void TerminalWidget::startShell(const QString& workingDir) {
@@ -67,7 +108,31 @@ QColor TerminalWidget::ansiColor(int idx, const QColor& fallback) const {
 }
 
 void TerminalWidget::resizeEvent(QResizeEvent*) { recomputeGrid(); }
-void TerminalWidget::focusInEvent(QFocusEvent*) { update(); }
+void TerminalWidget::focusInEvent(QFocusEvent*) { m_cursorOn = true; m_blinkTimer->start(); update(); }
+void TerminalWidget::focusOutEvent(QFocusEvent*) { m_blinkTimer->stop(); m_cursorOn = false; update(); }
+
+void TerminalWidget::mousePressEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton) {
+        m_selecting = true;
+        cellAtPos(e->pos(), &m_selR0, &m_selC0);
+        m_selR1 = m_selR0; m_selC1 = m_selC0;
+        m_hasSelection = false;
+        update();
+    }
+    setFocus();
+}
+
+void TerminalWidget::mouseMoveEvent(QMouseEvent* e) {
+    if (m_selecting) {
+        cellAtPos(e->pos(), &m_selR1, &m_selC1);
+        m_hasSelection = (m_selR0 != m_selR1 || m_selC0 != m_selC1);
+        update();
+    }
+}
+
+void TerminalWidget::mouseReleaseEvent(QMouseEvent* e) {
+    if (e->button() == Qt::LeftButton) m_selecting = false;
+}
 
 void TerminalWidget::wheelEvent(QWheelEvent* e) {
     const int lines = e->angleDelta().y() / 40;     // 每刻度約 3 行
@@ -99,21 +164,30 @@ void TerminalWidget::paintEvent(QPaintEvent*) {
                 }
             }
         }
-        // 游標（外框）
-        p.setPen(QColor(Theme::LINE_NUM_ACTIVE));
-        p.drawRect(QRectF(m_vt.cursorCol() * m_cellW, m_vt.cursorRow() * m_cellH,
-                          m_cellW, m_cellH));
+        // 游標（外框；閃爍、僅在焦點時亮）
+        if (m_cursorOn && hasFocus()) {
+            p.setPen(QColor(Theme::LINE_NUM_ACTIVE));
+            p.drawRect(QRectF(m_vt.cursorCol() * m_cellW, m_vt.cursorRow() * m_cellH,
+                              m_cellW, m_cellH));
+        }
     } else {
-        // 捲動回看：以純文字呈現 scrollback + 目前畫面的最後 rows 行
-        QStringList all;
-        for (int i = 0; i < m_vt.scrollbackCount(); ++i) all << m_vt.scrollbackLine(i);
-        for (int r = 0; r < rows; ++r) all << m_vt.lineText(r);
-        const int bottom = all.size() - 1 - m_scrollOffset;
+        // 捲動回看：以純文字呈現
+        const QStringList vis = visibleLines();
         p.setPen(defFg);
-        for (int vr = 0; vr < rows; ++vr) {
-            const int idx = bottom - (rows - 1 - vr);
-            if (idx >= 0 && idx < all.size())
-                p.drawText(QPointF(0, vr * m_cellH + asc), all[idx]);
+        for (int vr = 0; vr < vis.size(); ++vr)
+            p.drawText(QPointF(0, vr * m_cellH + asc), vis[vr]);
+    }
+
+    // 選取範圍標示（半透明）
+    if (m_hasSelection) {
+        int r0 = m_selR0, c0 = m_selC0, r1 = m_selR1, c1 = m_selC1;
+        TermSelection::normalize(r0, c0, r1, c1);
+        QColor sel(Theme::SEARCH_MATCH_BG); sel.setAlpha(120);
+        for (int r = r0; r <= r1; ++r) {
+            const int from = (r == r0) ? c0 : 0;
+            const int to   = (r == r1) ? c1 : cols;
+            if (to > from)
+                p.fillRect(QRectF(from * m_cellW, r * m_cellH, (to - from) * m_cellW, m_cellH), sel);
         }
     }
 }
@@ -122,6 +196,17 @@ void TerminalWidget::keyPressEvent(QKeyEvent* e) {
     QByteArray seq;
     const int k = e->key();
     const Qt::KeyboardModifiers m = e->modifiers();
+
+    // 複製 / 貼上（Ctrl+Shift+C / Ctrl+Shift+V）優先於 Ctrl+字母（避免被當成 0x03 中斷）
+    if ((m & Qt::ControlModifier) && (m & Qt::ShiftModifier)) {
+        if (k == Qt::Key_C) { copySelection(); e->accept(); return; }
+        if (k == Qt::Key_V) {
+            const QString clip = QApplication::clipboard()->text();
+            if (!clip.isEmpty()) { m_scrollOffset = 0; m_pty.writeData(clip.toUtf8()); }
+            e->accept();
+            return;
+        }
+    }
 
     if ((m & Qt::ControlModifier) && k >= Qt::Key_A && k <= Qt::Key_Z) {
         seq.append(static_cast<char>(k - Qt::Key_A + 1));     // Ctrl+A..Z → 0x01..0x1a
@@ -143,6 +228,7 @@ void TerminalWidget::keyPressEvent(QKeyEvent* e) {
     }
     if (!seq.isEmpty()) {
         m_scrollOffset = 0;          // 鍵入時跳回底部
+        if (m_hasSelection) { m_hasSelection = false; }   // 鍵入清除選取
         m_pty.writeData(seq);
         e->accept();
     } else {

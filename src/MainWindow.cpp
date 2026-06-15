@@ -2208,6 +2208,9 @@ void MainWindow::saveSession() {
         QJsonArray bms;
         for (int ln : editor->bookmarkedLines()) bms.append(ln);
         t["bookmarks"] = bms;
+        QJsonArray folds;
+        for (int ln : editor->foldedStartLines()) folds.append(ln);
+        t["folds"] = folds;
         // 未儲存內容（含 Untitled）→ 快照
         if (editor->document()->isModified() || t["filePath"].toString().isEmpty()) {
             const QString backupFile = backupDir + QString("/tab_%1.txt").arg(i);
@@ -2223,6 +2226,7 @@ void MainWindow::saveSession() {
     root["tabs"] = tabs;
     root["currentIndex"] = tabWidget->currentIndex();
     root["projectFolder"] = projectFolder;
+    root["terminalOpen"] = (termDock && termDock->isVisible());
 
     QFile f(sessionDir() + "/session.json");
     if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(root).toJson());
@@ -2279,9 +2283,18 @@ void MainWindow::restoreSession() {
         QList<int> bms;
         for (const QJsonValue& b : t["bookmarks"].toArray()) bms << b.toInt();
         editor->setBookmarkedLines(bms);
+        // 還原摺疊區域（內容已載入）
+        QList<int> folds;
+        for (const QJsonValue& fv : t["folds"].toArray()) folds << fv.toInt();
+        if (!folds.isEmpty()) editor->applyFolds(folds);
     }
     const int idx = root["currentIndex"].toInt();
     if (idx >= 0 && idx < tabWidget->count()) tabWidget->setCurrentIndex(idx);
+    // 還原終端機開啟狀態
+    if (root["terminalOpen"].toBool() && termDock) {
+        termDock->show();
+        terminal->startShell(projectFolder);
+    }
     statusBar()->showMessage(tr("已還原上次工作階段（%1 個分頁）").arg(tabs.size()), 4000);
 }
 
