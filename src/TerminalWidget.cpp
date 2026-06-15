@@ -33,6 +33,13 @@ void TerminalWidget::startShell(const QString& workingDir) {
     const QString shell = QStringLiteral("/bin/bash");
 #endif
     m_started = m_pty.start(shell, workingDir, m_vt.cols(), m_vt.rows());
+    if (!m_started) {
+        // 啟動失敗時於畫面顯示訊息，而非靜默
+        m_vt.feed(QByteArray("\r\n  [無法啟動終端機：找不到或無法執行 ")
+                  + shell.toUtf8() + "]\r\n"
+                  + "  [Failed to start terminal shell: " + shell.toUtf8() + "]\r\n");
+        update();
+    }
     setFocus();
 }
 

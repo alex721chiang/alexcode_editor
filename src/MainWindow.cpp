@@ -2619,6 +2619,10 @@ void MainWindow::runCommand(const QString& cmd) {
             outputView->appendPlainText(tr("[完成，exit code %1]\n").arg(code));
             updateGitStatus();
         });
+        connect(taskProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError err) {
+            if (err == QProcess::FailedToStart)
+                outputView->appendPlainText(tr("[無法啟動指令：找不到直譯器或權限不足]\n"));
+        });
     }
     QString wd = projectFolder;
     if (wd.isEmpty() && activeEditor())

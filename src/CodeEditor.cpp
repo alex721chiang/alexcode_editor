@@ -475,13 +475,8 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
         return;                                  // 觸發字元交給 LSP，不再觸發 AI 補全
     }
 
-    // AI 補全觸發：輸入 '.' 或 Ctrl+Space
-    if (aiProvider && (e->text() == "." || ((e->modifiers() & Qt::ControlModifier) && e->key() == Qt::Key_Space))) {
-        QTextCursor cursor = textCursor();
-        cursor.movePosition(QTextCursor::Start, QTextCursor::KeepAnchor);
-        QString context = cursor.selectedText().right(2000);
-        aiProvider->requestCompletion(context);
-    }
+    // 補全已由 LSP（啟用時）與本地智慧補全（Ctrl+Space，見上方）負責。
+    // 雲端 AICompletionProvider 為「選項 B」未來骨架，預設不自動觸發（避免對未啟動的本機/雲端 API 發無謂請求）。
 }
 
 void CodeEditor::handleAutoIndent() {

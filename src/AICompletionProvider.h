@@ -6,7 +6,11 @@
 #include <QStringList>
 
 /**
- * @brief AICompletionProvider 負責串接本地 LM Studio (Gemma 4) 或雲端 OpenAI 格式的 API
+ * @brief AICompletionProvider — 雲端/本機 LLM 補全（OpenAI 相容 API，如 LM Studio）。
+ *
+ * 【選項 B 未來骨架，預設未啟用】目前日常補全由 LSP（啟用時）與離線 LocalCompletion
+ * （Ctrl+Space）負責；此類別保留作為未來「雲端 AI 補全/對話式輔助」的接點，預設不會自動
+ * 發送請求（CodeEditor 不再於輸入時呼叫 requestCompletion）。要啟用雲端 AI 時再接回觸發點。
  */
 class AICompletionProvider : public QObject {
     Q_OBJECT
