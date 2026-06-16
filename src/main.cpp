@@ -45,16 +45,20 @@ int main(int argc, char *argv[]) {
     // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
     const QStringList args = a.arguments();
-    QString shotPath, termCmd, settingsShot;
+    QString shotPath, termCmd, settingsShot, aboutShot;
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == "--screenshot" && i + 1 < args.size()) shotPath = args[++i];
         else if (args[i] == "--termcmd" && i + 1 < args.size()) termCmd = args[++i];
         else if (args[i] == "--settings-shot" && i + 1 < args.size()) settingsShot = args[++i];
+        else if (args[i] == "--about-shot" && i + 1 < args.size()) aboutShot = args[++i];
         else if (QFileInfo::exists(args[i]))
             QMetaObject::invokeMethod(&w, "openFileByPath", Q_ARG(QString, args[i]));
     }
 
-    if (!settingsShot.isEmpty()) {            // 截設定中心對話框
+    if (!aboutShot.isEmpty()) {               // 截關於對話框
+        w.openAboutForShot(aboutShot);
+        QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
+    } else if (!settingsShot.isEmpty()) {     // 截設定中心對話框
         w.resize(1200, 800);
         w.openSettingsForShot(settingsShot);
         QTimer::singleShot(1600, &a, [&a]() { a.quit(); });

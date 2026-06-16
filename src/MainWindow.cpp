@@ -60,6 +60,7 @@
 #include "SettingsDialog.h"
 #include "Theme.h"
 #include "Portable.h"
+#include "Version.h"
 
 // 2.3c 檔案樹 git 染色：修改＝黃、未追蹤＝青（色票同 git gutter）
 class GitFileSystemModel : public QFileSystemModel {
@@ -87,7 +88,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupUI();
     setupStatusBar();
     setAcceptDrops(true);
-    setWindowTitle("AlexCode — Neon Edition");
+    setWindowTitle(QStringLiteral("AlexCode v%1 — Neon Edition").arg(ALEXCODE_VERSION));
     resize(1100, 720);
 
     AppSettings settings;
@@ -1074,6 +1075,9 @@ void MainWindow::setupUI() {
     viewMenu->addAction(zoomResetAction);
     viewMenu->addSeparator();
     viewMenu->addAction(prefsAction);
+
+    QMenu* helpMenu = menuBar->addMenu(tr("Help"));
+    helpMenu->addAction(tr("關於 AlexCode"), this, [this]() { showAbout(); });
 
     setupToolBar();
 
@@ -2476,6 +2480,29 @@ void MainWindow::openSettingsForShot(const QString& outPng) {
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->show();
     QTimer::singleShot(900, dlg, [dlg, outPng]() { dlg->grab().save(outPng); });
+}
+
+static QString aboutHtml() {
+    return QObject::tr(
+        "<h3>AlexCode v%1 — Neon Edition</h3>"
+        "<p>輕量級 Qt 程式碼編輯器：LSP、Git、互動式終端機、多語言語法高亮、"
+        "log 分析、多套主題、繁中/英文介面。</p>"
+        "<p>以 Qt %2 建置。</p>"
+        "<p><a href=\"https://github.com/alex721chiang/alexcode_editor\">GitHub 專案</a></p>")
+        .arg(QStringLiteral(ALEXCODE_VERSION), QStringLiteral(QT_VERSION_STR));
+}
+
+void MainWindow::showAbout() {
+    QMessageBox::about(this, tr("關於 AlexCode"), aboutHtml());
+}
+
+void MainWindow::openAboutForShot(const QString& outPng) {
+    auto* box = new QMessageBox(QMessageBox::Information, tr("關於 AlexCode"), aboutHtml(),
+                                QMessageBox::Ok, this);
+    box->setTextFormat(Qt::RichText);
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->show();
+    QTimer::singleShot(700, box, [box, outPng]() { box->grab().save(outPng); });
 }
 
 void MainWindow::showSettingsCenter() {

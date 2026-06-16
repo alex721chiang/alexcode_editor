@@ -26,7 +26,11 @@ if(WIN32)
     set(SRCS ${SRCS} alexcode.rc)
 endif()
 
+# 版本標頭（由 project() 版本產生），供關於對話框/標題使用
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/Version.h @ONLY)
+
 add_executable(AlexCode WIN32 ${SRCS})
+target_include_directories(AlexCode PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(AlexCode PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Core5Compat)
 
 # ConPTY（CreatePseudoConsole/HPCON）於 Win10 1809(RS5) 加入；MinGW 以 NTDDI_VERSION 把關

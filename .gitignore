@@ -9,6 +9,9 @@ aqtinstall.log
 # Portable-mode runtime data
 data/
 
+# 打包輸出
+dist/
+
 # Editor / OS cruft
 .DS_Store
 *.user

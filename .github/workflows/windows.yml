@@ -3,8 +3,12 @@ name: Windows Build
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]            # 推 v* 標籤時建立 Release
   pull_request:
     branches: [ main ]
+
+permissions:
+  contents: write            # 建立 Release 需要
 
 jobs:
   build:
@@ -41,3 +45,18 @@ jobs:
       with:
         name: AlexCode-Windows
         path: build/src/Release/
+
+    # 以下僅在推 v* 標籤時執行：打包 zip 並建立 GitHub Release
+    - name: Package zip
+      if: startsWith(github.ref, 'refs/tags/')
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force dist | Out-Null
+        Compress-Archive -Path build/src/Release/* -DestinationPath "dist/AlexCode-Windows-${{ github.ref_name }}.zip"
+
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/AlexCode-Windows-${{ github.ref_name }}.zip
+        generate_release_notes: true

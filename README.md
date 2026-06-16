@@ -113,6 +113,24 @@ Windows（MinGW + Qt 6.8.3）打包可攜版：
 windeployqt --release --compiler-runtime build\src\AlexCode.exe
 ```
 
+## 打包與發佈
+
+版本號統一在 `CMakeLists.txt` 的 `project(AlexCode VERSION x.y.z)`，建置時產生 `Version.h`，
+顯示於視窗標題與「關於 AlexCode」對話框（Help 選單）。
+
+一鍵打包可攜 zip：
+```powershell
+pwsh scripts/package.ps1 -QtDir C:\Qt\6.8.3\mingw_64
+# → dist\AlexCode-Windows-vX.Y.Z.zip（已含全部 DLL 與 portable.ini）
+```
+
+**自動發佈**：推送 `v*` 標籤（如 `git tag v4.4.0 && git push origin v4.4.0`）會觸發
+GitHub Actions 建置、打包 zip，並建立 GitHub Release 附上該 zip。
+
+**程式碼簽章（未內建）**：要消除「未知發行者」警告需 Authenticode 憑證，取得後可用
+`signtool sign /fd SHA256 /tr <時間戳記伺服器> /td SHA256 /f cert.pfx /p <密碼> AlexCode.exe` 簽署；
+CI 中則把憑證放 GitHub Secrets 後於 release 前加一步簽章。本專案預設不簽。
+
 ## 測試
 ```bash
 cd build && ctest   # 或直接執行 ./tests/AlexCodeTests

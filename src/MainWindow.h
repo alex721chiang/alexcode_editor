@@ -35,6 +35,7 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     void openTerminalForShot(const QString& cmd);   // 截圖模式：開終端機並（可選）執行指令
     void openSettingsForShot(const QString& outPng); // 截圖模式：開設定中心並存圖
+    void openAboutForShot(const QString& outPng);    // 截圖模式：開關於對話框並存圖
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -72,6 +73,7 @@ private slots:
     void navigateForward();
     void showPreferences();
     void showSettingsCenter();   // 圖形設定中心（LSP/Snippet/快捷鍵）
+    void showAbout();            // 關於 AlexCode
     void showDiff(const QString& titleA, const QString& a,
                   const QString& titleB, const QString& b);
     void runExternalTool();
