@@ -377,7 +377,7 @@ void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& file
         commentPrefix = "#";
     editor->setProperty("language", SyntaxHighlighter::languageName(lang));
     editor->setCommentPrefix(commentPrefix);
-    editor->setSyntaxLanguage(lang);                // 重用編輯器自有 highlighter（含 Unknown 清空）
+    editor->setSyntaxLanguage(lang, filePath);      // 支援語言用 tree-sitter，其餘 regex（含 Unknown 清空）
     applySnippetsToEditor(editor);                  // 語言確定後注入對應 snippet
     updateStatusBar();
 }

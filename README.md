@@ -26,7 +26,9 @@ Qt 6 程式碼編輯器，目標是接近 Notepad++ 的日常編輯體驗，並�
 Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF 偵測切換、大檔案模式（>50MB 自動降級）。
 
 ### 語法高亮
-依副檔名自動選擇：C/C++、Python、JavaScript/TypeScript、JSON、XML/HTML、Markdown、CMake、Shell。
+**tree-sitter 語法樹高亮**（C/C++、Python、JavaScript/TypeScript、JSON）：解析整份文件的語法樹，
+依節點型別精準上色（理解巢狀結構、字串/註解邊界、模板/泛型），比正規表示式更準確；
+其餘語言（XML/HTML、Markdown、CMake、Shell…）沿用內建 regex 高亮器。
 色票跟隨目前主題（Neon Grid / Paper Light / Matrix），切換主題即時重繪。
 
 ### 進階編輯

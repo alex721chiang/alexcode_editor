@@ -15,8 +15,10 @@
 #include <QToolTip>
 #include <QHelpEvent>
 #include <algorithm>
+#include <QFileInfo>
 #include "BoxSelect.h"
 #include "LocalCompletion.h"
+#include "TreeSitterHighlighter.h"
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
 #include "CallGraphWidget.h"
@@ -43,6 +45,32 @@ CodeEditor::CodeEditor(QWidget *parent) : QPlainTextEdit(parent) {
     updateLineNumberAreaWidth(0);
     updateExtraHighlights();
     setupCompleter();
+}
+
+void CodeEditor::setSyntaxLanguage(SyntaxHighlighter::Language lang, const QString& filePath) {
+    const QString ext = filePath.isEmpty() ? QString() : QFileInfo(filePath).suffix();
+    const TreeSitterHighlighter::Lang tsl =
+        m_largeFile ? TreeSitterHighlighter::Lang::None
+                    : TreeSitterHighlighter::langForExtension(ext);
+
+    if (tsl != TreeSitterHighlighter::Lang::None) {
+        // 支援語言 → 改用 tree-sitter，卸下 regex 高亮（同一文件只留一個高亮器）
+        if (highlighter) highlighter->setDocument(nullptr);
+        if (!tsHighlighter) tsHighlighter = new TreeSitterHighlighter(this);
+        tsHighlighter->attach(document());
+        tsHighlighter->setLanguage(tsl);
+    } else {
+        if (tsHighlighter) tsHighlighter->detach();
+        if (highlighter) {
+            if (highlighter->document() != document()) highlighter->setDocument(document());
+            highlighter->setLanguage(lang);
+        }
+    }
+}
+
+void CodeEditor::refreshSyntaxTheme() {
+    if (tsHighlighter && tsHighlighter->document()) tsHighlighter->refreshTheme();
+    if (highlighter && highlighter->document()) highlighter->refreshTheme();
 }
 
 int CodeEditor::lineNumberAreaWidth() {

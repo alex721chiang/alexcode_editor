@@ -60,9 +60,9 @@ public:
     // 大檔案模式（停用高亮/補全/括號配對）
     void setLargeFileMode(bool on) { m_largeFile = on; }
 
-    // 語法高亮（重用編輯器自有的 highlighter，避免在同一文件重複附掛）
-    void setSyntaxLanguage(SyntaxHighlighter::Language lang) { if (highlighter) highlighter->setLanguage(lang); }
-    void refreshSyntaxTheme() { if (highlighter) highlighter->refreshTheme(); }
+    // 語法高亮：支援的語言用 tree-sitter，其餘用 regex SyntaxHighlighter
+    void setSyntaxLanguage(SyntaxHighlighter::Language lang, const QString& filePath = QString());
+    void refreshSyntaxTheme();
 
     // ---- Snippet 樣板（trigger + Tab 展開）----
     void setSnippets(const QHash<QString, QString>& snippets) { m_snippets = snippets; }
@@ -131,6 +131,7 @@ private:
 
     QWidget *lineNumberArea;
     SyntaxHighlighter *highlighter;
+    class TreeSitterHighlighter* tsHighlighter = nullptr;   // 支援語言時改用
     AICompletionProvider *aiProvider = nullptr;
     SuggestionWidget *suggestionWidget = nullptr;
     QRegularExpression m_searchPattern;

@@ -15,6 +15,7 @@ set(SRCS
     GitGutter.cpp
     TextTools.cpp
     SettingsDialog.cpp
+    TreeSitterHighlighter.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp
@@ -30,8 +31,8 @@ endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Version.h.in ${CMAKE_CURRENT_BINARY_DIR}/Version.h @ONLY)
 
 add_executable(AlexCode WIN32 ${SRCS})
-target_include_directories(AlexCode PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(AlexCode PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Core5Compat)
+target_include_directories(AlexCode PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${TREESITTER_INCLUDE})
+target_link_libraries(AlexCode PRIVATE Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Core5Compat ${TREESITTER_LIBS})
 
 # ConPTY（CreatePseudoConsole/HPCON）於 Win10 1809(RS5) 加入；MinGW 以 NTDDI_VERSION 把關
 if(WIN32)
