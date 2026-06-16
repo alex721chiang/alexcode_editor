@@ -65,6 +65,14 @@ void LspManager::setRootPath(const QString& path) {
     emit statusChanged();
 }
 
+void LspManager::reloadConfig() {
+    for (LspClient* c : m_clients) { c->shutdown(); c->deleteLater(); }
+    m_clients.clear();
+    m_configs.clear();
+    loadConfig();
+    emit statusChanged();
+}
+
 int LspManager::configIndexForFile(const QString& path) const {
     const QString ext = QFileInfo(path).suffix().toLower();
     if (ext.isEmpty()) return -1;

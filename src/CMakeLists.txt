@@ -14,6 +14,7 @@ set(SRCS
     LspManager.cpp
     GitGutter.cpp
     TextTools.cpp
+    SettingsDialog.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

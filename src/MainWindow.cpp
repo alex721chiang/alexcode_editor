@@ -57,6 +57,7 @@
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
+#include "SettingsDialog.h"
 #include "Theme.h"
 #include "Portable.h"
 
@@ -1011,6 +1012,8 @@ void MainWindow::setupUI() {
                                      tr("次數："), 10, 1, 10000, 1, &ok);
         if (ok) e->playMacro(n);
     });
+
+    toolsMenu->addAction(tr("設定中心（LSP / Snippet / 快捷鍵）…"), this, [this]() { showSettingsCenter(); });
 
     QMenu* extMenu = toolsMenu->addMenu(tr("外部工具"));
     extMenu->addAction(tr("執行外部工具…"), this, [this]() { runExternalTool(); });
@@ -2453,6 +2456,42 @@ void MainWindow::reloadWithEncoding(const QString& enc) {
 // ----------------------------------------------------------------
 // 設定中心（Phase 0 精簡版）
 // ----------------------------------------------------------------
+// 蒐集有快捷鍵的動作（名稱去重，與 applyKeymap 同邏輯）
+static QList<QPair<QString, QString>> gatherShortcutActions(const QObject* w) {
+    QList<QPair<QString, QString>> actions;
+    QSet<QString> seen;
+    for (QAction* a : w->findChildren<QAction*>()) {
+        if (a->text().isEmpty() || a->shortcut().isEmpty()) continue;
+        const QString name = QString(a->text()).remove(QLatin1Char('&'));
+        if (seen.contains(name)) continue;
+        seen.insert(name);
+        actions.append({name, a->shortcut().toString()});
+    }
+    return actions;
+}
+
+void MainWindow::openSettingsForShot(const QString& outPng) {
+    auto* dlg = new SettingsDialog(LspManager::configFilePath(), snippetConfigPath(),
+                                   keymapConfigPath(), gatherShortcutActions(this), this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+    QTimer::singleShot(900, dlg, [dlg, outPng]() { dlg->grab().save(outPng); });
+}
+
+void MainWindow::showSettingsCenter() {
+    applyKeymap();          // 確保快捷鍵模板已存在
+    SettingsDialog dlg(LspManager::configFilePath(), snippetConfigPath(),
+                       keymapConfigPath(), gatherShortcutActions(this), this);
+    if (dlg.exec() != QDialog::Accepted) return;
+    dlg.save();
+    lsp->reloadConfig();
+    loadSnippets();
+    for (int i = 0; i < tabWidget->count(); ++i)
+        applySnippetsToEditor(qobject_cast<CodeEditor*>(tabWidget->widget(i)));
+    applyKeymap();
+    statusBar()->showMessage(tr("設定已套用"), 3000);
+}
+
 void MainWindow::showPreferences() {
     AppSettings settings;
     QDialog dlg(this);

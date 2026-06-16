@@ -14,6 +14,7 @@ public:
     ~LspManager() override;
 
     void setRootPath(const QString& path);          // 專案根目錄（重啟所有伺服器）
+    void reloadConfig();                             // 重讀 alexcode-lsp.json（設定 UI 存檔後）
     static QString configFilePath();
     QString languageIdForFile(const QString& path) const;   // 空字串 = 無對應伺服器
 
