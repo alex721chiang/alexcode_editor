@@ -99,6 +99,7 @@ signals:
     void lspReferencesRequested(int line, int character);
     void lspRenameRequested(int line, int character);
     void lspFormatRequested();
+    void wikilinkActivated(const QString& target);       // Ctrl+點擊 [[…]]（Markdown 導覽）
 
 protected:
     bool event(QEvent* e) override;                      // QEvent::ToolTip → 診斷 / hover
@@ -127,6 +128,7 @@ private:
     void setupCompleter();
     void rebuildCompleterModel();
     QString wordUnderCursor() const;
+    QString wikilinkAt(const QPoint& pos) const;         // 位置落在 [[target]] 內則回傳 target
     void triggerLocalCompletion();          // 離線智慧補全（LSP 未啟用時的 Ctrl+Space）
 
     QWidget *lineNumberArea;

@@ -820,7 +820,40 @@ void CodeEditor::paintEvent(QPaintEvent* event) {
     }
 }
 
+// 位置落在某個 [[target]] 內 → 回傳去掉 alias/heading 的 target；否則空字串。
+QString CodeEditor::wikilinkAt(const QPoint& pos) const {
+    const QTextCursor c = cursorForPosition(pos);
+    const QString line = c.block().text();
+    const int col = c.positionInBlock();
+    int from = 0;
+    while (true) {
+        const int open = line.indexOf(QStringLiteral("[["), from);
+        if (open < 0) break;
+        const int close = line.indexOf(QStringLiteral("]]"), open + 2);
+        if (close < 0) break;
+        if (col >= open && col <= close + 2) {
+            QString inner = line.mid(open + 2, close - (open + 2));
+            const int bar = inner.indexOf(QLatin1Char('|'));
+            if (bar >= 0) inner = inner.left(bar);
+            const int hash = inner.indexOf(QLatin1Char('#'));
+            if (hash >= 0) inner = inner.left(hash);
+            return inner.trimmed();
+        }
+        from = close + 2;
+    }
+    return QString();
+}
+
 void CodeEditor::mousePressEvent(QMouseEvent* event) {
+    // Ctrl + 左鍵：若落在 [[wikilink]] 上 → 發出導覽訊號（Markdown）
+    if ((event->modifiers() & Qt::ControlModifier) && event->button() == Qt::LeftButton) {
+        const QString target = wikilinkAt(event->pos());
+        if (!target.isEmpty()) {
+            emit wikilinkActivated(target);
+            event->accept();
+            return;
+        }
+    }
     // Alt + 左鍵：開始矩形（欄位）選取
     if (!m_largeFile && (event->modifiers() & Qt::AltModifier)
         && event->button() == Qt::LeftButton) {

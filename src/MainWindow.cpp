@@ -48,11 +48,13 @@
 #include <QXmlStreamWriter>
 #include <QCryptographicHash>
 #include <QTextBrowser>
+#include <QListWidget>
 #include <QSpinBox>
 #include <QFormLayout>
 #include <QDialogButtonBox>
 #include "AICompletionProvider.h"
 #include "LspManager.h"
+#include "MarkdownLinkIndex.h"
 #include "GitGutter.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
@@ -429,6 +431,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
         lsp->requestFormatting(editor->property("filePath").toString(),
                                settings.value("editor/tabWidth", 4).toInt(), true);
     });
+    connect(editor, &CodeEditor::wikilinkActivated, this, &MainWindow::openOrCreateWikilink);
     connect(editor, &QPlainTextEdit::textChanged, this, [this, editor]() {
         if (editor->lspEnabled()) {
             if (!lspDirtyEditors.contains(editor)) lspDirtyEditors.append(editor);
@@ -1058,6 +1061,16 @@ void MainWindow::setupUI() {
         if (on) refreshMarkdownPreview();
     });
     viewMenu->addAction(mdAction);
+    QAction* backlinksAction = new QAction(tr("Backlinks（反向連結）"), this);
+    backlinksAction->setCheckable(true);
+    connect(backlinksAction, &QAction::toggled, this, [this](bool on) {
+        backlinksDock->setVisible(on);
+        if (on) { rebuildLinkIndex(); refreshBacklinks(); }
+    });
+    connect(backlinksDock, &QDockWidget::visibilityChanged, this, [backlinksAction](bool v) {
+        if (backlinksAction->isChecked() != v) backlinksAction->setChecked(v);
+    });
+    viewMenu->addAction(backlinksAction);
     QAction* termAction = new QAction(tr("終端機"), this);
     termAction->setCheckable(true);
     termAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));   // Ctrl+`
@@ -1137,6 +1150,17 @@ void MainWindow::setupUI() {
     mdTimer->setInterval(500);
     connect(mdTimer, &QTimer::timeout, this, &MainWindow::refreshMarkdownPreview);
 
+    // ---------- Backlinks（Obsidian 風：誰連到目前這篇）----------
+    mdLinkIndex = new MarkdownLinkIndex();
+    backlinksDock = new QDockWidget(tr("BACKLINKS — 反向連結"), this);
+    backlinksList = new QListWidget(this);
+    backlinksDock->setWidget(backlinksList);
+    addDockWidget(Qt::RightDockWidgetArea, backlinksDock);
+    backlinksDock->hide();
+    connect(backlinksList, &QListWidget::itemActivated, this, [this](QListWidgetItem* it) {
+        if (it) openFileByPath(it->data(Qt::UserRole).toString());
+    });
+
     // ---------- 互動式終端機（ConPTY；首次顯示時才啟動 shell）----------
     termDock = new QDockWidget("TERMINAL", this);
     terminal = new TerminalWidget(this);
@@ -1159,6 +1183,7 @@ void MainWindow::setupUI() {
     connect(tabWidget, &QTabWidget::currentChanged, this, [this](int) {
         syncSplitView();
         refreshMarkdownPreview();
+        refreshBacklinks();
     });
 
     // ---------- 輸出面板（終端機 v1：指令執行 + 輸出 + 點錯誤跳行）----------
@@ -2124,7 +2149,70 @@ void MainWindow::setProjectFolder(const QString& folder) {
     }
     updateLspStatus();
 
+    rebuildLinkIndex();                                 // 重建 Markdown 連結關係圖
     statusBar()->showMessage("Folder: " + folder, 3000);
+}
+
+void MainWindow::openVaultForShot(const QString& folder) {
+    setProjectFolder(folder);
+    if (backlinksDock) { backlinksDock->show(); refreshBacklinks(); }
+}
+
+void MainWindow::rebuildLinkIndex() {
+    if (!mdLinkIndex) return;
+    if (projectFolder.isEmpty()) return;
+    mdLinkIndex->build(projectFolder);
+    refreshBacklinks();
+}
+
+void MainWindow::refreshBacklinks() {
+    if (!backlinksList || !mdLinkIndex) return;
+    backlinksList->clear();
+    CodeEditor* e = activeEditor();
+    const QString path = e ? e->property("filePath").toString() : QString();
+    const bool isMd = path.endsWith(QLatin1String(".md"), Qt::CaseInsensitive)
+                   || path.endsWith(QLatin1String(".markdown"), Qt::CaseInsensitive);
+    if (!isMd) {
+        auto* it = new QListWidgetItem(tr("（非 Markdown 檔）"));
+        it->setFlags(Qt::NoItemFlags);
+        backlinksList->addItem(it);
+        return;
+    }
+    const QStringList back = mdLinkIndex->backlinks(QFileInfo(path).absoluteFilePath());
+    if (back.isEmpty()) {
+        auto* it = new QListWidgetItem(tr("（沒有其他檔連到這篇）"));
+        it->setFlags(Qt::NoItemFlags);
+        backlinksList->addItem(it);
+        return;
+    }
+    for (const QString& src : back) {
+        auto* it = new QListWidgetItem(QFileInfo(src).fileName());
+        it->setData(Qt::UserRole, src);
+        it->setToolTip(src);
+        backlinksList->addItem(it);
+    }
+}
+
+void MainWindow::openOrCreateWikilink(const QString& target) {
+    if (!mdLinkIndex) return;
+    QString resolved = mdLinkIndex->resolve(target);
+    if (resolved.isEmpty()) {
+        // vault 內找不到 → 在 projectFolder 建立新筆記（Obsidian 行為）
+        if (projectFolder.isEmpty()) {
+            statusBar()->showMessage(tr("找不到 [[%1]]，且尚未開啟資料夾").arg(target), 4000);
+            return;
+        }
+        QString name = target;
+        if (!name.endsWith(QLatin1String(".md"), Qt::CaseInsensitive)) name += QStringLiteral(".md");
+        resolved = QDir(projectFolder).absoluteFilePath(name);
+        QFile f(resolved);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            f.write(QStringLiteral("# %1\n\n").arg(target).toUtf8());
+            f.close();
+        }
+        rebuildLinkIndex();
+    }
+    openFileByPath(resolved);
 }
 
 void MainWindow::showQuickOpen() {
