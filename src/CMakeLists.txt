@@ -17,6 +17,8 @@ set(SRCS
     SettingsDialog.cpp
     TreeSitterHighlighter.cpp
     MarkdownLinkIndex.cpp
+    GraphLayout.cpp
+    GraphView.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

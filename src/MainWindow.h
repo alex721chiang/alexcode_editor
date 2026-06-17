@@ -226,8 +226,14 @@ private:
     void rebuildLinkIndex();                          // 掃 projectFolder 重建索引
     void refreshBacklinks();                          // 依目前檔顯示反向連結
     void openOrCreateWikilink(const QString& target); // 解析→開啟；不存在→於 vault 建立
+
+    // Markdown 關係圖（Obsidian 風）
+    QDockWidget* graphDock = nullptr;
+    class GraphView* graphView = nullptr;
+    void showGraphView();                             // 以 mdLinkIndex 填入節點/邊
 public:
     void openVaultForShot(const QString& folder);     // 截圖用：設資料夾並顯示 backlinks
+    void openGraphForShot(const QString& folder);     // 截圖用：設資料夾並顯示關係圖
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）

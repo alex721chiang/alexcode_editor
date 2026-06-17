@@ -45,17 +45,20 @@ int main(int argc, char *argv[]) {
     // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
     const QStringList args = a.arguments();
-    QString shotPath, termCmd, settingsShot, aboutShot, vaultDir;
+    QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir;
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == "--screenshot" && i + 1 < args.size()) shotPath = args[++i];
         else if (args[i] == "--termcmd" && i + 1 < args.size()) termCmd = args[++i];
         else if (args[i] == "--settings-shot" && i + 1 < args.size()) settingsShot = args[++i];
         else if (args[i] == "--about-shot" && i + 1 < args.size()) aboutShot = args[++i];
         else if ((args[i] == "--folder" || args[i] == "--vault") && i + 1 < args.size()) vaultDir = args[++i];
+        else if (args[i] == "--graph" && i + 1 < args.size()) graphDir = args[++i];
         else if (QFileInfo(args[i]).isFile())
             QMetaObject::invokeMethod(&w, "openFileByPath", Q_ARG(QString, args[i]));
     }
-    if (!vaultDir.isEmpty() && QFileInfo(vaultDir).isDir())
+    if (!graphDir.isEmpty() && QFileInfo(graphDir).isDir())
+        w.openGraphForShot(graphDir);
+    else if (!vaultDir.isEmpty() && QFileInfo(vaultDir).isDir())
         w.openVaultForShot(vaultDir);
 
     if (!aboutShot.isEmpty()) {               // 截關於對話框

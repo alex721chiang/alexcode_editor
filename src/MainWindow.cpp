@@ -55,6 +55,7 @@
 #include "AICompletionProvider.h"
 #include "LspManager.h"
 #include "MarkdownLinkIndex.h"
+#include "GraphView.h"
 #include "GitGutter.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
@@ -1071,6 +1072,16 @@ void MainWindow::setupUI() {
         if (backlinksAction->isChecked() != v) backlinksAction->setChecked(v);
     });
     viewMenu->addAction(backlinksAction);
+    QAction* graphAction = new QAction(tr("關係圖（Graph）"), this);
+    graphAction->setCheckable(true);
+    connect(graphAction, &QAction::toggled, this, [this](bool on) {
+        graphDock->setVisible(on);
+        if (on) { rebuildLinkIndex(); showGraphView(); }
+    });
+    connect(graphDock, &QDockWidget::visibilityChanged, this, [graphAction](bool v) {
+        if (graphAction->isChecked() != v) graphAction->setChecked(v);
+    });
+    viewMenu->addAction(graphAction);
     QAction* termAction = new QAction(tr("終端機"), this);
     termAction->setCheckable(true);
     termAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));   // Ctrl+`
@@ -1159,6 +1170,16 @@ void MainWindow::setupUI() {
     backlinksDock->hide();
     connect(backlinksList, &QListWidget::itemActivated, this, [this](QListWidgetItem* it) {
         if (it) openFileByPath(it->data(Qt::UserRole).toString());
+    });
+
+    // ---------- 關係圖（Obsidian 風：節點=檔，邊=連結）----------
+    graphDock = new QDockWidget(tr("GRAPH — 關係圖"), this);
+    graphView = new GraphView(this);
+    graphDock->setWidget(graphView);
+    addDockWidget(Qt::RightDockWidgetArea, graphDock);
+    graphDock->hide();
+    connect(graphView, &GraphView::nodeClicked, this, [this](const QString& f) {
+        openFileByPath(f);
     });
 
     // ---------- 互動式終端機（ConPTY；首次顯示時才啟動 shell）----------
@@ -2156,6 +2177,19 @@ void MainWindow::setProjectFolder(const QString& folder) {
 void MainWindow::openVaultForShot(const QString& folder) {
     setProjectFolder(folder);
     if (backlinksDock) { backlinksDock->show(); refreshBacklinks(); }
+}
+
+void MainWindow::openGraphForShot(const QString& folder) {
+    setProjectFolder(folder);
+    if (graphDock) { graphDock->show(); graphDock->resize(560, 520); showGraphView(); }
+}
+
+void MainWindow::showGraphView() {
+    if (!graphView || !mdLinkIndex) return;
+    CodeEditor* e = activeEditor();
+    const QString active = e ? QFileInfo(e->property("filePath").toString()).absoluteFilePath()
+                             : QString();
+    graphView->setGraph(mdLinkIndex->files(), mdLinkIndex->edges(), active);
 }
 
 void MainWindow::rebuildLinkIndex() {
