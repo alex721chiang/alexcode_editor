@@ -3,11 +3,13 @@
 #include <QTextCharFormat>
 #include <QHash>
 #include <QVector>
+#include <QString>
 #include "TsCategory.h"
 
 struct TSParser;
 struct TSTree;
 struct TSNode;
+class QTimer;
 
 // 以 tree-sitter 語法樹驅動的高亮器：解析整份文件、依節點型別套主題色票。
 // 比 regex 準確（理解巢狀/結構）。支援的語言才用此器，其餘 fallback 回 SyntaxHighlighter。
@@ -31,7 +33,10 @@ protected:
 
 private:
     void buildFormats();
-    void reparse();
+    void reparse();                                      // 全量重解析（語言切換/主題/初次）
+    void onContentsChange(int pos, int removed, int added); // 累積編輯、標記樹、排程
+    void doReparse();                                    // 實際解析（增量；debounce 後）
+    void rehighlightRange(int charLo, int charHi);       // 只重畫涵蓋此字元範圍的 block
     void collect(const TSNode& node, const QByteArray& utf8, const QVector<int>& byteToChar);
     void addSpan(int charStart, int charEnd, const QTextCharFormat& fmt);
     const QTextCharFormat& formatFor(TsCategory::Category c) const;
@@ -40,7 +45,12 @@ private:
     TSTree* m_tree = nullptr;
     Lang m_lang = Lang::None;
     QMetaObject::Connection m_conn;
-    bool m_reparsing = false;       // 防再進入：rehighlight() 的 endEditBlock 會再觸發 contentsChanged
+    bool m_reparsing = false;       // 防再進入：rehighlight() 的 markContentsDirty 會再發 contentsChange
+    QString m_lastText;             // 上一次解析時的文件文字（計算增量編輯用）
+    QTimer* m_debounce = nullptr;   // 輸入後延遲合併解析（~120ms）
+    int m_pendingLo = 0;            // 自上次解析以來累積的編輯字元範圍
+    int m_pendingHi = -1;           // m_pendingHi < 0 表示尚無待解析編輯
+    bool m_fullDirty = true;        // 需要全量重解析 + 全量重畫
 
     struct Span { int start; int len; const QTextCharFormat* fmt; };
     QHash<int, QVector<Span>> m_blockSpans;     // blockNumber → spans

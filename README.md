@@ -28,6 +28,7 @@ Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF
 ### 語法高亮
 **tree-sitter 語法樹高亮**（C/C++、Python、JavaScript/TypeScript、JSON）：解析整份文件的語法樹，
 依節點型別精準上色（理解巢狀結構、字串/註解邊界、模板/泛型），比正規表示式更準確；
+編輯時採**增量解析**（保留語法樹、只重解析變更處）+ 120ms 防抖，並只重畫受影響的行，大檔輸入不卡；
 其餘語言（XML/HTML、Markdown、CMake、Shell…）沿用內建 regex 高亮器。
 色票跟隨目前主題（Neon Grid / Paper Light / Matrix），切換主題即時重繪。
 

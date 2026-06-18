@@ -1,8 +1,13 @@
 #include "TreeSitterHighlighter.h"
+#include "TsEdit.h"
 #include "Theme.h"
 #include <tree_sitter/api.h>
 #include <QTextDocument>
 #include <QTextBlock>
+#include <QTimer>
+#include <algorithm>
+#include <climits>
+#include <cstdlib>
 
 extern "C" {
 const TSLanguage* tree_sitter_cpp(void);
@@ -15,20 +20,29 @@ TreeSitterHighlighter::TreeSitterHighlighter(QObject* parent)
     : QSyntaxHighlighter(parent) {     // 預設不接文件（detached），由 attach() 接上
     m_parser = ts_parser_new();
     buildFormats();
+    m_debounce = new QTimer(this);     // 輸入後延遲合併解析，避免每個按鍵都全量處理
+    m_debounce->setSingleShot(true);
+    m_debounce->setInterval(120);
+    connect(m_debounce, &QTimer::timeout, this, [this]() { doReparse(); });
 }
 
 void TreeSitterHighlighter::attach(QTextDocument* doc) {
     if (document() == doc) return;
     disconnect(m_conn);
     setDocument(doc);
+    m_lastText = doc ? doc->toPlainText() : QString();
+    m_fullDirty = true;
     if (doc)
-        m_conn = connect(doc, &QTextDocument::contentsChanged, this, [this]() { reparse(); });
+        m_conn = connect(doc, &QTextDocument::contentsChange, this,
+                         [this](int pos, int removed, int added) { onContentsChange(pos, removed, added); });
 }
 
 void TreeSitterHighlighter::detach() {
     disconnect(m_conn);
+    if (m_debounce) m_debounce->stop();
     setDocument(nullptr);
     m_blockSpans.clear();
+    m_lastText.clear();
 }
 
 TreeSitterHighlighter::~TreeSitterHighlighter() {
@@ -150,27 +164,97 @@ void TreeSitterHighlighter::collect(const TSNode& node, const QByteArray& utf8,
         collect(ts_node_child(node, i), utf8, byteToChar);
 }
 
+// 全量重解析（語言切換/主題刷新/初次）：丟掉舊樹，從頭解析並重畫全文件。
 void TreeSitterHighlighter::reparse() {
-    if (m_reparsing) return;        // rehighlight() 的 endEditBlock 會再發 contentsChanged → 避免無限遞迴
+    if (m_tree) { ts_tree_delete(m_tree); m_tree = nullptr; }
+    m_lastText = document() ? document()->toPlainText() : QString();
+    m_fullDirty = true;
+    m_pendingHi = -1;
+    if (m_debounce) m_debounce->stop();
+    doReparse();
+}
+
+// 內容變更：把編輯標記到舊樹上（保留可增量解析），累積受影響範圍，排程 debounce 解析。
+void TreeSitterHighlighter::onContentsChange(int pos, int removed, int added) {
+    if (m_reparsing || !document()) return;      // 重畫造成的 contentsChange 不可再觸發
+    const QString newText = document()->toPlainText();
+
+    if (m_lang != Lang::None && m_tree) {
+        const TsEdit::ByteEdit e = TsEdit::compute(m_lastText, newText, pos, removed, added);
+        TSInputEdit ie;
+        ie.start_byte   = e.startByte;
+        ie.old_end_byte = e.oldEndByte;
+        ie.new_end_byte = e.newEndByte;
+        ie.start_point    = TSPoint{ e.startRow,  e.startCol };
+        ie.old_end_point  = TSPoint{ e.oldEndRow, e.oldEndCol };
+        ie.new_end_point  = TSPoint{ e.newEndRow, e.newEndCol };
+        ts_tree_edit(m_tree, &ie);
+    } else {
+        m_fullDirty = true;                      // 沒有可重用的舊樹 → 下次全量
+    }
+
+    const int editHi = pos + added;
+    if (m_pendingHi < 0) { m_pendingLo = pos; m_pendingHi = editHi; }
+    else { m_pendingLo = std::min(m_pendingLo, pos); m_pendingHi = std::max(m_pendingHi, editHi); }
+
+    m_lastText = newText;
+    if (m_debounce) m_debounce->start();
+}
+
+void TreeSitterHighlighter::doReparse() {
+    if (m_reparsing) return;
     m_reparsing = true;
 
-    m_blockSpans.clear();
     if (!document() || m_lang == Lang::None) {
+        m_blockSpans.clear();
         if (document()) rehighlight();
-        m_reparsing = false;
+        m_pendingHi = -1; m_fullDirty = false; m_reparsing = false;
         return;
     }
 
-    const QByteArray utf8 = document()->toPlainText().toUtf8();
-    if (m_tree) { ts_tree_delete(m_tree); m_tree = nullptr; }
-    m_tree = ts_parser_parse_string(m_parser, nullptr, utf8.constData(),
-                                    static_cast<uint32_t>(utf8.size()));
-    if (m_tree) {
-        const QVector<int> byteToChar = buildByteToChar(utf8);
-        collect(ts_tree_root_node(m_tree), utf8, byteToChar);
+    const QByteArray utf8 = m_lastText.toUtf8();
+    const int byteN = utf8.size();
+    TSTree* oldTree = m_tree;                                  // 已被 ts_tree_edit 標記過（或 null）
+    TSTree* neu = ts_parser_parse_string(m_parser, m_fullDirty ? nullptr : oldTree,
+                                         utf8.constData(), static_cast<uint32_t>(byteN));
+    const QVector<int> byteToChar = buildByteToChar(utf8);
+    auto b2c = [&](uint32_t byte) { return byteToChar[std::min<int>(int(byte), byteN)]; };
+
+    int lo = m_pendingLo, hi = m_pendingHi;
+    bool full = m_fullDirty || !oldTree || !neu;
+    if (!full) {                                              // 用 tree-sitter 的「變更範圍」擴大重畫區
+        uint32_t n = 0;
+        TSRange* ranges = ts_tree_get_changed_ranges(oldTree, neu, &n);
+        for (uint32_t i = 0; i < n; ++i) {
+            lo = std::min(lo, b2c(ranges[i].start_byte));
+            hi = std::max(hi, b2c(ranges[i].end_byte));
+        }
+        free(ranges);
     }
-    rehighlight();
-    m_reparsing = false;
+    if (oldTree && oldTree != neu) ts_tree_delete(oldTree);
+    m_tree = neu;
+
+    m_blockSpans.clear();
+    if (m_tree) collect(ts_tree_root_node(m_tree), utf8, byteToChar);
+
+    if (full || hi < lo) rehighlight();                       // 全量重畫
+    else rehighlightRange(lo, hi);                            // 只重畫受影響 block（增量）
+
+    m_pendingHi = -1; m_fullDirty = false; m_reparsing = false;
+}
+
+// 只對涵蓋 [charLo, charHi] 的 block 重新套用 highlightBlock（其餘 block 既有格式仍正確）。
+void TreeSitterHighlighter::rehighlightRange(int charLo, int charHi) {
+    QTextDocument* doc = document();
+    if (!doc) return;
+    charLo = std::max(0, charLo);
+    QTextBlock b = doc->findBlock(charLo);
+    QTextBlock last = doc->findBlock(std::min(charHi, doc->characterCount() - 1));
+    while (b.isValid()) {
+        rehighlightBlock(b);
+        if (b == last || !last.isValid()) break;
+        b = b.next();
+    }
 }
 
 void TreeSitterHighlighter::highlightBlock(const QString&) {
