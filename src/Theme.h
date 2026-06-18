@@ -62,6 +62,7 @@ inline QString BRACKET_MATCH_BG = "#1a3a4a";
 inline QString BRACKET_MATCH_FG = "#00e5ff";
 inline QString SEARCH_MATCH_BG  = "#3a2a55";
 inline QString SEARCH_MATCH_FG  = "#ffd166";
+inline QString OCCURRENCE_BG    = "#15233a";   // 游標字詞其他出現處的底色（低調）
 inline QString LSP_ERROR        = "#ff2d95";   // 診斷波浪底線：錯誤
 inline QString LSP_WARNING      = "#ffd166";   // 診斷波浪底線：警告
 inline QString GIT_ADDED        = "#00e5ff";   // gutter：新增行
@@ -88,6 +89,7 @@ inline void setTheme(const QString& name) {
     LINE_NUM_FG = pal.faint;        LINE_NUM_ACTIVE = pal.accent;
     BRACKET_MATCH_BG = pal.bracketBg; BRACKET_MATCH_FG = pal.accent;
     SEARCH_MATCH_BG = pal.searchBg; SEARCH_MATCH_FG = pal.searchFg;
+    OCCURRENCE_BG = pal.bracketBg;   // 比 hover 明顯，與括號配對同調
     LSP_ERROR = pal.accent2;        LSP_WARNING = pal.warn;
     GIT_ADDED = pal.accent;         GIT_MODIFIED = pal.warn;
     GIT_DELETED = pal.accent2;

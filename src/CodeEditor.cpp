@@ -147,6 +147,40 @@ void CodeEditor::updateExtraHighlights() {
         }
     }
 
+    // 游標所在字詞的所有出現處（whole-word、僅可視範圍、無選取時）
+    if (!m_largeFile && !textCursor().hasSelection()) {
+        const QString w = wordUnderCursor();
+        auto isWordChar = [](QChar c) { return c.isLetterOrNumber() || c == QLatin1Char('_'); };
+        bool isIdent = w.size() >= 2;
+        for (int i = 0; isIdent && i < w.size(); ++i)
+            if (!isWordChar(w.at(i))) isIdent = false;
+        if (isIdent) {
+            QTextCharFormat fmt;
+            fmt.setBackground(QColor(Theme::OCCURRENCE_BG));
+            QTextBlock block = firstVisibleBlock();
+            for (int i = 0; block.isValid() && i < 400; ++i, block = block.next()) {
+                const QString text = block.text();
+                int from = 0;
+                while (true) {
+                    const int idx = text.indexOf(w, from);
+                    if (idx < 0) break;
+                    const bool leftOk  = idx == 0 || !isWordChar(text.at(idx - 1));
+                    const bool rightOk = idx + w.size() >= text.size()
+                                      || !isWordChar(text.at(idx + w.size()));
+                    if (leftOk && rightOk) {
+                        QTextEdit::ExtraSelection sel;
+                        sel.format = fmt;
+                        sel.cursor = QTextCursor(block);
+                        sel.cursor.setPosition(block.position() + idx);
+                        sel.cursor.setPosition(block.position() + idx + w.size(), QTextCursor::KeepAnchor);
+                        extraSelections.append(sel);
+                    }
+                    from = idx + w.size();
+                }
+            }
+        }
+    }
+
     // 多關鍵字多色標示（僅可視範圍）
     if (!m_kwHighlights.isEmpty()) {
         QTextBlock block = firstVisibleBlock();
