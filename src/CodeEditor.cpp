@@ -913,11 +913,53 @@ bool CodeEditor::handleMultiCursorKey(QKeyEvent* e) {
     return true;
 }
 
+// 計算一行前導空白佔的「欄數」（Tab 展開到 4 的倍數）；非全空白回傳其縮排欄數。
+static int leadingIndentCols(const QString& text, int tabCols) {
+    int cols = 0;
+    for (const QChar& c : text) {
+        if (c == QLatin1Char(' ')) ++cols;
+        else if (c == QLatin1Char('\t')) cols += tabCols - (cols % tabCols);
+        else break;
+    }
+    return cols;
+}
+
+void CodeEditor::paintIndentGuides(QPaintEvent* event) {
+    const int tabCols = 4;
+    const qreal charW = fontMetrics().horizontalAdvance(QLatin1Char(' '));
+    if (charW <= 0) return;
+    const qreal baseX = contentOffset().x() + document()->documentMargin();
+
+    QPainter p(viewport());
+    p.setPen(QPen(QColor(Theme::BORDER), 1));
+
+    QTextBlock block = firstVisibleBlock();
+    int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
+    int carriedCols = 0;                          // 空白行沿用上一行縮排，讓導引線連續
+    while (block.isValid() && top <= event->rect().bottom()) {
+        const int h = qRound(blockBoundingRect(block).height());
+        if (block.isVisible() && top + h >= event->rect().top()) {
+            const QString text = block.text();
+            const bool blank = text.trimmed().isEmpty();
+            int cols = blank ? carriedCols : leadingIndentCols(text, tabCols);
+            if (!blank) carriedCols = cols;
+            for (int c = tabCols; c < cols; c += tabCols) {   // 內層每一階一條（跳過最左 col 0）
+                const int x = qRound(baseX + c * charW);
+                p.drawLine(x, top, x, top + h);
+            }
+        }
+        block = block.next();
+        top += h;
+    }
+}
+
 void CodeEditor::paintEvent(QPaintEvent* event) {
     QPlainTextEdit::paintEvent(event);
+    if (!m_largeFile) paintIndentGuides(event);   // 縮排輔助線（畫在前導空白區，不蓋文字）
+
     if (m_extraCursors.isEmpty()) return;
-    QPainter p(viewport());                       // 額外游標 caret（青色細線）
-    p.setPen(QPen(QColor("#00e5ff"), 2));
+    QPainter p(viewport());                       // 額外游標 caret（強調色細線）
+    p.setPen(QPen(QColor(Theme::ACCENT), 2));
     for (const QTextCursor& c : m_extraCursors) {
         const QRect r = cursorRect(c);
         p.drawLine(r.topLeft(), r.bottomLeft());

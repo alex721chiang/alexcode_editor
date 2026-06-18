@@ -128,6 +128,7 @@ private:
     void handleAutoIndent();
     void indentSelection(bool unindent);
     void appendBracketMatchSelections(QList<QTextEdit::ExtraSelection>& selections);
+    void paintIndentGuides(QPaintEvent* event);          // 縮排輔助線
     void setupCompleter();
     void rebuildCompleterModel();
     QString wordUnderCursor() const;
