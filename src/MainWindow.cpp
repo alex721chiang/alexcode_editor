@@ -397,6 +397,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
     editor->setLineWrapMode(wrapAction && wrapAction->isChecked()
                                 ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
     editor->setProperty("language", "Plain Text");
+    editor->setAutoPairEnabled(AppSettings().value("editor/autoPair", true).toBool());
     applySnippetsToEditor(editor);                  // 通用（language 為空）snippet
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);

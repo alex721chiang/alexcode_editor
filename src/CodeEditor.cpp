@@ -18,6 +18,7 @@
 #include <QFileInfo>
 #include "BoxSelect.h"
 #include "LocalCompletion.h"
+#include "AutoPair.h"
 #include "TreeSitterHighlighter.h"
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
@@ -416,6 +417,12 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
         return;
     }
 
+    // 括號/引號自動配對（含包圍選取、跳過閉合、退格刪空配對）
+    if (m_autoPair && !m_largeFile && m_extraCursors.isEmpty() && handleAutoPair(e)) {
+        e->accept();
+        return;
+    }
+
     // Enter：自動縮排
     if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
         QPlainTextEdit::keyPressEvent(e);
@@ -505,6 +512,69 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
 
     // 補全已由 LSP（啟用時）與本地智慧補全（Ctrl+Space，見上方）負責。
     // 雲端 AICompletionProvider 為「選項 B」未來骨架，預設不自動觸發（避免對未啟動的本機/雲端 API 發無謂請求）。
+}
+
+// 括號/引號自動配對。回傳 true 表示已處理該按鍵。
+bool CodeEditor::handleAutoPair(QKeyEvent* e) {
+    QTextCursor cur = textCursor();
+    const QString docText = document()->toPlainText();
+
+    // 退格：游標在一對空配對中間（如 () "" 內）→ 一併刪除右側閉合
+    if (e->key() == Qt::Key_Backspace && !cur.hasSelection()) {
+        const int p = cur.position();
+        const QChar before = p > 0 ? docText.at(p - 1) : QChar();
+        const QChar after  = p < docText.size() ? docText.at(p) : QChar();
+        if (AutoPair::shouldDeletePair(before, after)) {
+            cur.beginEditBlock();
+            cur.deleteChar();                 // 刪右側閉合
+            cur.deletePreviousChar();         // 刪左側開啟
+            cur.endEditBlock();
+            return true;
+        }
+        return false;
+    }
+
+    const QString t = e->text();
+    if (t.size() != 1) return false;
+    const QChar typed = t.at(0);
+    if (!AutoPair::isRelevant(typed)) return false;
+
+    const int selStart = cur.selectionStart();
+    const int selEnd   = cur.selectionEnd();
+    const QChar before = selStart > 0 ? docText.at(selStart - 1) : QChar();
+    const QChar after  = selEnd < docText.size() ? docText.at(selEnd) : QChar();
+
+    const AutoPair::Decision d = AutoPair::decide(typed, before, after, cur.hasSelection());
+    switch (d.action) {
+        case AutoPair::Action::Surround: {
+            const QString sel = cur.selectedText();
+            cur.beginEditBlock();
+            cur.insertText(QString(d.open) + sel + QString(d.close));
+            cur.endEditBlock();
+            // 重新選取被包圍的內容
+            QTextCursor sc = textCursor();
+            sc.setPosition(selStart + 1);
+            sc.setPosition(selStart + 1 + sel.size(), QTextCursor::KeepAnchor);
+            setTextCursor(sc);
+            return true;
+        }
+        case AutoPair::Action::AutoClose: {
+            cur.beginEditBlock();
+            cur.insertText(QString(d.open) + QString(d.close));
+            cur.endEditBlock();
+            cur.movePosition(QTextCursor::PreviousCharacter);
+            setTextCursor(cur);
+            return true;
+        }
+        case AutoPair::Action::SkipOver: {
+            cur.movePosition(QTextCursor::NextCharacter);
+            setTextCursor(cur);
+            return true;
+        }
+        case AutoPair::Action::Insert:
+        default:
+            return false;
+    }
 }
 
 void CodeEditor::handleAutoIndent() {

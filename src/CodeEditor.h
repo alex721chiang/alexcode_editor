@@ -60,6 +60,9 @@ public:
     // 大檔案模式（停用高亮/補全/括號配對）
     void setLargeFileMode(bool on) { m_largeFile = on; }
 
+    // 括號/引號自動配對
+    void setAutoPairEnabled(bool on) { m_autoPair = on; }
+
     // 語法高亮：支援的語言用 tree-sitter，其餘用 regex SyntaxHighlighter
     void setSyntaxLanguage(SyntaxHighlighter::Language lang, const QString& filePath = QString());
     void refreshSyntaxTheme();
@@ -129,6 +132,7 @@ private:
     void rebuildCompleterModel();
     QString wordUnderCursor() const;
     QString wikilinkAt(const QPoint& pos) const;         // 位置落在 [[target]] 內則回傳 target
+    bool handleAutoPair(QKeyEvent* e);                   // 括號/引號自動配對；true = 已處理
     void triggerLocalCompletion();          // 離線智慧補全（LSP 未啟用時的 Ctrl+Space）
 
     QWidget *lineNumberArea;
@@ -144,6 +148,7 @@ private:
     QCompleter* m_completer = nullptr;
     bool m_macroRecording = false;
     bool m_largeFile = false;
+    bool m_autoPair = true;                              // 括號/引號自動配對
     struct MacroKey { int key; Qt::KeyboardModifiers mods; QString text; };
     QList<MacroKey> m_macro;
     QTimer* m_completerRebuildTimer = nullptr;
