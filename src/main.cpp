@@ -46,6 +46,7 @@ int main(int argc, char *argv[]) {
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
     const QStringList args = a.arguments();
     QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir;
+    bool wantPreview = false;
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == "--screenshot" && i + 1 < args.size()) shotPath = args[++i];
         else if (args[i] == "--termcmd" && i + 1 < args.size()) termCmd = args[++i];
@@ -53,9 +54,11 @@ int main(int argc, char *argv[]) {
         else if (args[i] == "--about-shot" && i + 1 < args.size()) aboutShot = args[++i];
         else if ((args[i] == "--folder" || args[i] == "--vault") && i + 1 < args.size()) vaultDir = args[++i];
         else if (args[i] == "--graph" && i + 1 < args.size()) graphDir = args[++i];
+        else if (args[i] == "--preview") wantPreview = true;
         else if (QFileInfo(args[i]).isFile())
             QMetaObject::invokeMethod(&w, "openFileByPath", Q_ARG(QString, args[i]));
     }
+    if (wantPreview) w.showMarkdownPreviewForShot();
     if (!graphDir.isEmpty() && QFileInfo(graphDir).isDir())
         w.openGraphForShot(graphDir);
     else if (!vaultDir.isEmpty() && QFileInfo(vaultDir).isDir())

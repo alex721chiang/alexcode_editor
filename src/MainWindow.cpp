@@ -56,6 +56,8 @@
 #include "LspManager.h"
 #include "MarkdownLinkIndex.h"
 #include "GraphView.h"
+#include "MarkdownRender.h"
+#include <QDesktopServices>
 #include "GitGutter.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
@@ -1152,7 +1154,14 @@ void MainWindow::setupUI() {
     // ---------- Markdown 預覽 ----------
     mdDock = new QDockWidget("MARKDOWN PREVIEW", this);
     mdView = new QTextBrowser(this);
-    mdView->setOpenExternalLinks(true);
+    mdView->setOpenLinks(false);                        // 自行處理連結（區分內部 wikilink / 外部）
+    mdView->setOpenExternalLinks(false);
+    connect(mdView, &QTextBrowser::anchorClicked, this, [this](const QUrl& url) {
+        if (url.scheme() == QLatin1String("alexcode"))
+            openOrCreateWikilink(url.path());           // path() 已解碼，如 "Project Alpha"
+        else
+            QDesktopServices::openUrl(url);
+    });
     mdDock->setWidget(mdView);
     addDockWidget(Qt::RightDockWidgetArea, mdDock);
     mdDock->hide();
@@ -1441,7 +1450,10 @@ void MainWindow::syncSplitView() {
 void MainWindow::refreshMarkdownPreview() {
     if (!mdDock || !mdDock->isVisible()) return;
     CodeEditor* e = activeEditor();
-    mdView->document()->setMarkdown(e ? e->toPlainText() : QString());
+    const QString raw = e ? e->toPlainText() : QString();
+    // 高擬真：套用 GitHub 風 CSS，並把 [[wikilink]] 轉成可點擊的內部連結
+    mdView->document()->setDefaultStyleSheet(MarkdownRender::styleSheet());
+    mdView->document()->setMarkdown(MarkdownRender::preprocessWikilinks(raw));
 }
 
 // ----------------------------------------------------------------
@@ -2177,6 +2189,10 @@ void MainWindow::setProjectFolder(const QString& folder) {
 void MainWindow::openVaultForShot(const QString& folder) {
     setProjectFolder(folder);
     if (backlinksDock) { backlinksDock->show(); refreshBacklinks(); }
+}
+
+void MainWindow::showMarkdownPreviewForShot() {
+    if (mdDock) { mdDock->show(); mdDock->resize(560, 700); refreshMarkdownPreview(); }
 }
 
 void MainWindow::openGraphForShot(const QString& folder) {

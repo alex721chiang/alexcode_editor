@@ -234,6 +234,7 @@ private:
 public:
     void openVaultForShot(const QString& folder);     // 截圖用：設資料夾並顯示 backlinks
     void openGraphForShot(const QString& folder);     // 截圖用：設資料夾並顯示關係圖
+    void showMarkdownPreviewForShot();                // 截圖用：顯示 Markdown 預覽並刷新
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）
