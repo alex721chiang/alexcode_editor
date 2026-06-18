@@ -51,6 +51,9 @@ inline QStringList themeNames() {
 // 編輯器配色（程式內使用；setTheme 時更新，預設 Neon Grid）
 inline QString EDITOR_BG        = "#0a0e17";
 inline QString EDITOR_FG        = "#d6e4ff";
+inline QString ACCENT           = "#00e5ff";   // 主強調色
+inline QString ACCENT2          = "#ff2d95";   // 次強調色（書籤等）
+inline QString BORDER           = "#1c2940";   // 細邊框/分隔線
 inline QString CURRENT_LINE     = "#101a2e";
 inline QString LINE_NUM_BG      = "#0d1420";
 inline QString LINE_NUM_FG      = "#3d5a80";
@@ -80,6 +83,7 @@ inline void setTheme(const QString& name) {
                                              ? name : QStringLiteral("Neon Grid"));
     currentThemeName = palettes().contains(name) ? name : QStringLiteral("Neon Grid");
     EDITOR_BG = pal.bg;             EDITOR_FG = pal.fg;
+    ACCENT = pal.accent;            ACCENT2 = pal.accent2;   BORDER = pal.border;
     CURRENT_LINE = pal.currentLine; LINE_NUM_BG = pal.panel;
     LINE_NUM_FG = pal.faint;        LINE_NUM_ACTIVE = pal.accent;
     BRACKET_MATCH_BG = pal.bracketBg; BRACKET_MATCH_FG = pal.accent;

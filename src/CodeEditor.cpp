@@ -263,7 +263,7 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event) {
     painter.fillRect(event->rect(), QColor(Theme::LINE_NUM_BG));
 
     // 右側細分隔線
-    painter.setPen(QColor("#1c2940"));
+    painter.setPen(QColor(Theme::BORDER));
     painter.drawLine(event->rect().topRight(), event->rect().bottomRight());
 
     QTextBlock block = firstVisibleBlock();
@@ -291,14 +291,14 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event) {
             if (!m_largeFile) {
                 const bool folded = foldIndexAtStart(blockNumber) >= 0;
                 if (folded || isFoldCandidate(block)) {
-                    painter.setPen(folded ? QColor("#00e5ff") : QColor(Theme::LINE_NUM_FG));
+                    painter.setPen(folded ? QColor(Theme::LINE_NUM_ACTIVE) : QColor(Theme::LINE_NUM_FG));
                     painter.drawText(lineNumberArea->width() - 16, top, 14, fontMetrics().height(),
                                      Qt::AlignCenter,
                                      folded ? tr("▸") : tr("▾"));
                 }
             }
-            if (marked.contains(blockNumber)) {                 // 書籤：洋紅圓點
-                painter.setBrush(QColor("#ff2d95"));
+            if (marked.contains(blockNumber)) {                 // 書籤：次強調色圓點
+                painter.setBrush(QColor(Theme::ACCENT2));
                 painter.setPen(Qt::NoPen);
                 const int r = 3;
                 painter.drawEllipse(QPoint(8, top + fontMetrics().height() / 2), r, r);
