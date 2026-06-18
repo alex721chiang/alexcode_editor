@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QTextStream>
 #include <QFontDialog>
+#include <QFontDatabase>
 #include <QGridLayout>
 #include <QMessageBox>
 #include <QFileInfo>
@@ -356,10 +357,26 @@ void MainWindow::saveFont(const QFont& font) {
 QFont MainWindow::loadFont() {
     AppSettings settings;
     QFont font;
-    font.setFamily(settings.value("font/family", "Consolas").toString());
+    // 未設定字型時，依序挑可用的程式設計字型（多數附帶連字），最後退回 Consolas/等寬。
+    QString family = settings.value("font/family").toString();
+    if (family.isEmpty()) {
+        const QStringList prefer = {
+            "Cascadia Code", "Cascadia Mono", "JetBrains Mono",
+            "Fira Code", "Source Code Pro", "Consolas"
+        };
+        const QStringList installed = QFontDatabase::families();
+        for (const QString& f : prefer) {
+            if (installed.contains(f, Qt::CaseInsensitive)) { family = f; break; }
+        }
+        if (family.isEmpty()) family = "Consolas";
+    }
+    font.setFamily(family);
     font.setPointSize(settings.value("font/pointSize", 11).toInt());
     font.setBold(settings.value("font/bold", false).toBool());
     font.setItalic(settings.value("font/italic", false).toBool());
+    font.setStyleHint(QFont::Monospace, QFont::PreferAntialias);     // 等寬偏好 + 抗鋸齒
+    font.setFixedPitch(true);
+    font.setHintingPreference(QFont::PreferFullHinting);             // 提升清晰度
     return font;
 }
 
