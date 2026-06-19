@@ -16,6 +16,7 @@
 #include <QHelpEvent>
 #include <algorithm>
 #include <QFileInfo>
+#include <QTextOption>
 #include "BoxSelect.h"
 #include "LocalCompletion.h"
 #include "AutoPair.h"
@@ -77,6 +78,16 @@ void CodeEditor::refreshSyntaxTheme() {
 QVector<TsSymbols::Symbol> CodeEditor::documentSymbols() const {
     if (tsHighlighter && tsHighlighter->document()) return tsHighlighter->symbols();
     return {};
+}
+
+void CodeEditor::setShowWhitespace(bool on) {
+    QTextOption opt = document()->defaultTextOption();
+    QTextOption::Flags f = opt.flags();
+    f.setFlag(QTextOption::ShowTabsAndSpaces, on);
+    f.setFlag(QTextOption::ShowLineAndParagraphSeparators, on);
+    opt.setFlags(f);
+    document()->setDefaultTextOption(opt);
+    viewport()->update();
 }
 
 int CodeEditor::lineNumberAreaWidth() {
@@ -517,8 +528,8 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
 
     QPlainTextEdit::keyPressEvent(e);
 
-    // 字詞補全：輸入 3 個字元以上自動彈出
-    if (m_completer && !e->text().isEmpty()) {
+    // 字詞補全：輸入 3 個字元以上自動彈出（輔助功能關閉時跳過）
+    if (m_assist && m_completer && !e->text().isEmpty()) {
         const QString prefix = wordUnderCursor();
         if (prefix.length() >= 3 && (e->text().at(0).isLetterOrNumber() || e->text() == "_")) {
             if (prefix != m_completer->completionPrefix()) {
@@ -1341,7 +1352,7 @@ void CodeEditor::showHoverText(const QString& text) {
 }
 
 void CodeEditor::triggerLocalCompletion() {
-    if (m_largeFile) return;
+    if (m_largeFile || !m_assist) return;
     const QString prefix = wordUnderCursor();
     const QStringList items =
         LocalCompletion::suggest(toPlainText(), textCursor().position(), prefix, 30);
@@ -1510,7 +1521,7 @@ void CodeEditor::setupCompleter() {
 }
 
 void CodeEditor::rebuildCompleterModel() {
-    if (m_largeFile || document()->characterCount() > 2000000) return; // 大檔跳過
+    if (m_largeFile || !m_assist || document()->characterCount() > 2000000) return; // 大檔/停用輔助跳過
     static const QRegularExpression wordRe(QStringLiteral("[A-Za-z_][A-Za-z0-9_]{3,}"));
     QSet<QString> words;
     auto it = wordRe.globalMatch(toPlainText());

@@ -227,6 +227,7 @@ private:
     QDockWidget* backlinksDock = nullptr;
     class QListWidget* backlinksList = nullptr;
     class MarkdownLinkIndex* mdLinkIndex = nullptr;   // vault 連結關係圖
+    QTimer* mdIndexTimer = nullptr;                   // 存檔 .md 後重建索引（防抖）
     void rebuildLinkIndex();                          // 掃 projectFolder 重建索引
     void refreshBacklinks();                          // 依目前檔顯示反向連結
     void openOrCreateWikilink(const QString& target); // 解析→開啟；不存在→於 vault 建立
@@ -240,6 +241,7 @@ public:
     void openGraphForShot(const QString& folder);     // 截圖用：設資料夾並顯示關係圖
     void showMarkdownPreviewForShot();                // 截圖用：顯示 Markdown 預覽並刷新
     void gotoLineForShot(int line);                   // 截圖/CLI：跳至指定行（1-based）
+    void setShowWhitespaceAll(bool on);               // 截圖/CLI：所有分頁切換顯示空白
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）

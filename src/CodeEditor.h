@@ -61,6 +61,13 @@ public:
     // 大檔案模式（停用高亮/補全/括號配對）
     void setLargeFileMode(bool on) { m_largeFile = on; }
 
+    // 輔助功能（自動補全等）：中型大檔停用以保流暢，但仍保留語法高亮
+    void setAssistEnabled(bool on) { m_assist = on; }
+    bool assistEnabled() const { return m_assist; }
+
+    // 顯示空白字元 / 行尾符號
+    void setShowWhitespace(bool on);
+
     // 括號/引號自動配對
     void setAutoPairEnabled(bool on) { m_autoPair = on; }
 
@@ -153,6 +160,7 @@ private:
     QCompleter* m_completer = nullptr;
     bool m_macroRecording = false;
     bool m_largeFile = false;
+    bool m_assist = true;                                // 輔助功能（自動補全）開關
     bool m_autoPair = true;                              // 括號/引號自動配對
     struct MacroKey { int key; Qt::KeyboardModifiers mods; QString text; };
     QList<MacroKey> m_macro;

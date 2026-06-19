@@ -58,6 +58,7 @@
 #include "MarkdownLinkIndex.h"
 #include "GraphView.h"
 #include "SymbolDialog.h"
+#include "FileTier.h"
 #include "MarkdownRender.h"
 #include <QDesktopServices>
 #include "GitGutter.h"
@@ -417,6 +418,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
                                 ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
     editor->setProperty("language", "Plain Text");
     editor->setAutoPairEnabled(AppSettings().value("editor/autoPair", true).toBool());
+    editor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
     applySnippetsToEditor(editor);                  // 通用（language 為空）snippet
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);
@@ -463,8 +465,8 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
             if (!lspDirtyEditors.contains(editor)) lspDirtyEditors.append(editor);
             lspChangeTimer->start();
         }
-        if (!editor->property("filePath").toString().isEmpty())
-            gitGutterTimer->start();                    // Git gutter 重算（防抖）
+        if (editor->assistEnabled() && !editor->property("filePath").toString().isEmpty())
+            gitGutterTimer->start();                    // Git gutter 重算（防抖；大檔停用）
         if (mdDock && mdDock->isVisible() && editor == activeEditor())
             mdTimer->start();                           // Markdown 預覽刷新（防抖）
     });
@@ -1129,6 +1131,16 @@ void MainWindow::setupUI() {
         if (graphAction->isChecked() != v) graphAction->setChecked(v);
     });
     viewMenu->addAction(graphAction);
+    QAction* whitespaceAction = new QAction(tr("顯示空白字元"), this);
+    whitespaceAction->setCheckable(true);
+    whitespaceAction->setChecked(AppSettings().value("editor/showWhitespace", false).toBool());
+    connect(whitespaceAction, &QAction::toggled, this, [this](bool on) {
+        AppSettings().setValue("editor/showWhitespace", on);
+        for (int i = 0; i < tabWidget->count(); ++i)
+            if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+                e->setShowWhitespace(on);
+    });
+    viewMenu->addAction(whitespaceAction);
     QAction* termAction = new QAction(tr("終端機"), this);
     termAction->setCheckable(true);
     termAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));   // Ctrl+`
@@ -1217,6 +1229,10 @@ void MainWindow::setupUI() {
 
     // ---------- Backlinks（Obsidian 風：誰連到目前這篇）----------
     mdLinkIndex = new MarkdownLinkIndex();
+    mdIndexTimer = new QTimer(this);
+    mdIndexTimer->setSingleShot(true);
+    mdIndexTimer->setInterval(800);
+    connect(mdIndexTimer, &QTimer::timeout, this, [this]() { rebuildLinkIndex(); });
     backlinksDock = new QDockWidget(tr("BACKLINKS — 反向連結"), this);
     backlinksList = new QListWidget(this);
     backlinksDock->setWidget(backlinksList);
@@ -1636,13 +1652,29 @@ void MainWindow::openFileByPath(const QString& fileName) {
 
     QFileInfo fileInfo(fileName);
     CodeEditor* newEditor = createEditorTab(fileInfo.fileName());
-    const bool bigFile = raw.size() > 50 * 1024 * 1024;
-    if (bigFile) {
+
+    // 大檔分級降級（閾值可在偏好設定調整，取代過去單一 50MB 門檻）：
+    //   > highlightMaxMB（預設 10）→ 連語法高亮一併關閉（完整大檔模式）
+    //   > assistMaxMB   （預設 2） → 關閉自動補全 / LSP / 即時 Git gutter，但保留高亮
+    AppSettings sizeSettings;
+    const double mb = raw.size() / (1024.0 * 1024.0);
+    const int hiMaxMB = sizeSettings.value("editor/highlightMaxMB", 10).toInt();
+    const int asMaxMB = sizeSettings.value("editor/assistMaxMB", 2).toInt();
+    const FileTier::Level tier = FileTier::forSizeMB(mb, asMaxMB, hiMaxMB);
+    const bool highlightOff = tier == FileTier::Level::HighlightOff;
+    const bool assistOff = tier != FileTier::Level::Full;
+
+    if (highlightOff) {
         newEditor->setLargeFileMode(true);
         newEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
-        statusBar()->showMessage(tr("大檔案模式：已停用語法高亮與自動完成以確保流暢"), 5000);
+        statusBar()->showMessage(
+            tr("大檔（%1 MB）：已停用語法高亮與自動完成以確保流暢").arg(qRound(mb)), 5000);
+    } else if (assistOff) {
+        statusBar()->showMessage(
+            tr("較大檔（%1 MB）：已停用自動完成 / LSP / 即時 Git 標示，保留語法高亮").arg(qRound(mb)), 5000);
     }
-    newEditor->setProperty("bigFile", bigFile);
+    newEditor->setAssistEnabled(!assistOff);
+    newEditor->setProperty("bigFile", highlightOff);
     newEditor->setPlainText(text);
     newEditor->document()->setModified(false);
 
@@ -1650,15 +1682,16 @@ void MainWindow::openFileByPath(const QString& fileName) {
     newEditor->setProperty("baseTitle", fileInfo.fileName());
     newEditor->setProperty("encoding", encName);
     newEditor->setProperty("eol", eol);
+    newEditor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
     tabWidget->setTabToolTip(tabWidget->indexOf(newEditor), fileName);
     updateTabTitle(newEditor);
 
-    if (!bigFile) applyHighlighterForPath(newEditor, fileName);
-    if (!bigFile && !lsp->languageIdForFile(fileName).isEmpty()) {
+    if (!highlightOff) applyHighlighterForPath(newEditor, fileName);
+    if (!assistOff && !lsp->languageIdForFile(fileName).isEmpty()) {
         newEditor->setLspEnabled(true);
         lsp->documentOpened(fileName, text);
     }
-    if (!bigFile) fetchGitHead(fileName);               // Git gutter
+    if (!assistOff) fetchGitHead(fileName);             // Git gutter
     addToRecentFiles(fileName);
     if (fileWatcher) fileWatcher->addPath(fileName);
     statusBar()->showMessage("Opened " + fileName, 3000);
@@ -1727,6 +1760,11 @@ void MainWindow::saveFile() {
         currentEditor->document()->setModified(false);
         updateTabTitle(currentEditor);
         statusBar()->showMessage("Saved " + fileToSave, 3000);
+        // 存檔 Markdown → 重建連結索引（debounce），讓 backlinks / 關係圖不過期
+        if (mdIndexTimer && !projectFolder.isEmpty()
+            && (fileToSave.endsWith(".md", Qt::CaseInsensitive)
+                || fileToSave.endsWith(".markdown", Qt::CaseInsensitive)))
+            mdIndexTimer->start();
     };
 
     if (fileName.endsWith(".cpp") || fileName.endsWith(".h") || fileName.endsWith(".hpp") || fileName.endsWith(".c")) {
@@ -2258,6 +2296,7 @@ void MainWindow::rebuildLinkIndex() {
     if (projectFolder.isEmpty()) return;
     mdLinkIndex->build(projectFolder);
     refreshBacklinks();
+    if (graphDock && graphDock->isVisible()) showGraphView();   // 關係圖同步更新
 }
 
 void MainWindow::refreshBacklinks() {
@@ -2320,6 +2359,12 @@ void MainWindow::showQuickOpen() {
 
 void MainWindow::gotoLineForShot(int line) {
     if (CodeEditor* e = activeEditor()) { e->gotoLine(line); updateBreadcrumb(); }
+}
+
+void MainWindow::setShowWhitespaceAll(bool on) {
+    for (int i = 0; i < tabWidget->count(); ++i)
+        if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+            e->setShowWhitespace(on);
 }
 
 void MainWindow::showGoToSymbol() {
@@ -2774,6 +2819,18 @@ void MainWindow::showPreferences() {
     autosaveSpin->setValue(settings.value("session/autosaveMinutes", 2).toInt());
     form->addRow(tr("自動快照間隔"), autosaveSpin);
 
+    auto* assistMaxSpin = new QSpinBox(&dlg);
+    assistMaxSpin->setRange(1, 200);
+    assistMaxSpin->setSuffix(tr(" MB"));
+    assistMaxSpin->setValue(settings.value("editor/assistMaxMB", 2).toInt());
+    form->addRow(tr("超過此大小停用自動完成/LSP"), assistMaxSpin);
+
+    auto* highlightMaxSpin = new QSpinBox(&dlg);
+    highlightMaxSpin->setRange(1, 500);
+    highlightMaxSpin->setSuffix(tr(" MB"));
+    highlightMaxSpin->setValue(settings.value("editor/highlightMaxMB", 10).toInt());
+    form->addRow(tr("超過此大小停用語法高亮"), highlightMaxSpin);
+
     auto* themeCombo = new QComboBox(&dlg);
     themeCombo->addItems(Theme::themeNames());
     themeCombo->setCurrentText(Theme::currentThemeName);
@@ -2802,6 +2859,8 @@ void MainWindow::showPreferences() {
     settings.setValue("editor/trimTrailing", trimCheck->isChecked());
     settings.setValue("session/restore", sessionCheck->isChecked());
     settings.setValue("session/autosaveMinutes", autosaveSpin->value());
+    settings.setValue("editor/assistMaxMB", assistMaxSpin->value());
+    settings.setValue("editor/highlightMaxMB", highlightMaxSpin->value());
     settings.setValue("ui/theme", themeCombo->currentText());
     settings.setValue("ui/language", newLang);
 

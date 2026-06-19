@@ -47,6 +47,7 @@ int main(int argc, char *argv[]) {
     const QStringList args = a.arguments();
     QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir;
     bool wantPreview = false;
+    bool wantWhitespace = false;
     int gotoLineArg = 0;
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == "--screenshot" && i + 1 < args.size()) shotPath = args[++i];
@@ -56,11 +57,13 @@ int main(int argc, char *argv[]) {
         else if ((args[i] == "--folder" || args[i] == "--vault") && i + 1 < args.size()) vaultDir = args[++i];
         else if (args[i] == "--graph" && i + 1 < args.size()) graphDir = args[++i];
         else if (args[i] == "--goto" && i + 1 < args.size()) gotoLineArg = args[++i].toInt();
+        else if (args[i] == "--whitespace") wantWhitespace = true;
         else if (args[i] == "--preview") wantPreview = true;
         else if (QFileInfo(args[i]).isFile())
             QMetaObject::invokeMethod(&w, "openFileByPath", Q_ARG(QString, args[i]));
     }
     if (gotoLineArg > 0) w.gotoLineForShot(gotoLineArg);
+    if (wantWhitespace) w.setShowWhitespaceAll(true);
     if (wantPreview) w.showMarkdownPreviewForShot();
     if (!graphDir.isEmpty() && QFileInfo(graphDir).isDir())
         w.openGraphForShot(graphDir);
