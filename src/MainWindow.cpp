@@ -57,6 +57,7 @@
 #include "LspManager.h"
 #include "MarkdownLinkIndex.h"
 #include "GraphView.h"
+#include "SymbolDialog.h"
 #include "MarkdownRender.h"
 #include <QDesktopServices>
 #include "GitGutter.h"
@@ -402,6 +403,7 @@ void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& file
     editor->setSyntaxLanguage(lang, filePath);      // 支援語言用 tree-sitter，其餘 regex（含 Unknown 清空）
     applySnippetsToEditor(editor);                  // 語言確定後注入對應 snippet
     updateStatusBar();
+    updateBreadcrumb();
 }
 
 // ----------------------------------------------------------------
@@ -419,6 +421,9 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::recordNavLocation);
+    connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor]() {
+        if (editor == activeEditor()) updateBreadcrumb();
+    });
     connect(editor, &QPlainTextEdit::selectionChanged, this, &MainWindow::updateStatusBar);
     connect(editor->document(), &QTextDocument::modificationChanged,
             this, &MainWindow::onModificationChanged);
@@ -485,8 +490,24 @@ void MainWindow::setupUI() {
         if (resultsList) resultsList->clear();
         if (filterCountLabel) filterCountLabel->setText("");
         updateStatusBar();
+        updateBreadcrumb();
     });
-    setCentralWidget(tabWidget);
+
+    // 麵包屑列 + 分頁（容器置中）
+    breadcrumbLabel = new QLabel(this);
+    breadcrumbLabel->setTextFormat(Qt::RichText);
+    breadcrumbLabel->setContentsMargins(10, 3, 10, 3);
+    breadcrumbLabel->setText(QString());
+    connect(breadcrumbLabel, &QLabel::linkActivated, this, [this](const QString& href) {
+        if (CodeEditor* e = activeEditor()) e->gotoLine(href.toInt() + 1);   // href = 0-based line
+    });
+    QWidget* centralWrap = new QWidget(this);
+    auto* wrapLay = new QVBoxLayout(centralWrap);
+    wrapLay->setContentsMargins(0, 0, 0, 0);
+    wrapLay->setSpacing(0);
+    wrapLay->addWidget(breadcrumbLabel);
+    wrapLay->addWidget(tabWidget);
+    setCentralWidget(centralWrap);
 
     // ---------- File actions ----------
     newAction = new QAction(tr("New File"), this);
@@ -627,12 +648,17 @@ void MainWindow::setupUI() {
     connect(findInFilesAction, &QAction::triggered, this, &MainWindow::showFindInFilesDialog);
 
     openFolderAction = new QAction(tr("Open Folder..."), this);
-    openFolderAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O));
+    openFolderAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_O));   // 讓出 Ctrl+Shift+O 給 Go to Symbol
     connect(openFolderAction, &QAction::triggered, this, &MainWindow::openFolder);
 
     quickOpenAction = new QAction(tr("Quick Open..."), this);
     quickOpenAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_P));
     connect(quickOpenAction, &QAction::triggered, this, &MainWindow::showQuickOpen);
+
+    QAction* gotoSymbolAction = new QAction(tr("Go to Symbol..."), this);
+    gotoSymbolAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O));
+    connect(gotoSymbolAction, &QAction::triggered, this, &MainWindow::showGoToSymbol);
+    addAction(gotoSymbolAction);                              // 全域快捷鍵
 
     toggleBookmarkAction = new QAction(tr("Toggle Bookmark"), this);
     toggleBookmarkAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F2));
@@ -730,6 +756,7 @@ void MainWindow::setupUI() {
 
     fileMenu->addAction(openFolderAction);
     fileMenu->addAction(quickOpenAction);
+    fileMenu->addAction(gotoSymbolAction);
     fileMenu->addSeparator();
     fileMenu->addAction(saveAction);
     fileMenu->addAction(saveAsAction);
@@ -2289,6 +2316,53 @@ void MainWindow::showQuickOpen() {
         if (projectFolder.isEmpty()) return;
     }
     quickOpen->open();
+}
+
+void MainWindow::gotoLineForShot(int line) {
+    if (CodeEditor* e = activeEditor()) { e->gotoLine(line); updateBreadcrumb(); }
+}
+
+void MainWindow::showGoToSymbol() {
+    CodeEditor* e = activeEditor();
+    if (!e) return;
+    const QVector<TsSymbols::Symbol> syms = e->documentSymbols();
+    if (syms.isEmpty()) {
+        statusBar()->showMessage(
+            tr("此檔無可用符號（Go to Symbol 目前支援 tree-sitter 語言：C/C++、Python、JS、JSON）"), 3500);
+        return;
+    }
+    if (!symbolDialog) {
+        symbolDialog = new SymbolDialog(this);
+        connect(symbolDialog, &SymbolDialog::symbolChosen, this, [this](int line) {
+            if (CodeEditor* ed = activeEditor()) ed->gotoLine(line + 1);   // line 為 0-based
+        });
+    }
+    symbolDialog->openWith(syms);
+}
+
+// 麵包屑：檔 > 包含游標所在行的（巢狀）類別/函式，可點擊跳轉。
+void MainWindow::updateBreadcrumb() {
+    if (!breadcrumbLabel) return;
+    CodeEditor* e = activeEditor();
+    if (!e) { breadcrumbLabel->clear(); return; }
+    const QString path = e->property("filePath").toString();
+    QString fileName = path.isEmpty() ? tr("Untitled") : QFileInfo(path).fileName();
+
+    QStringList parts;
+    parts << QStringLiteral("<span style='color:%1'>%2</span>")
+                 .arg(Theme::LINE_NUM_FG, fileName.toHtmlEscaped());
+
+    const int curLine = e->textCursor().blockNumber();
+    QVector<TsSymbols::Symbol> chain;
+    for (const TsSymbols::Symbol& s : e->documentSymbols())
+        if (s.line <= curLine && curLine <= s.endLine) chain.append(s);
+    std::sort(chain.begin(), chain.end(),
+              [](const TsSymbols::Symbol& a, const TsSymbols::Symbol& b) { return a.line < b.line; });
+    for (const TsSymbols::Symbol& s : chain)
+        parts << QStringLiteral("<a href='%1' style='color:%2; text-decoration:none'>%3</a>")
+                     .arg(QString::number(s.line), Theme::ACCENT, s.name.toHtmlEscaped());
+
+    breadcrumbLabel->setText(parts.join(QStringLiteral("  ›  ")));
 }
 
 // ----------------------------------------------------------------

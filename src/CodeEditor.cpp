@@ -74,6 +74,11 @@ void CodeEditor::refreshSyntaxTheme() {
     if (highlighter && highlighter->document()) highlighter->refreshTheme();
 }
 
+QVector<TsSymbols::Symbol> CodeEditor::documentSymbols() const {
+    if (tsHighlighter && tsHighlighter->document()) return tsHighlighter->symbols();
+    return {};
+}
+
 int CodeEditor::lineNumberAreaWidth() {
     int digits = 1;
     int max = qMax(1, blockCount());

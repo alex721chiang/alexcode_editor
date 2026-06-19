@@ -5,6 +5,7 @@
 #include <QVector>
 #include <QString>
 #include "TsCategory.h"
+#include "TsSymbols.h"
 
 struct TSParser;
 struct TSTree;
@@ -25,6 +26,7 @@ public:
     void detach();                       // 卸下（改用 regex 高亮時）
     void setLanguage(Lang lang);
     void refreshTheme();
+    QVector<TsSymbols::Symbol> symbols() const;          // 走訪語法樹擷取類別/函式符號
     static Lang langForExtension(const QString& ext);
     static QString languageName(Lang lang);
 

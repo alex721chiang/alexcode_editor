@@ -19,6 +19,7 @@ set(SRCS
     MarkdownLinkIndex.cpp
     GraphLayout.cpp
     GraphView.cpp
+    SymbolDialog.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

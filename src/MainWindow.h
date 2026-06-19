@@ -84,6 +84,10 @@ private slots:
 
 private:
     QTabWidget* tabWidget = nullptr;
+    class QLabel* breadcrumbLabel = nullptr;          // 編輯器頂部麵包屑（檔 > 類別 > 函式）
+    class SymbolDialog* symbolDialog = nullptr;       // Ctrl+Shift+O 跳至符號
+    void showGoToSymbol();
+    void updateBreadcrumb();
     QListWidget* resultsList = nullptr;
     QLineEdit* filterInput = nullptr;
     QComboBox* logicCombo = nullptr;
@@ -235,6 +239,7 @@ public:
     void openVaultForShot(const QString& folder);     // 截圖用：設資料夾並顯示 backlinks
     void openGraphForShot(const QString& folder);     // 截圖用：設資料夾並顯示關係圖
     void showMarkdownPreviewForShot();                // 截圖用：顯示 Markdown 預覽並刷新
+    void gotoLineForShot(int line);                   // 截圖/CLI：跳至指定行（1-based）
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）

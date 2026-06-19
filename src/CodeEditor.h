@@ -6,6 +6,7 @@
 #include <QSet>
 #include "SyntaxHighlighter.h"
 #include "LspProtocol.h"
+#include "TsSymbols.h"
 
 class QCompleter;
 class QTimer;
@@ -66,6 +67,9 @@ public:
     // 語法高亮：支援的語言用 tree-sitter，其餘用 regex SyntaxHighlighter
     void setSyntaxLanguage(SyntaxHighlighter::Language lang, const QString& filePath = QString());
     void refreshSyntaxTheme();
+
+    // 文件符號（類別/函式）：tree-sitter 可用時回傳，否則空（Go to Symbol / 麵包屑）
+    QVector<TsSymbols::Symbol> documentSymbols() const;
 
     // ---- Snippet 樣板（trigger + Tab 展開）----
     void setSnippets(const QHash<QString, QString>& snippets) { m_snippets = snippets; }
