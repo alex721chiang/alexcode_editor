@@ -58,6 +58,7 @@
 #include "MarkdownLinkIndex.h"
 #include "GraphView.h"
 #include "SymbolDialog.h"
+#include "CommandPalette.h"
 #include "FileTier.h"
 #include "MarkdownRender.h"
 #include <QDesktopServices>
@@ -663,6 +664,11 @@ void MainWindow::setupUI() {
     connect(gotoSymbolAction, &QAction::triggered, this, &MainWindow::showGoToSymbol);
     addAction(gotoSymbolAction);                              // 全域快捷鍵
 
+    QAction* cmdPaletteAction = new QAction(tr("Command Palette..."), this);
+    cmdPaletteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+    connect(cmdPaletteAction, &QAction::triggered, this, &MainWindow::showCommandPalette);
+    addAction(cmdPaletteAction);                              // 全域快捷鍵
+
     toggleBookmarkAction = new QAction(tr("Toggle Bookmark"), this);
     toggleBookmarkAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F2));
     connect(toggleBookmarkAction, &QAction::triggered, this, [this]() {
@@ -760,6 +766,7 @@ void MainWindow::setupUI() {
     fileMenu->addAction(openFolderAction);
     fileMenu->addAction(quickOpenAction);
     fileMenu->addAction(gotoSymbolAction);
+    fileMenu->addAction(cmdPaletteAction);
     fileMenu->addSeparator();
     fileMenu->addAction(saveAction);
     fileMenu->addAction(saveAsAction);
@@ -1058,7 +1065,7 @@ void MainWindow::setupUI() {
     QAction* playAct = macroMenu->addAction(tr("重播一次"), this, [this]() {
         if (auto e = activeEditor()) e->playMacro(1);
     });
-    playAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P));
+    playAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_M));   // 讓出 Ctrl+Shift+P 給命令面板
     macroMenu->addAction(tr("重播 N 次…"), this, [this]() {
         CodeEditor* e = activeEditor();
         if (!e) return;
@@ -2376,6 +2383,39 @@ void MainWindow::setShowWhitespaceAll(bool on) {
     for (int i = 0; i < tabWidget->count(); ++i)
         if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
             e->setShowWhitespace(on);
+}
+
+static QVector<CommandPalette::Command> gatherCommands(MainWindow* w) {
+    QVector<CommandPalette::Command> cmds;
+    QSet<QString> seen;
+    const QList<QAction*> actions = w->findChildren<QAction*>();
+    for (QAction* a : actions) {
+        if (a->isSeparator() || a->menu()) continue;         // 跳過分隔線與子選單
+        QString name = a->text();
+        name.remove(QLatin1Char('&'));                        // 去掉助記符
+        name = name.trimmed();
+        if (name.isEmpty() || seen.contains(name)) continue;
+        seen.insert(name);
+        cmds.append({ name, a->shortcut().toString(QKeySequence::NativeText), a });
+    }
+    std::sort(cmds.begin(), cmds.end(),
+              [](const CommandPalette::Command& a, const CommandPalette::Command& b) {
+                  return a.name.localeAwareCompare(b.name) < 0;
+              });
+    return cmds;
+}
+
+void MainWindow::showCommandPalette() {
+    if (!commandPalette) commandPalette = new CommandPalette(this);
+    commandPalette->openWith(gatherCommands(this));
+}
+
+void MainWindow::openCommandPaletteForShot(const QString& outPng) {
+    if (!commandPalette) commandPalette = new CommandPalette(this);
+    commandPalette->openWith(gatherCommands(this), QStringLiteral("go"));
+    QTimer::singleShot(700, this, [this, outPng]() {
+        if (commandPalette) commandPalette->grab().save(outPng);
+    });
 }
 
 void MainWindow::showGoToSymbol() {

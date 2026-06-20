@@ -20,6 +20,7 @@ set(SRCS
     GraphLayout.cpp
     GraphView.cpp
     SymbolDialog.cpp
+    CommandPalette.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

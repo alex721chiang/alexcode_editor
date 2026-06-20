@@ -86,7 +86,9 @@ private:
     QTabWidget* tabWidget = nullptr;
     class QLabel* breadcrumbLabel = nullptr;          // 編輯器頂部麵包屑（檔 > 類別 > 函式）
     class SymbolDialog* symbolDialog = nullptr;       // Ctrl+Shift+O 跳至符號
+    class CommandPalette* commandPalette = nullptr;   // Ctrl+Shift+P 命令面板
     void showGoToSymbol();
+    void showCommandPalette();
     void updateBreadcrumb();
     QListWidget* resultsList = nullptr;
     QLineEdit* filterInput = nullptr;
@@ -242,6 +244,7 @@ public:
     void showMarkdownPreviewForShot();                // 截圖用：顯示 Markdown 預覽並刷新
     void gotoLineForShot(int line);                   // 截圖/CLI：跳至指定行（1-based）
     void setShowWhitespaceAll(bool on);               // 截圖/CLI：所有分頁切換顯示空白
+    void openCommandPaletteForShot(const QString& outPng);   // 截圖：開命令面板並截圖
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）

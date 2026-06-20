@@ -45,7 +45,7 @@ int main(int argc, char *argv[]) {
     // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
     const QStringList args = a.arguments();
-    QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir;
+    QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir, paletteShot;
     bool wantPreview = false;
     bool wantWhitespace = false;
     int gotoLineArg = 0;
@@ -54,6 +54,7 @@ int main(int argc, char *argv[]) {
         else if (args[i] == "--termcmd" && i + 1 < args.size()) termCmd = args[++i];
         else if (args[i] == "--settings-shot" && i + 1 < args.size()) settingsShot = args[++i];
         else if (args[i] == "--about-shot" && i + 1 < args.size()) aboutShot = args[++i];
+        else if (args[i] == "--palette-shot" && i + 1 < args.size()) paletteShot = args[++i];
         else if ((args[i] == "--folder" || args[i] == "--vault") && i + 1 < args.size()) vaultDir = args[++i];
         else if (args[i] == "--graph" && i + 1 < args.size()) graphDir = args[++i];
         else if (args[i] == "--goto" && i + 1 < args.size()) gotoLineArg = args[++i].toInt();
@@ -72,6 +73,10 @@ int main(int argc, char *argv[]) {
 
     if (!aboutShot.isEmpty()) {               // 截關於對話框
         w.openAboutForShot(aboutShot);
+        QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
+    } else if (!paletteShot.isEmpty()) {      // 截命令面板
+        w.resize(1200, 800);
+        w.openCommandPaletteForShot(paletteShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
     } else if (!settingsShot.isEmpty()) {     // 截設定中心對話框
         w.resize(1200, 800);
