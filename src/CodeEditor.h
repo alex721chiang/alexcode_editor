@@ -24,6 +24,11 @@ public:
     int lineNumberAreaWidth();
     void setAIProvider(AICompletionProvider* provider);
 
+    // Sticky scroll：固定目前所在函式/類別標頭於頂端
+    void setStickyScrollEnabled(bool on);
+    void stickyPaintEvent(QPaintEvent* event);           // 供 StickyHeaderArea 回呼
+    void stickyMousePress(QMouseEvent* event);
+
     // Notepad++ 風格編輯操作
     void duplicateCurrentLine();
     void deleteCurrentLine();
@@ -140,6 +145,7 @@ private:
     void indentSelection(bool unindent);
     void appendBracketMatchSelections(QList<QTextEdit::ExtraSelection>& selections);
     void paintIndentGuides(QPaintEvent* event);          // 縮排輔助線
+    void updateSticky();                                 // 重算/重排 sticky 標頭
     void setupCompleter();
     void rebuildCompleterModel();
     QString wordUnderCursor() const;
@@ -148,6 +154,11 @@ private:
     void triggerLocalCompletion();          // 離線智慧補全（LSP 未啟用時的 Ctrl+Space）
 
     QWidget *lineNumberArea;
+    QWidget *stickyArea = nullptr;                          // sticky scroll 頂部標頭
+    bool m_stickyEnabled = true;
+    QVector<TsSymbols::Symbol> m_stickyHeaders;            // 目前要固定的標頭
+    mutable QVector<TsSymbols::Symbol> m_symCache;        // documentSymbols 快取（依 revision）
+    mutable int m_symCacheRev = -1;
     SyntaxHighlighter *highlighter;
     class TreeSitterHighlighter* tsHighlighter = nullptr;   // 支援語言時改用
     AICompletionProvider *aiProvider = nullptr;
@@ -214,6 +225,20 @@ protected:
     void mousePressEvent(QMouseEvent *event) override {
         codeEditor->lineNumberAreaMousePress(event);
     }
+
+private:
+    CodeEditor *codeEditor;
+};
+
+// Sticky scroll 頂部標頭區（覆蓋於 viewport 上方）
+class StickyHeaderArea : public QWidget {
+public:
+    StickyHeaderArea(CodeEditor *editor, QWidget *parent)
+        : QWidget(parent), codeEditor(editor) {}
+
+protected:
+    void paintEvent(QPaintEvent *event) override { codeEditor->stickyPaintEvent(event); }
+    void mousePressEvent(QMouseEvent *event) override { codeEditor->stickyMousePress(event); }
 
 private:
     CodeEditor *codeEditor;

@@ -419,6 +419,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
     editor->setProperty("language", "Plain Text");
     editor->setAutoPairEnabled(AppSettings().value("editor/autoPair", true).toBool());
     editor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
+    editor->setStickyScrollEnabled(AppSettings().value("editor/stickyScroll", true).toBool());
     applySnippetsToEditor(editor);                  // 通用（language 為空）snippet
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);
@@ -1141,6 +1142,16 @@ void MainWindow::setupUI() {
                 e->setShowWhitespace(on);
     });
     viewMenu->addAction(whitespaceAction);
+    QAction* stickyAction = new QAction(tr("Sticky Scroll（固定標頭）"), this);
+    stickyAction->setCheckable(true);
+    stickyAction->setChecked(AppSettings().value("editor/stickyScroll", true).toBool());
+    connect(stickyAction, &QAction::toggled, this, [this](bool on) {
+        AppSettings().setValue("editor/stickyScroll", on);
+        for (int i = 0; i < tabWidget->count(); ++i)
+            if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+                e->setStickyScrollEnabled(on);
+    });
+    viewMenu->addAction(stickyAction);
     QAction* termAction = new QAction(tr("終端機"), this);
     termAction->setCheckable(true);
     termAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));   // Ctrl+`

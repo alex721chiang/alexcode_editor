@@ -20,6 +20,7 @@
 #include "BoxSelect.h"
 #include "LocalCompletion.h"
 #include "AutoPair.h"
+#include "StickyScroll.h"
 #include "TreeSitterHighlighter.h"
 #include "AICompletionProvider.h"
 #include "SuggestionWidget.h"
@@ -29,6 +30,8 @@
 
 CodeEditor::CodeEditor(QWidget *parent) : QPlainTextEdit(parent) {
     lineNumberArea = new LineNumberArea(this);
+    stickyArea = new StickyHeaderArea(this, viewport());   // 覆蓋於文字 viewport 上方
+    stickyArea->hide();
     highlighter = new SyntaxHighlighter(document());
     suggestionWidget = new SuggestionWidget(this);
 
@@ -76,8 +79,59 @@ void CodeEditor::refreshSyntaxTheme() {
 }
 
 QVector<TsSymbols::Symbol> CodeEditor::documentSymbols() const {
-    if (tsHighlighter && tsHighlighter->document()) return tsHighlighter->symbols();
-    return {};
+    if (!tsHighlighter || !tsHighlighter->document()) return {};
+    const int rev = document()->revision();              // 依文件版本快取，捲動/移游標免重走樹
+    if (rev != m_symCacheRev) {
+        m_symCache = tsHighlighter->symbols();
+        m_symCacheRev = rev;
+    }
+    return m_symCache;
+}
+
+void CodeEditor::setStickyScrollEnabled(bool on) {
+    m_stickyEnabled = on;
+    updateSticky();
+}
+
+// 依目前捲動位置重算要固定的標頭，並排版 sticky 區。
+void CodeEditor::updateSticky() {
+    if (!stickyArea) return;
+    if (!m_stickyEnabled || m_largeFile) { stickyArea->hide(); return; }
+    const QVector<TsSymbols::Symbol> syms = documentSymbols();
+    if (syms.isEmpty()) { stickyArea->hide(); return; }
+
+    const int firstLine = firstVisibleBlock().blockNumber();
+    m_stickyHeaders = StickyScroll::headers(syms, firstLine);
+    if (m_stickyHeaders.isEmpty()) { stickyArea->hide(); return; }
+
+    const int lineH = fontMetrics().height();
+    stickyArea->setGeometry(0, 0, viewport()->width(), m_stickyHeaders.size() * lineH);
+    stickyArea->raise();
+    stickyArea->show();
+    stickyArea->update();
+}
+
+void CodeEditor::stickyPaintEvent(QPaintEvent*) {
+    QPainter p(stickyArea);
+    const int lineH = fontMetrics().height();
+    const int x = qRound(document()->documentMargin());
+    p.setFont(font());
+    for (int i = 0; i < m_stickyHeaders.size(); ++i) {
+        const QRect row(0, i * lineH, stickyArea->width(), lineH);
+        p.fillRect(row, QColor(Theme::LINE_NUM_BG));
+        const QString lineText = document()->findBlockByNumber(m_stickyHeaders[i].line).text();
+        p.setPen(QColor(Theme::EDITOR_FG));
+        p.drawText(row.adjusted(x, 0, -6, 0), Qt::AlignVCenter, lineText);
+    }
+    p.setPen(QColor(Theme::ACCENT));                       // 底部分隔線
+    p.drawLine(0, stickyArea->height() - 1, stickyArea->width(), stickyArea->height() - 1);
+}
+
+void CodeEditor::stickyMousePress(QMouseEvent* e) {
+    const int lineH = fontMetrics().height();
+    const int idx = e->pos().y() / lineH;
+    if (idx >= 0 && idx < m_stickyHeaders.size())
+        gotoLine(m_stickyHeaders[idx].line + 1);          // line 為 0-based
 }
 
 void CodeEditor::setShowWhitespace(bool on) {
@@ -114,12 +168,15 @@ void CodeEditor::updateLineNumberArea(const QRect &rect, int dy) {
 
     if (rect.contains(viewport()->rect()))
         updateLineNumberAreaWidth(0);
+
+    updateSticky();                                       // 捲動/重繪時更新 sticky 標頭
 }
 
 void CodeEditor::resizeEvent(QResizeEvent *e) {
     QPlainTextEdit::resizeEvent(e);
     QRect cr = contentsRect();
     lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
+    updateSticky();
 }
 
 // ----------------------------------------------------------------

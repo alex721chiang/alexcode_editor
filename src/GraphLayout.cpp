@@ -27,18 +27,25 @@ QVector<QPointF> compute(int n, const QVector<QPair<int, int>>& edges,
     for (int iter = 0; iter < iterations; ++iter) {
         for (int i = 0; i < n; ++i) disp[i] = QPointF(0, 0);
 
-        // 斥力：所有節點兩兩相斥
+        // 斥力：所有節點兩兩相斥（限距：超過 cutoff 不再相斥，避免孤立節點被推到無限遠）
+        const double cutoff = 2.5 * k;
         for (int i = 0; i < n; ++i) {
             for (int j = i + 1; j < n; ++j) {
                 QPointF d = pos[i] - pos[j];
                 double dist = std::hypot(d.x(), d.y());
                 if (dist < 0.01) { d = QPointF(0.01 * (i - j), 0.01); dist = std::hypot(d.x(), d.y()); }
+                if (dist > cutoff) continue;
                 const double force = (k * k) / dist;       // fr = k^2/d
                 const QPointF u = d / dist;
                 disp[i] += u * force;
                 disp[j] -= u * force;
             }
         }
+
+        // 向中心的重力：把孤立（無邊）節點拉回，使版面不致散開到看不見
+        const QPointF center(cx, cy);
+        for (int i = 0; i < n; ++i)
+            disp[i] += (center - pos[i]) * 0.10;
 
         // 引力：有連結的節點互相吸引
         for (const auto& e : edges) {
