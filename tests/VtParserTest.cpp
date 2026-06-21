@@ -118,3 +118,30 @@ TEST(VtParser, IgnoresUnknownAndOscSequences) {
     p.feed(b("\r\n\x1b[?25lY"));              // 私有模式 ?25l（隱藏游標）應略過
     EXPECT_EQ(p.lineText(1), "Y");
 }
+
+TEST(VtParser, Utf8MultibyteCjk) {
+    VtParser p(3, 20);
+    p.feed(b("a中文b"));                       // 原始檔為 UTF-8，b() 即得 UTF-8 位元組
+    EXPECT_EQ(p.lineText(0), QString::fromUtf8("a中文b"));
+}
+
+TEST(VtParser, Utf8SplitAcrossFeeds) {
+    VtParser p(3, 20);
+    const QByteArray u = QByteArray::fromHex("e4b8ad");   // 「中」的 UTF-8
+    p.feed(u.left(2));                        // 前 2 位元組（不完整）
+    p.feed(u.mid(2));                         // 第 3 位元組補齊
+    EXPECT_EQ(p.lineText(0), QString::fromUtf8("中"));
+}
+
+TEST(VtParser, Utf8FourByteEmoji) {
+    VtParser p(3, 20);
+    p.feed(b("x\xF0\x9F\x98\x80"));           // 😀（4 位元組、代理對）
+    EXPECT_EQ(p.lineText(0), QString::fromUtf8("x\xF0\x9F\x98\x80"));
+}
+
+TEST(VtParser, Utf8NewlineDoesNotCorruptNext) {
+    VtParser p(3, 20);
+    p.feed(b("中\r\n文"));                      // CRLF：換行並歸位
+    EXPECT_EQ(p.lineText(0), QString::fromUtf8("中"));
+    EXPECT_EQ(p.lineText(1), QString::fromUtf8("文"));
+}

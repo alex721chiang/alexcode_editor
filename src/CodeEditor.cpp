@@ -32,6 +32,8 @@ CodeEditor::CodeEditor(QWidget *parent) : QPlainTextEdit(parent) {
     lineNumberArea = new LineNumberArea(this);
     stickyArea = new StickyHeaderArea(this, viewport());   // 覆蓋於文字 viewport 上方
     stickyArea->hide();
+    minimapArea = new MinimapArea(this);                   // 右側縮圖
+    minimapArea->setCursor(Qt::PointingHandCursor);
     highlighter = new SyntaxHighlighter(document());
     suggestionWidget = new SuggestionWidget(this);
 
@@ -134,6 +136,65 @@ void CodeEditor::stickyMousePress(QMouseEvent* e) {
         gotoLine(m_stickyHeaders[idx].line + 1);          // line 為 0-based
 }
 
+// ---- Minimap：每行畫一條代表「程式碼形狀」的細條，疊上目前可視範圍指示框 ----
+void CodeEditor::minimapPaintEvent(QPaintEvent*) {
+    if (!minimapArea) return;
+    QPainter p(minimapArea);
+    p.fillRect(minimapArea->rect(), QColor(Theme::LINE_NUM_BG));
+
+    const int total = qMax(1, blockCount());
+    const int W = minimapArea->width();
+    const int H = minimapArea->height();
+    const double maxRowH = 3.0;
+    const double mapH = qMin(double(H), total * maxRowH);
+    const double rowH = mapH / total;                     // 每行高（px）
+    const int step = qMax(1, int(1.0 / rowH));            // rowH<1 時跳行繪製
+    const double colScale = double(W - 6) / 90.0;         // 以 ~90 欄為滿寬
+
+    QColor bar(Theme::SYN_COMMENT);
+    for (int i = 0; i < total; i += step) {
+        const QTextBlock b = document()->findBlockByNumber(i);
+        if (!b.isValid()) break;
+        const QString t = b.text();
+        int indent = 0; while (indent < t.size() && (t[indent] == ' ' || t[indent] == '\t')) ++indent;
+        const int len = t.trimmed().size();
+        if (len == 0) continue;
+        const int x = 3 + int(indent * colScale);
+        const int w = qMin(W - x - 2, qMax(1, int(len * colScale)));
+        const int y = int(i * rowH);
+        const int hh = qMax(1, int(rowH));
+        bar.setAlpha(150);
+        p.fillRect(x, y, w, hh, bar);
+    }
+
+    // 目前可視範圍指示框
+    const int first = firstVisibleBlock().blockNumber();
+    const int visibleLines = qMax(1, int(viewport()->height() / qMax(1, fontMetrics().height())));
+    const int y0 = int(first * rowH);
+    const int y1 = int(qMin(total, first + visibleLines) * rowH);
+    QColor vp(Theme::ACCENT);
+    vp.setAlpha(40);
+    p.fillRect(0, y0, W, qMax(3, y1 - y0), vp);
+    vp.setAlpha(160);
+    p.setPen(vp);
+    p.drawRect(0, y0, W - 1, qMax(3, y1 - y0));
+}
+
+void CodeEditor::scrollToMinimapY(int y) {
+    const int total = qMax(1, blockCount());
+    const int H = minimapArea ? minimapArea->height() : height();
+    const double mapH = qMin(double(H), total * 3.0);
+    const int line = qBound(0, int(y / (mapH / total)), total - 1);
+    const int visibleLines = qMax(1, int(viewport()->height() / qMax(1, fontMetrics().height())));
+    if (auto* sb = verticalScrollBar())
+        sb->setValue(qMax(0, line - visibleLines / 2));   // 置中於該行
+}
+
+void CodeEditor::minimapMousePress(QMouseEvent* e) { scrollToMinimapY(e->pos().y()); }
+void CodeEditor::minimapMouseMove(QMouseEvent* e) {
+    if (e->buttons() & Qt::LeftButton) scrollToMinimapY(e->pos().y());
+}
+
 void CodeEditor::setShowWhitespace(bool on) {
     QTextOption opt = document()->defaultTextOption();
     QTextOption::Flags f = opt.flags();
@@ -157,7 +218,20 @@ int CodeEditor::lineNumberAreaWidth() {
 }
 
 void CodeEditor::updateLineNumberAreaWidth(int /* newBlockCount */) {
-    setViewportMargins(lineNumberAreaWidth(), 0, 0, 0);
+    setViewportMargins(lineNumberAreaWidth(), 0, minimapWidth(), 0);
+}
+
+int CodeEditor::minimapWidth() const {
+    return (m_minimapEnabled && !m_largeFile && blockCount() > 1) ? 84 : 0;
+}
+
+void CodeEditor::setMinimapEnabled(bool on) {
+    m_minimapEnabled = on;
+    updateLineNumberAreaWidth(0);
+    QResizeEvent e(size(), size());
+    resizeEvent(&e);                                     // 重新定位/顯示
+    if (minimapArea) minimapArea->setVisible(minimapWidth() > 0);
+    if (minimapArea) minimapArea->update();
 }
 
 void CodeEditor::updateLineNumberArea(const QRect &rect, int dy) {
@@ -170,12 +244,18 @@ void CodeEditor::updateLineNumberArea(const QRect &rect, int dy) {
         updateLineNumberAreaWidth(0);
 
     updateSticky();                                       // 捲動/重繪時更新 sticky 標頭
+    if (minimapArea && minimapArea->isVisible()) minimapArea->update();
 }
 
 void CodeEditor::resizeEvent(QResizeEvent *e) {
     QPlainTextEdit::resizeEvent(e);
     QRect cr = contentsRect();
     lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
+    const int mw = minimapWidth();
+    if (minimapArea) {
+        minimapArea->setGeometry(QRect(cr.right() - mw + 1, cr.top(), mw, cr.height()));
+        minimapArea->setVisible(mw > 0);
+    }
     updateSticky();
 }
 

@@ -29,6 +29,12 @@ public:
     void stickyPaintEvent(QPaintEvent* event);           // 供 StickyHeaderArea 回呼
     void stickyMousePress(QMouseEvent* event);
 
+    // Minimap 縮圖捲軸
+    void setMinimapEnabled(bool on);
+    void minimapPaintEvent(QPaintEvent* event);          // 供 MinimapArea 回呼
+    void minimapMousePress(QMouseEvent* event);
+    void minimapMouseMove(QMouseEvent* event);
+
     // Notepad++ 風格編輯操作
     void duplicateCurrentLine();
     void deleteCurrentLine();
@@ -146,6 +152,8 @@ private:
     void appendBracketMatchSelections(QList<QTextEdit::ExtraSelection>& selections);
     void paintIndentGuides(QPaintEvent* event);          // 縮排輔助線
     void updateSticky();                                 // 重算/重排 sticky 標頭
+    int  minimapWidth() const;                           // 0 = 不顯示
+    void scrollToMinimapY(int y);                        // 依 minimap y 捲動編輯器
     void setupCompleter();
     void rebuildCompleterModel();
     QString wordUnderCursor() const;
@@ -155,6 +163,8 @@ private:
 
     QWidget *lineNumberArea;
     QWidget *stickyArea = nullptr;                          // sticky scroll 頂部標頭
+    QWidget *minimapArea = nullptr;                         // 右側縮圖
+    bool m_minimapEnabled = true;
     bool m_stickyEnabled = true;
     QVector<TsSymbols::Symbol> m_stickyHeaders;            // 目前要固定的標頭
     mutable QVector<TsSymbols::Symbol> m_symCache;        // documentSymbols 快取（依 revision）
@@ -239,6 +249,20 @@ public:
 protected:
     void paintEvent(QPaintEvent *event) override { codeEditor->stickyPaintEvent(event); }
     void mousePressEvent(QMouseEvent *event) override { codeEditor->stickyMousePress(event); }
+
+private:
+    CodeEditor *codeEditor;
+};
+
+// Minimap 縮圖區（右側）
+class MinimapArea : public QWidget {
+public:
+    explicit MinimapArea(CodeEditor *editor) : QWidget(editor), codeEditor(editor) {}
+
+protected:
+    void paintEvent(QPaintEvent *event) override { codeEditor->minimapPaintEvent(event); }
+    void mousePressEvent(QMouseEvent *event) override { codeEditor->minimapMousePress(event); }
+    void mouseMoveEvent(QMouseEvent *event) override { codeEditor->minimapMouseMove(event); }
 
 private:
     CodeEditor *codeEditor;

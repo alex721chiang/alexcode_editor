@@ -421,6 +421,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
     editor->setAutoPairEnabled(AppSettings().value("editor/autoPair", true).toBool());
     editor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
     editor->setStickyScrollEnabled(AppSettings().value("editor/stickyScroll", true).toBool());
+    editor->setMinimapEnabled(AppSettings().value("editor/minimap", true).toBool());
     applySnippetsToEditor(editor);                  // 通用（language 為空）snippet
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);
@@ -1159,6 +1160,16 @@ void MainWindow::setupUI() {
                 e->setStickyScrollEnabled(on);
     });
     viewMenu->addAction(stickyAction);
+    QAction* minimapAction = new QAction(tr("Minimap 縮圖"), this);
+    minimapAction->setCheckable(true);
+    minimapAction->setChecked(AppSettings().value("editor/minimap", true).toBool());
+    connect(minimapAction, &QAction::toggled, this, [this](bool on) {
+        AppSettings().setValue("editor/minimap", on);
+        for (int i = 0; i < tabWidget->count(); ++i)
+            if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+                e->setMinimapEnabled(on);
+    });
+    viewMenu->addAction(minimapAction);
     QAction* termAction = new QAction(tr("終端機"), this);
     termAction->setCheckable(true);
     termAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_QuoteLeft));   // Ctrl+`

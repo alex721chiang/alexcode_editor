@@ -22,6 +22,8 @@ void VtParser::reset() {
     m_cur = Cell();
     m_state = State::Ground;
     m_csiBuf.clear();
+    m_utf8Buf.clear();
+    m_utf8Need = 0;
     m_scrollback.clear();
     for (auto& row : m_grid)
         for (auto& cell : row) clearCell(cell);
@@ -73,6 +75,44 @@ void VtParser::putChar(QChar ch) {
     ++m_cx;
 }
 
+void VtParser::emitUtf8(const QByteArray& bytes) {
+    const QString s = QString::fromUtf8(bytes);          // 處理代理對（emoji 等）
+    for (const QChar ch : s) putChar(ch);
+}
+
+void VtParser::flushUtf8() {
+    if (m_utf8Need > 0) {                                 // 序列被打斷 → 輸出替換字元
+        putChar(QChar(0xFFFD));
+        m_utf8Buf.clear();
+        m_utf8Need = 0;
+    }
+}
+
+// 逐位元組累積 UTF-8；可列印 ASCII 直接輸出，多位元組湊齊整個序列才解碼。
+void VtParser::feedTextByte(unsigned char c) {
+    if (m_utf8Need > 0) {
+        if ((c & 0xC0) == 0x80) {                        // 合法延續位元組
+            m_utf8Buf.append(static_cast<char>(c));
+            if (--m_utf8Need == 0) { emitUtf8(m_utf8Buf); m_utf8Buf.clear(); }
+        } else {                                         // 不合法 → 先吐替換字元，再重新處理本位元組
+            putChar(QChar(0xFFFD));
+            m_utf8Buf.clear();
+            m_utf8Need = 0;
+            feedTextByte(c);
+        }
+        return;
+    }
+    if (c < 0x80) { putChar(QChar(c)); return; }          // ASCII
+    int len = 0;                                          // 前導位元組 → 序列長度
+    if      ((c & 0xE0) == 0xC0) len = 2;
+    else if ((c & 0xF0) == 0xE0) len = 3;
+    else if ((c & 0xF8) == 0xF0) len = 4;
+    if (len == 0) { putChar(QChar(0xFFFD)); return; }     // 不合法前導
+    m_utf8Buf.clear();
+    m_utf8Buf.append(static_cast<char>(c));
+    m_utf8Need = len - 1;
+}
+
 int VtParser::paramOr(int idx, int def) const {
     const QList<QByteArray> parts = m_csiBuf.split(';');
     if (idx >= parts.size()) return def;
@@ -86,13 +126,13 @@ void VtParser::feed(const QByteArray& bytes) {
         const unsigned char c = static_cast<unsigned char>(b);
         switch (m_state) {
         case State::Ground:
-            if (c == 0x1b) { m_state = State::Esc; }
-            else if (c == '\r') { m_cx = 0; }
-            else if (c == '\n') { newline(); }
-            else if (c == '\b') { if (m_cx > 0) --m_cx; }
-            else if (c == '\t') { m_cx = qMin(((m_cx / 8) + 1) * 8, m_cols - 1); }
-            else if (c == 0x07) { /* BEL：忽略 */ }
-            else if (c >= 0x20) { putChar(QChar(b)); }   // Latin-1；UTF-8 多位元組另見下注
+            if (c == 0x1b) { flushUtf8(); m_state = State::Esc; }
+            else if (c == '\r') { flushUtf8(); m_cx = 0; }
+            else if (c == '\n') { flushUtf8(); newline(); }
+            else if (c == '\b') { flushUtf8(); if (m_cx > 0) --m_cx; }
+            else if (c == '\t') { flushUtf8(); m_cx = qMin(((m_cx / 8) + 1) * 8, m_cols - 1); }
+            else if (c == 0x07) { flushUtf8(); }         // BEL：忽略
+            else if (c >= 0x20) { feedTextByte(c); }     // UTF-8 累積解碼（含中文/emoji）
             break;
         case State::Esc:
             if (c == '[') { m_state = State::Csi; m_csiBuf.clear(); }

@@ -35,6 +35,9 @@ public:
 
 private:
     void putChar(QChar ch);
+    void feedTextByte(unsigned char c);              // UTF-8 累積解碼（跨 feed 邊界）
+    void emitUtf8(const QByteArray& bytes);          // 解碼一個完整序列並輸出
+    void flushUtf8();                                // 控制字元/逸出打斷未完成序列時清掉
     void newline();
     void scrollUp();
     void execCsi(QChar final);
@@ -51,5 +54,7 @@ private:
     // 解析狀態機（跨 feed 保留）
     enum class State { Ground, Esc, Csi, Osc } m_state = State::Ground;
     QByteArray m_csiBuf;                              // CSI 參數/中間位元組累積
+    QByteArray m_utf8Buf;                             // 未完成的 UTF-8 序列位元組
+    int m_utf8Need = 0;                              // 還缺幾個延續位元組
     static const int kMaxScrollback = 5000;
 };
