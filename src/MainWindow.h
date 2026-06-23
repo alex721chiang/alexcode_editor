@@ -1,5 +1,7 @@
 #pragma once
 #include <QMainWindow>
+#include <QFutureWatcher>
+#include "ProjectSymbolIndex.h"
 #include <QTabWidget>
 #include <QListWidget>
 #include <QLineEdit>
@@ -87,12 +89,14 @@ private:
     class QLabel* breadcrumbLabel = nullptr;          // 編輯器頂部麵包屑（檔 > 類別 > 函式）
     class SymbolDialog* symbolDialog = nullptr;       // Ctrl+Shift+O 跳至符號
     class CommandPalette* commandPalette = nullptr;   // Ctrl+Shift+P 命令面板
-    class ProjectSymbolIndex* projectSymbolIndex = nullptr;   // 專案級符號索引（Source Insight 風）
+    ProjectSymbolIndex* projectSymbolIndex = nullptr;         // 專案級符號索引（Source Insight 風）
     class ProjectSymbolDialog* projectSymbolDialog = nullptr; // Ctrl+T 專案符號搜尋
+    QFutureWatcher<ProjectSymbolIndex>* symIndexWatcher = nullptr;   // 背景索引
     void showGoToSymbol();
     void showCommandPalette();
     void showProjectSymbolSearch();
-    void rebuildProjectSymbolIndex();
+    void rebuildProjectSymbolIndex();                         // 背景重建整個索引
+    void updateProjectSymbolFile(const QString& file);        // 增量：重解析單一檔
     void updateBreadcrumb();
     QListWidget* resultsList = nullptr;
     QLineEdit* filterInput = nullptr;

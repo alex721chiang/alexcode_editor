@@ -31,6 +31,7 @@
 #include <QTreeView>
 #include <QFileSystemModel>
 #include <QFileSystemWatcher>
+#include <QtConcurrent>
 #include <QStandardPaths>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -1805,6 +1806,7 @@ void MainWindow::saveFile() {
             && (fileToSave.endsWith(".md", Qt::CaseInsensitive)
                 || fileToSave.endsWith(".markdown", Qt::CaseInsensitive)))
             mdIndexTimer->start();
+        updateProjectSymbolFile(fileToSave);             // 存檔 → 增量更新專案符號索引
     };
 
     if (fileName.endsWith(".cpp") || fileName.endsWith(".h") || fileName.endsWith(".hpp") || fileName.endsWith(".c")) {
@@ -2435,10 +2437,33 @@ void MainWindow::showCommandPalette() {
 
 void MainWindow::rebuildProjectSymbolIndex() {
     if (!projectSymbolIndex || projectFolder.isEmpty()) return;
-    projectSymbolIndex->build(projectFolder);            // S1：同步建索引（S2 改背景）
-    statusBar()->showMessage(
-        tr("專案符號索引：%1 檔、%2 個符號")
-            .arg(projectSymbolIndex->fileCount()).arg(projectSymbolIndex->symbolCount()), 4000);
+    if (symIndexWatcher && symIndexWatcher->isRunning()) return;   // 已在索引中
+
+    if (!symIndexWatcher) {
+        symIndexWatcher = new QFutureWatcher<ProjectSymbolIndex>(this);
+        connect(symIndexWatcher, &QFutureWatcher<ProjectSymbolIndex>::finished, this, [this]() {
+            *projectSymbolIndex = symIndexWatcher->result();      // 在主執行緒換上新索引
+            statusBar()->showMessage(
+                tr("專案符號索引完成：%1 檔、%2 個符號")
+                    .arg(projectSymbolIndex->fileCount()).arg(projectSymbolIndex->symbolCount()), 4000);
+        });
+    }
+    statusBar()->showMessage(tr("正在背景索引專案符號…"), 0);
+    const QString folder = projectFolder;
+    symIndexWatcher->setFuture(QtConcurrent::run([folder]() {       // 背景掃描+解析，不卡 UI
+        ProjectSymbolIndex idx;
+        idx.build(folder);
+        return idx;
+    }));
+}
+
+// 增量更新：存檔 / 外部變更某檔後，只重解析該檔並更新索引中的符號。
+void MainWindow::updateProjectSymbolFile(const QString& file) {
+    if (!projectSymbolIndex || projectFolder.isEmpty() || file.isEmpty()) return;
+    const QString abs = QFileInfo(file).absoluteFilePath();
+    const QString root = QFileInfo(projectFolder).absoluteFilePath();
+    if (!abs.startsWith(root)) return;                            // 只管專案資料夾內的檔
+    projectSymbolIndex->updateFileFromDisk(abs);                  // 不支援/已刪則自動移除
 }
 
 void MainWindow::showProjectSymbolSearch() {
@@ -2532,6 +2557,7 @@ void MainWindow::onFileChangedExternally(const QString& path) {
     // 檔案可能被覆寫重建，重新加回監看
     if (QFileInfo::exists(path) && !fileWatcher->files().contains(path))
         fileWatcher->addPath(path);
+    updateProjectSymbolFile(path);                       // 外部變更 → 增量更新符號索引
     if (!editor || !QFileInfo::exists(path)) return;
 
     const bool tail = tailAction && tailAction->isChecked();
