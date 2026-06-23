@@ -21,6 +21,10 @@ set(SRCS
     GraphView.cpp
     SymbolDialog.cpp
     CommandPalette.cpp
+    TsSymbolParser.cpp
+    ProjectSymbolIndex.cpp
+    ProjectSymbolIndexBuild.cpp
+    ProjectSymbolDialog.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

@@ -1,5 +1,6 @@
 #include "TreeSitterHighlighter.h"
 #include "TsEdit.h"
+#include "TsSymbolParser.h"
 #include "Theme.h"
 #include <tree_sitter/api.h>
 #include <QTextDocument>
@@ -257,67 +258,10 @@ void TreeSitterHighlighter::rehighlightRange(int charLo, int charHi) {
     }
 }
 
-// ---- 符號擷取（Go to Symbol / 麵包屑）----
-static QString tsNodeText(const QByteArray& utf8, TSNode n) {
-    const int s = int(ts_node_start_byte(n));
-    const int e = int(ts_node_end_byte(n));
-    if (s < 0 || e > utf8.size() || e < s) return QString();
-    return QString::fromUtf8(utf8.mid(s, e - s)).trimmed();
-}
-
-// 在 node 子孫中（淺層）找第一個型別以 "identifier" 結尾的節點。
-static bool tsFindIdentifier(TSNode node, int depthLeft, TSNode& result) {
-    const uint32_t c = ts_node_child_count(node);
-    for (uint32_t i = 0; i < c; ++i) {
-        TSNode ch = ts_node_child(node, i);
-        if (QString::fromUtf8(ts_node_type(ch)).endsWith(QLatin1String("identifier"))) {
-            result = ch; return true;
-        }
-    }
-    if (depthLeft <= 0) return false;
-    for (uint32_t i = 0; i < c; ++i)
-        if (tsFindIdentifier(ts_node_child(node, i), depthLeft - 1, result)) return true;
-    return false;
-}
-
-static QString tsSymbolName(TSNode node, const QByteArray& utf8) {
-    TSNode nameNode = ts_node_child_by_field_name(node, "name", 4);
-    if (!ts_node_is_null(nameNode)) return tsNodeText(utf8, nameNode);
-    TSNode decl = ts_node_child_by_field_name(node, "declarator", 10);
-    TSNode id;
-    if (tsFindIdentifier(ts_node_is_null(decl) ? node : decl, 6, id))
-        return tsNodeText(utf8, id);
-    return QString();
-}
-
-static void tsCollectSymbols(TSNode node, const QByteArray& utf8, int depth,
-                             QVector<TsSymbols::Symbol>& out) {
-    const QString type = QString::fromUtf8(ts_node_type(node));
-    const QString kind = TsSymbols::symbolKind(type);
-    int childDepth = depth;
-    if (!kind.isEmpty()) {
-        const QString name = tsSymbolName(node, utf8);
-        if (!name.isEmpty()) {
-            TsSymbols::Symbol s;
-            s.name = name; s.kind = kind;
-            s.line = int(ts_node_start_point(node).row);
-            s.endLine = int(ts_node_end_point(node).row);
-            s.depth = depth;
-            out.append(s);
-            childDepth = depth + 1;
-        }
-    }
-    const uint32_t c = ts_node_child_count(node);
-    for (uint32_t i = 0; i < c; ++i)
-        tsCollectSymbols(ts_node_child(node, i), utf8, childDepth, out);
-}
-
+// 符號擷取（Go to Symbol / 麵包屑）：走訪邏輯已抽到 TsSymbolParser 共用。
 QVector<TsSymbols::Symbol> TreeSitterHighlighter::symbols() const {
-    QVector<TsSymbols::Symbol> out;
-    if (!m_tree) return out;
-    const QByteArray utf8 = m_lastText.toUtf8();
-    tsCollectSymbols(ts_tree_root_node(m_tree), utf8, 0, out);
-    return out;
+    if (!m_tree) return {};
+    return TsSymbolParser::fromTree(m_tree, m_lastText.toUtf8());
 }
 
 void TreeSitterHighlighter::highlightBlock(const QString&) {

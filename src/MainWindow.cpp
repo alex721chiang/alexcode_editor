@@ -59,6 +59,8 @@
 #include "GraphView.h"
 #include "SymbolDialog.h"
 #include "CommandPalette.h"
+#include "ProjectSymbolIndex.h"
+#include "ProjectSymbolDialog.h"
 #include "FileTier.h"
 #include "MarkdownRender.h"
 #include <QDesktopServices>
@@ -670,6 +672,11 @@ void MainWindow::setupUI() {
     connect(cmdPaletteAction, &QAction::triggered, this, &MainWindow::showCommandPalette);
     addAction(cmdPaletteAction);                              // 全域快捷鍵
 
+    QAction* projSymbolAction = new QAction(tr("Go to Symbol in Project..."), this);
+    projSymbolAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
+    connect(projSymbolAction, &QAction::triggered, this, &MainWindow::showProjectSymbolSearch);
+    addAction(projSymbolAction);                              // 全域快捷鍵
+
     toggleBookmarkAction = new QAction(tr("Toggle Bookmark"), this);
     toggleBookmarkAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F2));
     connect(toggleBookmarkAction, &QAction::triggered, this, [this]() {
@@ -767,6 +774,7 @@ void MainWindow::setupUI() {
     fileMenu->addAction(openFolderAction);
     fileMenu->addAction(quickOpenAction);
     fileMenu->addAction(gotoSymbolAction);
+    fileMenu->addAction(projSymbolAction);
     fileMenu->addAction(cmdPaletteAction);
     fileMenu->addSeparator();
     fileMenu->addAction(saveAction);
@@ -1255,6 +1263,9 @@ void MainWindow::setupUI() {
     mdTimer->setSingleShot(true);
     mdTimer->setInterval(500);
     connect(mdTimer, &QTimer::timeout, this, &MainWindow::refreshMarkdownPreview);
+
+    // ---------- 專案符號索引（Source Insight 風）----------
+    projectSymbolIndex = new ProjectSymbolIndex();
 
     // ---------- Backlinks（Obsidian 風：誰連到目前這篇）----------
     mdLinkIndex = new MarkdownLinkIndex();
@@ -2295,6 +2306,7 @@ void MainWindow::setProjectFolder(const QString& folder) {
     updateLspStatus();
 
     rebuildLinkIndex();                                 // 重建 Markdown 連結關係圖
+    rebuildProjectSymbolIndex();                         // 建立專案符號索引（Source Insight 風）
     statusBar()->showMessage("Folder: " + folder, 3000);
 }
 
@@ -2421,11 +2433,46 @@ void MainWindow::showCommandPalette() {
     commandPalette->openWith(gatherCommands(this));
 }
 
+void MainWindow::rebuildProjectSymbolIndex() {
+    if (!projectSymbolIndex || projectFolder.isEmpty()) return;
+    projectSymbolIndex->build(projectFolder);            // S1：同步建索引（S2 改背景）
+    statusBar()->showMessage(
+        tr("專案符號索引：%1 檔、%2 個符號")
+            .arg(projectSymbolIndex->fileCount()).arg(projectSymbolIndex->symbolCount()), 4000);
+}
+
+void MainWindow::showProjectSymbolSearch() {
+    if (!projectSymbolIndex) return;
+    if (projectFolder.isEmpty()) {
+        statusBar()->showMessage(tr("請先開啟資料夾（Ctrl+Alt+O）以建立專案符號索引"), 3500);
+        return;
+    }
+    if (projectSymbolIndex->symbolCount() == 0) rebuildProjectSymbolIndex();
+    if (!projectSymbolDialog) {
+        projectSymbolDialog = new ProjectSymbolDialog(this);
+        connect(projectSymbolDialog, &ProjectSymbolDialog::symbolChosen, this,
+                [this](const QString& file, int line) {
+                    openFileByPath(file);
+                    if (CodeEditor* e = activeEditor()) e->gotoLine(line + 1);   // line 0-based
+                });
+    }
+    projectSymbolDialog->openWith(projectSymbolIndex);
+}
+
 void MainWindow::openCommandPaletteForShot(const QString& outPng) {
     if (!commandPalette) commandPalette = new CommandPalette(this);
     commandPalette->openWith(gatherCommands(this), QStringLiteral("go"));
     QTimer::singleShot(700, this, [this, outPng]() {
         if (commandPalette) commandPalette->grab().save(outPng);
+    });
+}
+
+void MainWindow::openProjectSymbolForShot(const QString& outPng) {
+    rebuildProjectSymbolIndex();
+    if (!projectSymbolDialog) projectSymbolDialog = new ProjectSymbolDialog(this);
+    projectSymbolDialog->openWith(projectSymbolIndex, QStringLiteral("do"));
+    QTimer::singleShot(700, this, [this, outPng]() {
+        if (projectSymbolDialog) projectSymbolDialog->grab().save(outPng);
     });
 }
 
