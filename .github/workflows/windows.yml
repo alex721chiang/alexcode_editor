@@ -42,9 +42,11 @@ jobs:
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
+      continue-on-error: true        # 工件儲存配額用罄等基礎設施問題不應讓建置變紅（建置/測試已通過）
       with:
         name: AlexCode-Windows
         path: build/src/Release/
+        retention-days: 5            # 縮短保留期，避免每次 push 累積佔滿配額
 
     # 以下僅在推 v* 標籤時執行：打包 zip 並建立 GitHub Release
     - name: Package zip
