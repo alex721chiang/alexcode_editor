@@ -56,9 +56,23 @@ jobs:
         New-Item -ItemType Directory -Force dist | Out-Null
         Compress-Archive -Path build/src/Release/* -DestinationPath "dist/AlexCode-Windows-${{ github.ref_name }}.zip"
 
+    - name: Build Installer (Inno Setup)
+      if: startsWith(github.ref, 'refs/tags/')
+      shell: pwsh
+      run: |
+        $ver = "${{ github.ref_name }}".TrimStart('v')
+        $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+        if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+        if (-not (Test-Path $iscc)) {
+          $iscc = (Get-ChildItem 'C:\Program Files (x86)','C:\Program Files' -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+        }
+        & $iscc "/DMyAppVersion=$ver" "/DDeployDir=$((Resolve-Path build/src/Release).Path)" "/DOutDir=$((Resolve-Path dist).Path)" installer/AlexCode.iss
+
     - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
-        files: dist/AlexCode-Windows-${{ github.ref_name }}.zip
+        files: |
+          dist/AlexCode-Windows-${{ github.ref_name }}.zip
+          dist/AlexCode-Setup-*.exe
         generate_release_notes: true

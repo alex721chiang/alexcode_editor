@@ -1,7 +1,15 @@
-# AlexCode — Neon Edition (v4.4)
+# AlexCode — Neon Edition (v4.5)
 
 Qt 6 程式碼編輯器，目標是接近 Notepad++ 的日常編輯體驗，並整合 LSP 語言伺服器、Git、
 強大的 log 行篩選與多套未來感主題。
+
+## ⬇️ 下載（Windows）
+到 [Releases](https://github.com/alex721chiang/alexcode_editor/releases) 下載：
+- **AlexCode-Setup-x.y.z.exe** — 一鍵安裝程式（含開始選單捷徑、解除安裝）
+- **AlexCode-Windows-vx.y.z.zip** — 免安裝可攜版（解壓即執行 `AlexCode.exe`）
+
+兩種都已用 windeployqt 內含 Qt 與 MSVC 執行期，免另外安裝。
+（未做程式碼簽章，首次執行 Windows SmartScreen 可能提示，點「其他資訊 → 仍要執行」即可。）
 
 ## ✨ 功能總覽
 
