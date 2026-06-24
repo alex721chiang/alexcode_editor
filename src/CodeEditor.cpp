@@ -555,10 +555,14 @@ void CodeEditor::zoomEditorReset() {
 }
 
 void CodeEditor::setAIProvider(AICompletionProvider* provider) {
+    if (aiProvider == provider) return;
+    if (aiProvider)                                      // 先斷開舊 provider，避免重複連結造成多次回傳
+        disconnect(aiProvider, &AICompletionProvider::suggestionsReady,
+                   this, &CodeEditor::onAICompletionReady);
     aiProvider = provider;
-    if (aiProvider) {
-        connect(aiProvider, &AICompletionProvider::suggestionsReady, this, &CodeEditor::onAICompletionReady);
-    }
+    if (aiProvider)
+        connect(aiProvider, &AICompletionProvider::suggestionsReady,
+                this, &CodeEditor::onAICompletionReady);
 }
 
 // ----------------------------------------------------------------
@@ -1527,8 +1531,9 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent *event) {
     }
 
     QAction *callGraphAction = menu->addAction(tr("Show Call Graph"));
-    connect(callGraphAction, &QAction::triggered, this, [this, event]() {
-        QTextCursor cursor = cursorForPosition(event->pos());
+    const QPoint menuPos = event->pos();                 // 捕獲副本，勿在 lambda 中持有 event 指標
+    connect(callGraphAction, &QAction::triggered, this, [this, menuPos]() {
+        QTextCursor cursor = cursorForPosition(menuPos);
         cursor.select(QTextCursor::WordUnderCursor);
         QString word = cursor.selectedText();
 

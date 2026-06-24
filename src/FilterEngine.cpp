@@ -77,8 +77,10 @@ void FilterEngine::compile(const QString& query) {
             Term term{t, neg, false, QRegularExpression()};
             if (t.startsWith(QStringLiteral("re:"))) {        // regex 詞
                 const QString pattern = t.mid(3).trimmed();
-                QRegularExpression re(pattern, QRegularExpression::CaseInsensitiveOption);
+                QRegularExpression re(pattern, QRegularExpression::CaseInsensitiveOption
+                                             | QRegularExpression::DontCaptureOption);
                 if (!pattern.isEmpty() && re.isValid()) {
+                    re.optimize();                            // 預先 JIT 編譯，加速超大檔逐行比對
                     term.isRegex = true;
                     term.regex = re;
                 }                                             // 無效 pattern：退回字面比對
