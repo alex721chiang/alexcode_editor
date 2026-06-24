@@ -48,6 +48,7 @@ int main(int argc, char *argv[]) {
     QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir, paletteShot, projsymShot;
     bool wantPreview = false;
     bool wantWhitespace = false;
+    QString refsName;
     int gotoLineArg = 0;
     for (int i = 1; i < args.size(); ++i) {
         if (args[i] == "--screenshot" && i + 1 < args.size()) shotPath = args[++i];
@@ -59,6 +60,7 @@ int main(int argc, char *argv[]) {
         else if ((args[i] == "--folder" || args[i] == "--vault") && i + 1 < args.size()) vaultDir = args[++i];
         else if (args[i] == "--graph" && i + 1 < args.size()) graphDir = args[++i];
         else if (args[i] == "--goto" && i + 1 < args.size()) gotoLineArg = args[++i].toInt();
+        else if (args[i] == "--refs" && i + 1 < args.size()) refsName = args[++i];
         else if (args[i] == "--whitespace") wantWhitespace = true;
         else if (args[i] == "--preview") wantPreview = true;
         else if (QFileInfo(args[i]).isFile())
@@ -71,6 +73,7 @@ int main(int argc, char *argv[]) {
         w.openGraphForShot(graphDir);
     else if (!vaultDir.isEmpty() && QFileInfo(vaultDir).isDir())
         w.openVaultForShot(vaultDir);
+    if (!refsName.isEmpty()) w.findRefsForShot(refsName);
 
     if (!aboutShot.isEmpty()) {               // 截關於對話框
         w.openAboutForShot(aboutShot);

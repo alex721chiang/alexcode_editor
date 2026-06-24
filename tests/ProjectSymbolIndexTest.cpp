@@ -66,3 +66,29 @@ TEST(ProjectSymbolIndex, EmptySymbolsClearsFile) {
     idx.setFileSymbols("/proj/a.cpp", {});    // 空 → 視同移除該檔
     EXPECT_EQ(idx.fileCount(), 1);
 }
+
+TEST(ProjectSymbolIndex, FilesAndMtime) {
+    ProjectSymbolIndex idx;
+    idx.setFileSymbols("/p/a.cpp", { sym("X", "class", 0) }, 42);
+    EXPECT_EQ(idx.files(), QStringList{ "/p/a.cpp" });
+    EXPECT_EQ(idx.mtimeOf("/p/a.cpp"), 42);
+    EXPECT_EQ(idx.mtimeOf("/nope"), -1);
+}
+
+TEST(ProjectSymbolIndex, SerializeRoundTrip) {
+    ProjectSymbolIndex idx;
+    idx.setFileSymbols("/p/a.cpp", { sym("Foo", "class", 1), sym("bar", "function", 5) }, 1000);
+    idx.setFileSymbols("/p/b.py", { sym("Baz", "class", 2) }, 2000);
+    idx.setFileSymbols("/p/empty.cpp", {}, 3000);   // 無符號但記了 mtime
+    const QByteArray blob = idx.serialize();
+
+    ProjectSymbolIndex idx2;
+    idx2.deserialize(blob);
+    EXPECT_EQ(idx2.fileCount(), 2);                 // empty.cpp 無符號 → 不計 fileCount
+    EXPECT_EQ(idx2.symbolCount(), 3);
+    EXPECT_EQ(idx2.mtimeOf("/p/a.cpp"), 1000);
+    EXPECT_EQ(idx2.mtimeOf("/p/empty.cpp"), 3000);  // 無符號檔 mtime 仍保留（避免重解析）
+    ASSERT_EQ(idx2.exact("Foo").size(), 1);
+    EXPECT_EQ(idx2.exact("Foo").first().kind, "class");
+    EXPECT_EQ(idx2.exact("bar").first().line, 5);
+}

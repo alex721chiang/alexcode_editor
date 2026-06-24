@@ -1530,8 +1530,19 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent *event) {
         menu->addSeparator();
     }
 
-    QAction *callGraphAction = menu->addAction(tr("Show Call Graph"));
     const QPoint menuPos = event->pos();                 // 捕獲副本，勿在 lambda 中持有 event 指標
+    {                                                    // 在專案中尋找引用（文字版，跨檔）
+        QTextCursor wc = cursorForPosition(menuPos);
+        wc.select(QTextCursor::WordUnderCursor);
+        const QString word = wc.selectedText();
+        if (!word.isEmpty()) {
+            menu->addAction(tr("在專案中尋找引用「%1」").arg(word), this,
+                            [this, word]() { emit projectReferencesRequested(word); });
+            menu->addSeparator();
+        }
+    }
+
+    QAction *callGraphAction = menu->addAction(tr("Show Call Graph"));
     connect(callGraphAction, &QAction::triggered, this, [this, menuPos]() {
         QTextCursor cursor = cursorForPosition(menuPos);
         cursor.select(QTextCursor::WordUnderCursor);

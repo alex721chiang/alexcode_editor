@@ -62,6 +62,7 @@
 #include "CommandPalette.h"
 #include "ProjectSymbolIndex.h"
 #include "ProjectSymbolDialog.h"
+#include "TextRefs.h"
 #include "FileTier.h"
 #include "MarkdownRender.h"
 #include <QDesktopServices>
@@ -466,6 +467,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
                                settings.value("editor/tabWidth", 4).toInt(), true);
     });
     connect(editor, &CodeEditor::wikilinkActivated, this, &MainWindow::openOrCreateWikilink);
+    connect(editor, &CodeEditor::projectReferencesRequested, this, &MainWindow::findProjectReferences);
     connect(editor, &QPlainTextEdit::textChanged, this, [this, editor]() {
         if (editor->lspEnabled()) {
             if (!lspDirtyEditors.contains(editor)) lspDirtyEditors.append(editor);
@@ -2455,6 +2457,41 @@ void MainWindow::rebuildProjectSymbolIndex() {
         idx.build(folder);
         return idx;
     }));
+}
+
+void MainWindow::findRefsForShot(const QString& name) {
+    if (projectSymbolIndex && !projectFolder.isEmpty())
+        projectSymbolIndex->build(projectFolder);        // 截圖：同步建索引（避開背景非同步）
+    findProjectReferences(name);
+}
+
+// 文字版「找引用」：掃描已索引的原始碼檔，列出符號名整字出現處到 REFERENCES 面板。
+void MainWindow::findProjectReferences(const QString& name) {
+    if (!projectSymbolIndex || name.isEmpty() || !refsList) return;
+    refsList->clear();
+    int count = 0;
+    for (const QString& file : projectSymbolIndex->files()) {
+        QFile f(file);
+        if (f.size() > 4 * 1024 * 1024 || !f.open(QIODevice::ReadOnly)) continue;
+        const QString content = QString::fromUtf8(f.readAll());
+        f.close();
+        for (const TextRefs::Hit& h : TextRefs::findWholeWord(content, name)) {
+            auto* item = new QListWidgetItem(QStringLiteral("%1:%2:  %3")
+                .arg(QFileInfo(file).fileName()).arg(h.line + 1).arg(h.text));
+            item->setToolTip(file);
+            item->setData(Qt::UserRole, QVariantMap{{"filePath", file}, {"lineNum", h.line + 1}});
+            refsList->addItem(item);
+            if (++count >= 5000) break;
+        }
+        if (count >= 5000) break;
+    }
+    refsDock->setWindowTitle(tr("REFERENCES — 專案引用「%1」（%2 處）").arg(name).arg(count));
+    if (count == 0) {
+        statusBar()->showMessage(tr("專案中找不到「%1」的引用").arg(name), 4000);
+    } else {
+        refsDock->show();
+        refsDock->raise();                               // 帶到前面（底部 dock 可能被 tab 疊住）
+    }
 }
 
 // 增量更新：存檔 / 外部變更某檔後，只重解析該檔並更新索引中的符號。

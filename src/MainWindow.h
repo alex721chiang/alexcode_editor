@@ -97,6 +97,7 @@ private:
     void showProjectSymbolSearch();
     void rebuildProjectSymbolIndex();                         // 背景重建整個索引
     void updateProjectSymbolFile(const QString& file);        // 增量：重解析單一檔
+    void findProjectReferences(const QString& name);          // 文字版跨檔找引用 → REFERENCES dock
     void updateBreadcrumb();
     QListWidget* resultsList = nullptr;
     QLineEdit* filterInput = nullptr;
@@ -254,6 +255,7 @@ public:
     void setShowWhitespaceAll(bool on);               // 截圖/CLI：所有分頁切換顯示空白
     void openCommandPaletteForShot(const QString& outPng);   // 截圖：開命令面板並截圖
     void openProjectSymbolForShot(const QString& outPng);    // 截圖：開專案符號搜尋並截圖
+    void findRefsForShot(const QString& name);               // 截圖/CLI：同步建索引並找引用
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）

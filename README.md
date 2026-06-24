@@ -46,7 +46,8 @@ Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF
 | 功能 | 操作 |
 |---|---|
 | 命令面板 | Ctrl+Shift+P：模糊搜尋並執行所有指令，顯示對應快捷鍵 |
-| 專案符號搜尋 | Ctrl+T：開資料夾時於背景用 tree-sitter 索引整個專案的類別/函式（不卡 UI、狀態列顯示進度），跨檔模糊搜尋並跳轉；存檔/外部變更會增量更新（Source Insight 風） |
+| 專案符號搜尋 | Ctrl+T：開資料夾時於背景用 tree-sitter 索引整個專案的類別/函式（不卡 UI、狀態列顯示進度），跨檔模糊搜尋並跳轉；存檔/外部變更增量更新；索引快取於 `.alexcode/symbols.json`（依 mtime，再開秒載）（Source Insight 風） |
+| 專案找引用 | 右鍵「在專案中尋找引用」：跨檔文字版引用清單（REFERENCES 面板，雙擊跳轉）；有 LSP 時 Shift+F12 為精準語意版 |
 | 跳至符號 | Ctrl+Shift+O：模糊搜尋目前檔的類別/函式並跳轉（tree-sitter 擷取符號） |
 | Sticky scroll | 捲動時固定目前函式/類別標頭於頂端，點擊跳轉（檢視選單可開關） |
 | Minimap | 右側程式碼縮圖，點擊/拖曳快速定位（檢視選單可開關） |

@@ -125,6 +125,7 @@ signals:
     void lspRenameRequested(int line, int character);
     void lspFormatRequested();
     void wikilinkActivated(const QString& target);       // Ctrl+點擊 [[…]]（Markdown 導覽）
+    void projectReferencesRequested(const QString& word);// 右鍵：在專案中尋找引用（文字版）
 
 protected:
     bool event(QEvent* e) override;                      // QEvent::ToolTip → 診斷 / hover
