@@ -256,6 +256,7 @@ public:
     void openCommandPaletteForShot(const QString& outPng);   // 截圖：開命令面板並截圖
     void openProjectSymbolForShot(const QString& outPng);    // 截圖：開專案符號搜尋並截圖
     void findRefsForShot(const QString& name);               // 截圖/CLI：同步建索引並找引用
+    void openCallGraphForShot(const QString& outPng);        // 截圖：開目前游標所在函式的 Call Graph
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）

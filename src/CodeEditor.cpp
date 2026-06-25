@@ -1545,43 +1545,50 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent *event) {
     QAction *callGraphAction = menu->addAction(tr("Show Call Graph"));
     connect(callGraphAction, &QAction::triggered, this, [this, menuPos]() {
         QTextCursor cursor = cursorForPosition(menuPos);
+        const int line = cursor.blockNumber();
         cursor.select(QTextCursor::WordUnderCursor);
-        QString word = cursor.selectedText();
-
-        if (word.isEmpty()) {
-            word = "CurrentDocument";
-        }
-
-        // MVP 階段：簡單地掃描文件內容，抓取可能是函式呼叫的字眼 (字首 + 括號)
-        QString text = toPlainText();
-        QRegularExpression re("\\b([a-zA-Z_]\\w*)\\s*\\(");
-        QRegularExpressionMatchIterator i = re.globalMatch(text);
-
-        QSet<QString> deps;
-        while (i.hasNext() && deps.size() < 10) {
-            QRegularExpressionMatch match = i.next();
-            QString func = match.captured(1);
-            if (func != word && func != "if" && func != "while" && func != "for" && func != "switch" && func != "catch" && func != "return" && func != "sizeof") {
-                deps.insert(func);
-            }
-        }
-
-        CallGraphWidget *graphWidget = new CallGraphWidget(this);
-        connect(graphWidget, &CallGraphWidget::nodeDoubleClicked, this, [this](const QString& funcName) {
-            QTextCursor cursor = document()->find(QRegularExpression("\\b" + funcName + "\\b"));
-            if (!cursor.isNull()) {
-                setTextCursor(cursor);
-                centerCursor();
-                setFocus();
-            }
-        });
-        graphWidget->buildGraph(word, deps);
-        graphWidget->setAttribute(Qt::WA_DeleteOnClose);
-        graphWidget->show();
+        showCallGraphAt(line, cursor.selectedText());
     });
 
     menu->exec(event->globalPos());
     delete menu;
+}
+
+// Call Graph：tree-sitter 可用時抓「該行所在函式」實際呼叫的函式（離線精準）；否則退回 regex。
+QWidget* CodeEditor::showCallGraphAt(int line, const QString& fallbackWord) {
+    QString root = fallbackWord;
+    QSet<QString> deps;
+
+    if (tsHighlighter && tsHighlighter->document()) {
+        const TreeSitterHighlighter::CallInfo info = tsHighlighter->callInfoAt(line);
+        if (!info.root.isEmpty()) root = info.root;
+        for (const QString& c : info.callees) {
+            if (deps.size() >= 12) break;
+            deps.insert(c);
+        }
+    } else {
+        const QString text = toPlainText();
+        static const QRegularExpression re(QStringLiteral("\\b([a-zA-Z_]\\w*)\\s*\\("));
+        auto i = re.globalMatch(text);
+        while (i.hasNext() && deps.size() < 10) {
+            const QString func = i.next().captured(1);
+            if (func != fallbackWord && func != "if" && func != "while" && func != "for"
+                && func != "switch" && func != "catch" && func != "return" && func != "sizeof")
+                deps.insert(func);
+        }
+    }
+    if (root.isEmpty()) root = QStringLiteral("CurrentDocument");
+
+    CallGraphWidget* graphWidget = new CallGraphWidget(this);
+    connect(graphWidget, &CallGraphWidget::nodeDoubleClicked, this, [this](const QString& funcName) {
+        QTextCursor c = document()->find(
+            QRegularExpression("\\b" + QRegularExpression::escape(funcName) + "\\b"));
+        if (!c.isNull()) { setTextCursor(c); centerCursor(); setFocus(); }
+    });
+    graphWidget->buildGraph(root, deps);
+    graphWidget->setAttribute(Qt::WA_DeleteOnClose);
+    graphWidget->show();
+    return graphWidget;
 }
 
 // ----------------------------------------------------------------

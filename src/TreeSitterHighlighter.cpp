@@ -264,6 +264,25 @@ QVector<TsSymbols::Symbol> TreeSitterHighlighter::symbols() const {
     return TsSymbolParser::fromTree(m_tree, m_lastText.toUtf8());
 }
 
+// Call Graph（離線精準版）：找包含 line 的最內層函式/方法，回傳其範圍內實際呼叫的函式名。
+TreeSitterHighlighter::CallInfo TreeSitterHighlighter::callInfoAt(int line) const {
+    CallInfo info;
+    if (!m_tree) return info;
+    const QByteArray utf8 = m_lastText.toUtf8();
+
+    int bestSpan = INT_MAX, sRow = -1, eRow = -1;        // 找最內層（範圍最小）的函式/方法
+    for (const TsSymbols::Symbol& s : TsSymbolParser::fromTree(m_tree, utf8)) {
+        if (s.kind != QLatin1String("function") && s.kind != QLatin1String("method")) continue;
+        if (s.line <= line && line <= s.endLine && (s.endLine - s.line) < bestSpan) {
+            bestSpan = s.endLine - s.line;
+            sRow = s.line; eRow = s.endLine; info.root = s.name;
+        }
+    }
+    info.callees = TsSymbolParser::calleesFromTree(m_tree, utf8, sRow, eRow);  // sRow<0 → 全檔
+    info.callees.removeAll(info.root);                   // 不把自己列為被呼叫者
+    return info;
+}
+
 void TreeSitterHighlighter::highlightBlock(const QString&) {
     const auto it = m_blockSpans.constFind(currentBlock().blockNumber());
     if (it == m_blockSpans.constEnd()) return;

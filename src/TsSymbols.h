@@ -34,4 +34,9 @@ inline QString symbolKind(const QString& type) {
 
 inline bool isSymbolNode(const QString& type) { return !symbolKind(type).isEmpty(); }
 
+// 函式呼叫節點：C/C++/JS = call_expression、Python = call。供 Call Graph 用。
+inline bool isCallNode(const QString& type) {
+    return type == QLatin1String("call_expression") || type == QLatin1String("call");
+}
+
 } // namespace TsSymbols

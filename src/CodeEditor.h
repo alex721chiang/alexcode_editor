@@ -89,6 +89,9 @@ public:
     // 文件符號（類別/函式）：tree-sitter 可用時回傳，否則空（Go to Symbol / 麵包屑）
     QVector<TsSymbols::Symbol> documentSymbols() const;
 
+    // Call Graph：建立並顯示「該行所在函式」的呼叫關係圖，回傳該對話框（截圖/右鍵共用）
+    QWidget* showCallGraphAt(int line, const QString& fallbackWord = QString());
+
     // ---- Snippet 樣板（trigger + Tab 展開）----
     void setSnippets(const QHash<QString, QString>& snippets) { m_snippets = snippets; }
 

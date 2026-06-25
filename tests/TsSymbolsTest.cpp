@@ -37,3 +37,10 @@ TEST(TsSymbols, IsSymbolNode) {
     EXPECT_FALSE(isSymbolNode("identifier"));
     EXPECT_FALSE(isSymbolNode("expression_statement"));
 }
+
+TEST(TsSymbols, IsCallNode) {
+    EXPECT_TRUE(TsSymbols::isCallNode("call_expression"));   // C/C++/JS
+    EXPECT_TRUE(TsSymbols::isCallNode("call"));              // Python
+    EXPECT_FALSE(TsSymbols::isCallNode("function_definition"));
+    EXPECT_FALSE(TsSymbols::isCallNode("identifier"));
+}

@@ -1,6 +1,7 @@
 #include "TsSymbolParser.h"
 #include "TreeSitterHighlighter.h"      // 重用 langForExtension（單一來源的副檔名對應）
 #include <tree_sitter/api.h>
+#include <QSet>
 
 extern "C" {
 const TSLanguage* tree_sitter_cpp(void);
@@ -64,6 +65,39 @@ static void tsCollectSymbols(TSNode node, const QByteArray& utf8, int depth,
         tsCollectSymbols(ts_node_child(node, i), utf8, childDepth, out);
 }
 
+// 取節點最右側的「葉」識別字（call 的 function 欄可能是 identifier / obj.method / ns::foo）。
+// 只有無子節點的 identifier 類才算葉 → qualified_identifier/field_expression 會往下鑽到真正的函式名。
+static QString tsLastIdentifierText(TSNode node, const QByteArray& utf8, int depthLeft = 8) {
+    if (ts_node_child_count(node) == 0
+        && QString::fromUtf8(ts_node_type(node)).endsWith(QLatin1String("identifier")))
+        return tsNodeText(utf8, node);
+    if (depthLeft <= 0) return QString();
+    const uint32_t c = ts_node_child_count(node);
+    for (int i = int(c) - 1; i >= 0; --i) {
+        const QString r = tsLastIdentifierText(ts_node_child(node, uint32_t(i)), utf8, depthLeft - 1);
+        if (!r.isEmpty()) return r;
+    }
+    return QString();
+}
+
+// 走訪語法樹蒐集呼叫的函式名（去重、依出現順序）；startRow>=0 時只看該行範圍。
+static void tsCollectCalls(TSNode node, const QByteArray& utf8, int startRow, int endRow,
+                           QStringList& out, QSet<QString>& seen) {
+    if (TsSymbols::isCallNode(QString::fromUtf8(ts_node_type(node)))) {
+        const int row = int(ts_node_start_point(node).row);
+        if (startRow < 0 || (row >= startRow && row <= endRow)) {
+            TSNode fn = ts_node_child_by_field_name(node, "function", 8);
+            if (!ts_node_is_null(fn)) {
+                const QString name = tsLastIdentifierText(fn, utf8);
+                if (!name.isEmpty() && !seen.contains(name)) { seen.insert(name); out.append(name); }
+            }
+        }
+    }
+    const uint32_t c = ts_node_child_count(node);
+    for (uint32_t i = 0; i < c; ++i)
+        tsCollectCalls(ts_node_child(node, i), utf8, startRow, endRow, out, seen);
+}
+
 static const TSLanguage* languageForExt(const QString& ext) {
     switch (TreeSitterHighlighter::langForExtension(ext)) {
         case TreeSitterHighlighter::Lang::Cpp:        return tree_sitter_cpp();
@@ -94,6 +128,14 @@ QVector<TsSymbols::Symbol> parse(const QByteArray& utf8, const QString& ext) {
     QVector<TsSymbols::Symbol> out = fromTree(tree, utf8);
     if (tree) ts_tree_delete(tree);
     ts_parser_delete(parser);
+    return out;
+}
+
+QStringList calleesFromTree(TSTree* tree, const QByteArray& utf8, int startRow, int endRow) {
+    QStringList out;
+    if (!tree) return out;
+    QSet<QString> seen;
+    tsCollectCalls(ts_tree_root_node(tree), utf8, startRow, endRow, out, seen);
     return out;
 }
 

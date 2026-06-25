@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QVector>
 #include <QString>
+#include <QStringList>
 #include "TsCategory.h"
 #include "TsSymbols.h"
 
@@ -27,6 +28,10 @@ public:
     void setLanguage(Lang lang);
     void refreshTheme();
     QVector<TsSymbols::Symbol> symbols() const;          // 走訪語法樹擷取類別/函式符號
+
+    struct CallInfo { QString root; QStringList callees; };   // Call Graph：根函式 + 被呼叫者
+    CallInfo callInfoAt(int line) const;                 // 游標所在函式內實際呼叫的函式（離線精準）
+
     static Lang langForExtension(const QString& ext);
     static QString languageName(Lang lang);
 

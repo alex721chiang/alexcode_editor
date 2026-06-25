@@ -2459,6 +2459,13 @@ void MainWindow::rebuildProjectSymbolIndex() {
     }));
 }
 
+void MainWindow::openCallGraphForShot(const QString& outPng) {
+    CodeEditor* e = activeEditor();
+    if (!e) return;
+    QWidget* dlg = e->showCallGraphAt(e->textCursor().blockNumber());
+    QTimer::singleShot(700, this, [dlg, outPng]() { if (dlg) dlg->grab().save(outPng); });
+}
+
 void MainWindow::findRefsForShot(const QString& name) {
     if (projectSymbolIndex && !projectFolder.isEmpty())
         projectSymbolIndex->build(projectFolder);        // 截圖：同步建索引（避開背景非同步）
