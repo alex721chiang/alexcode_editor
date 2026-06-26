@@ -2459,6 +2459,14 @@ void MainWindow::rebuildProjectSymbolIndex() {
     }));
 }
 
+void MainWindow::openMenuForShot(int index, const QString& outPng) {
+    const QList<QAction*> acts = menuBar()->actions();
+    if (index < 0 || index >= acts.size() || !acts[index]->menu()) return;
+    QMenu* m = acts[index]->menu();
+    m->popup(mapToGlobal(QPoint(40 + index * 70, 30)));
+    QTimer::singleShot(700, this, [m, outPng]() { if (m) m->grab().save(outPng); });
+}
+
 void MainWindow::openCallGraphForShot(const QString& outPng) {
     CodeEditor* e = activeEditor();
     if (!e) return;

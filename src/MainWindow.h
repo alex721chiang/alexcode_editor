@@ -257,6 +257,7 @@ public:
     void openProjectSymbolForShot(const QString& outPng);    // 截圖：開專案符號搜尋並截圖
     void findRefsForShot(const QString& name);               // 截圖/CLI：同步建索引並找引用
     void openCallGraphForShot(const QString& outPng);        // 截圖：開目前游標所在函式的 Call Graph
+    void openMenuForShot(int index, const QString& outPng);  // 截圖：彈出某選單列選單以驗證 i18n
 private:
 
     // Snippet 樣板（trigger + Tab 展開；JSON 設定）
