@@ -63,6 +63,15 @@ public:
     QList<int> bookmarkedLines() const;          // 0-based 行號（給 Session 保存）
     void setBookmarkedLines(const QList<int>& lines);
 
+    // 書籤批次操作（Notepad++ 的 Search→Bookmark 選單）
+    int bookmarkMatchingLines(const QString& pattern, bool caseSensitive, bool useRegex);
+                                                  // 把符合的行加入書籤（保留既有書籤）；
+                                                  // 回傳新增的書籤數；regex 無效時回傳 -1
+    QString bookmarkedLinesText() const;         // 書籤行文字，依行號排序、用 \n 相接（給複製/剪下用）
+    void deleteBookmarkedLines();                // 刪除所有書籤行（單一 Undo 步驟）
+    void deleteNonBookmarkedLines();             // 只留書籤行，其餘刪除（單一 Undo 步驟）
+    void invertBookmarks();                      // 書籤行 ⇄ 非書籤行互換
+
     // 巨集錄製 / 重播
     void startMacroRecording();
     void stopMacroRecording();

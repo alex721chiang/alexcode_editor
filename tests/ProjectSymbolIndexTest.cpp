@@ -92,3 +92,46 @@ TEST(ProjectSymbolIndex, SerializeRoundTrip) {
     EXPECT_EQ(idx2.exact("Foo").first().kind, "class");
     EXPECT_EQ(idx2.exact("bar").first().line, 5);
 }
+
+// --- 記憶體內索引（Phase 1）：exact()/search() 改走索引後，行為需與舊版線性掃描完全一致 ---
+
+TEST(ProjectSymbolIndex, ExactAfterRemoveUsesIndex) {
+    auto idx = makeIndex();
+    idx.removeFile("/proj/a.cpp");
+    EXPECT_TRUE(idx.exact("Foo").isEmpty());       // a.cpp 的 Foo 已移除，索引需同步移除
+    EXPECT_EQ(idx.exact("doWork").size(), 1);      // b.cpp 的 doWork 仍在
+}
+
+TEST(ProjectSymbolIndex, ExactAfterReplaceUsesIndex) {
+    ProjectSymbolIndex idx;
+    idx.setFileSymbols("/p/a.cpp", { sym("Old", "class", 1) });
+    idx.setFileSymbols("/p/a.cpp", { sym("New", "class", 1) });   // 取代同一檔的符號
+    EXPECT_TRUE(idx.exact("Old").isEmpty());       // 舊索引項需一併清掉，否則會殘留幽靈結果
+    EXPECT_EQ(idx.exact("New").size(), 1);
+}
+
+TEST(ProjectSymbolIndex, SearchFallbackFindsSubstringMatch) {
+    auto idx = makeIndex();
+    // "or" 不是任何符號名稱的前綴，前綴快速路徑找不到 → 必須退回全表比對子字串
+    auto hits = idx.search("or");
+    ASSERT_FALSE(hits.isEmpty());
+    for (auto& e : hits) EXPECT_EQ(e.name, "doWork");
+}
+
+TEST(ProjectSymbolIndex, SearchPrefixFastPathRespectsLimit) {
+    ProjectSymbolIndex idx;
+    idx.setFileSymbols("/p/a.cpp", { sym("getAlpha", "function", 1), sym("getBeta", "function", 2),
+                                     sym("getGamma", "function", 3) });
+    // 三個符號都以 get 開頭，命中數(3) >= limit(2) → 觸發快速路徑，只回傳 2 筆
+    auto hits = idx.search("get", 2);
+    EXPECT_EQ(hits.size(), 2);
+}
+
+TEST(ProjectSymbolIndex, SearchPrefixFastPathMatchesLinearScanOrder) {
+    ProjectSymbolIndex idx;
+    idx.setFileSymbols("/p/a.cpp", { sym("getX", "function", 1), sym("getLongerName", "function", 2) });
+    // 前綴分數 = 400 - 長度，短名稱分數較高，應排在前面（與舊版線性掃描排序規則一致）
+    auto hits = idx.search("get", 10);
+    ASSERT_EQ(hits.size(), 2);
+    EXPECT_EQ(hits.first().name, "getX");
+}

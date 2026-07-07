@@ -54,19 +54,27 @@
 #include <QSpinBox>
 #include <QFormLayout>
 #include <QDialogButtonBox>
+#include <QDialog>
+#include <QLineEdit>
+#include <QCheckBox>
 #include "AICompletionProvider.h"
 #include "LspManager.h"
-#include "MarkdownLinkIndex.h"
-#include "GraphView.h"
+#include "MarkdownLinkController.h"
+#include "RecentFilesController.h"
+#include "SnippetsController.h"
 #include "SymbolDialog.h"
 #include "CommandPalette.h"
-#include "ProjectSymbolIndex.h"
+#include "ProjectSymbolController.h"
 #include "ProjectSymbolDialog.h"
 #include "TextRefs.h"
 #include "FileTier.h"
 #include "MarkdownRender.h"
 #include <QDesktopServices>
-#include "GitGutter.h"
+#include "GitGutterController.h"
+#include "LspStatusController.h"
+#include "LspSyncController.h"
+#include "LspController.h"
+#include "FunctionListController.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
@@ -95,8 +103,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     defaultEditorFont = loadFont();
     isFontSet = true;
-    loadRecentFiles();
-    loadSnippets();
+    snippetsController = new SnippetsController(this);
     setupLsp();
     setupUI();
     setupStatusBar();
@@ -121,6 +128,12 @@ CodeEditor* MainWindow::activeEditor() {
     return qobject_cast<CodeEditor*>(tabWidget->currentWidget());
 }
 
+// 目前作用中分頁的檔案路徑；MarkdownLinkController 不認識 CodeEditor，靠這個取值傳進去。
+QString MainWindow::currentFilePath() {
+    CodeEditor* e = activeEditor();
+    return e ? e->property("filePath").toString() : QString();
+}
+
 CodeEditor* MainWindow::editorForPath(const QString& path) {
     for (int i = 0; i < tabWidget->count(); ++i) {
         auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i));
@@ -133,43 +146,61 @@ CodeEditor* MainWindow::editorForPath(const QString& path) {
 // LSP（語言伺服器）：診斷 / 補全 / 跳至定義 / hover
 // ----------------------------------------------------------------
 void MainWindow::setupLsp() {
-    lsp = new LspManager(this);
+    // resolveEditor：找已開啟的分頁；openIfMissing 時找不到就先開分頁。
+    // 讓 LspController 不需要認識 tabWidget，維持與其他 controller 一致的解耦模式。
+    auto resolveEditor = [this](const QString& path, bool openIfMissing) -> CodeEditor* {
+        CodeEditor* e = editorForPath(path);
+        if (!e && openIfMissing) { openFileByPath(path); e = editorForPath(path); }
+        return e;
+    };
+    lspController = new LspController(resolveEditor, this, this);
+    connect(lspController, &LspController::statusMessage, this,
+            [this](const QString& text, int ms) { statusBar()->showMessage(text, ms); });
+    connect(lspController, &LspController::referenceActivated, this,
+            [this](const QString& path, int line) {
+                openFileByPath(path);
+                if (CodeEditor* e = activeEditor()) e->gotoLine(line);
+            });
 
-    // didChange 防抖：編輯停頓 400ms 後送出完整內容
-    lspChangeTimer = new QTimer(this);
-    lspChangeTimer->setSingleShot(true);
-    lspChangeTimer->setInterval(400);
-    connect(lspChangeTimer, &QTimer::timeout, this, [this]() {
-        for (const QPointer<CodeEditor>& e : lspDirtyEditors) {
-            if (!e) continue;
-            const QString path = e->property("filePath").toString();
-            if (!path.isEmpty()) lsp->documentChanged(path, e->toPlainText());
-        }
-        lspDirtyEditors.clear();
-    });
+    lspStatusController = new LspStatusController(lspController->lsp(), this, this);   // 第三個 this：QObject parent
+
+    // LSP 文件同步（didChange 防抖 + 套用 TextEdit）
+    lspSyncController = new LspSyncController(lspController->lsp(), this);
+
+    // Git gutter：非同步抓 HEAD 版本、與緩衝區 diff 後標示行狀態
+    gitGutterController = new GitGutterController(this);
+    connect(gitGutterController, &GitGutterController::headReady, this,
+            [this](const QString& path) {
+                if (CodeEditor* e = editorForPath(path)) gitGutterController->recompute(e);
+            });
+    connect(gitGutterController, &GitGutterController::markedUntracked, this,
+            [this](const QString& path) {
+                if (CodeEditor* e = editorForPath(path)) e->setGitLineStates({});
+            });
 
     // Git gutter 重算防抖：編輯停頓 600ms 後比對 HEAD
     gitGutterTimer = new QTimer(this);
     gitGutterTimer->setSingleShot(true);
     gitGutterTimer->setInterval(600);
     connect(gitGutterTimer, &QTimer::timeout, this, [this]() {
-        recomputeGitGutter(activeEditor());
+        gitGutterController->recompute(activeEditor());
     });
 
-    connect(lsp, &LspManager::diagnosticsReceived, this,
+    // 以下幾個天生要看「目前作用中分頁是誰」，留在這裡（透過 lspController->lsp() 存取底層 LspManager）
+    connect(lspController->lsp(), &LspManager::diagnosticsReceived, this,
             [this](const QString& path, const QList<LspProtocol::Diagnostic>& diags) {
         if (CodeEditor* e = editorForPath(path)) {
             e->setDiagnostics(diags);
-            if (e == activeEditor()) updateLspStatus();
+            if (e == activeEditor()) lspStatusController->update(e);
         }
     });
-    connect(lsp, &LspManager::completionReady, this,
+    connect(lspController->lsp(), &LspManager::completionReady, this,
             [this](const QString& path, const QStringList& items) {
         CodeEditor* e = activeEditor();
         if (e && e->property("filePath").toString() == path)
             e->showLspCompletions(items);
     });
-    connect(lsp, &LspManager::definitionReady, this,
+    connect(lspController->lsp(), &LspManager::definitionReady, this,
             [this](const QString& path, int line, int character) {
         openFileByPath(path);                       // 已開啟則切換分頁；導覽歷史自動記錄
         if (CodeEditor* e = activeEditor()) {
@@ -181,173 +212,19 @@ void MainWindow::setupLsp() {
             e->setTextCursor(c);
         }
     });
-    connect(lsp, &LspManager::hoverReady, this,
+    connect(lspController->lsp(), &LspManager::hoverReady, this,
             [this](const QString& path, const QString& text) {
         CodeEditor* e = activeEditor();
         if (e && e->property("filePath").toString() == path)
             e->showHoverText(text);
     });
-    connect(lsp, &LspManager::statusChanged, this, &MainWindow::updateLspStatus);
-    connect(lsp, &LspManager::serverFailed, this, [this](const QString& reason) {
-        statusBar()->showMessage(tr("LSP：") + reason, 6000);
-    });
-
-    // ---- v2：全部引用結果面板（雙擊跳轉，模式同 Find in Files）----
-    refsDock = new QDockWidget(tr("REFERENCES — 全部引用"), this);
-    refsList = new QListWidget(this);
-    refsDock->setWidget(refsList);
-    addDockWidget(Qt::BottomDockWidgetArea, refsDock);
-    refsDock->hide();
-    connect(refsList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
-        const QVariantMap data = item->data(Qt::UserRole).toMap();
-        if (data.isEmpty()) return;
-        openFileByPath(data.value("filePath").toString());
-        if (CodeEditor* e = activeEditor()) e->gotoLine(data.value("lineNum").toInt());
-    });
-
-    connect(lsp, &LspManager::referencesReady, this,
-            [this](const QString&, const QList<LspProtocol::Location>& locations) {
-        refsList->clear();
-        QHash<QString, QStringList> fileLines;               // 每檔讀一次，顯示該行內容
-        for (const LspProtocol::Location& loc : locations) {
-            QString lineText;
-            if (CodeEditor* e = editorForPath(loc.path)) {
-                lineText = e->document()->findBlockByNumber(loc.line).text();
-            } else {
-                if (!fileLines.contains(loc.path)) {
-                    QFile f(loc.path);
-                    if (f.size() < 4 * 1024 * 1024 && f.open(QIODevice::ReadOnly))
-                        fileLines.insert(loc.path, QString::fromUtf8(f.readAll()).split('\n'));
-                    else
-                        fileLines.insert(loc.path, QStringList());
-                }
-                lineText = fileLines[loc.path].value(loc.line);
-            }
-            auto* item = new QListWidgetItem(QStringLiteral("%1:%2:  %3")
-                .arg(QFileInfo(loc.path).fileName()).arg(loc.line + 1).arg(lineText.trimmed()));
-            item->setToolTip(loc.path);
-            item->setData(Qt::UserRole, QVariantMap{
-                {"filePath", loc.path}, {"lineNum", loc.line + 1}});
-            refsList->addItem(item);
-        }
-        refsDock->setWindowTitle(tr("REFERENCES — 全部引用（%1 處）").arg(locations.size()));
-        if (locations.isEmpty())
-            statusBar()->showMessage(tr("LSP：找不到引用"), 4000);
-        else
-            refsDock->show();
-    });
-
-    connect(lsp, &LspManager::renameReady, this,
-            [this](const QHash<QString, QList<LspProtocol::TextEdit>>& edits) {
-        if (edits.isEmpty()) {
-            statusBar()->showMessage(tr("LSP：無法重新命名（伺服器未回傳編輯）"), 4000);
-            return;
-        }
-        int editCount = 0;
-        for (auto it = edits.begin(); it != edits.end(); ++it) {
-            CodeEditor* e = editorForPath(it.key());
-            if (!e) {                                        // 未開啟的檔案：開進分頁再套用（保留 Undo）
-                openFileByPath(it.key());
-                e = editorForPath(it.key());
-            }
-            if (!e) continue;
-            applyTextEditsToEditor(e, it.value());
-            editCount += it.value().size();
-        }
-        statusBar()->showMessage(tr("重新命名完成：%1 個檔案、%2 處變更")
-                                     .arg(edits.size()).arg(editCount), 5000);
-    });
-
-    connect(lsp, &LspManager::formattingReady, this,
-            [this](const QString& path, const QList<LspProtocol::TextEdit>& edits) {
-        if (edits.isEmpty()) {
-            statusBar()->showMessage(tr("LSP：文件已符合格式（無變更）"), 4000);
-            return;
-        }
-        if (CodeEditor* e = editorForPath(path)) {
-            applyTextEditsToEditor(e, edits);
-            statusBar()->showMessage(tr("格式化完成：%1 處變更").arg(edits.size()), 4000);
-        }
-    });
-}
-
-// 以單一 Undo 步驟套用 LSP TextEdit（由後往前，避免位置位移）
-void MainWindow::applyTextEditsToEditor(CodeEditor* editor, const QList<LspProtocol::TextEdit>& edits) {
-    QTextDocument* doc = editor->document();
-    const auto offsetOf = [doc](int line, int ch) {
-        const QTextBlock b = doc->findBlockByNumber(qMin(line, doc->blockCount() - 1));
-        return b.position() + qMin(ch, qMax(int(b.length()) - 1, 0));
-    };
-    struct Span { int start, end; QString newText; };
-    QList<Span> spans;
-    spans.reserve(edits.size());
-    for (const LspProtocol::TextEdit& e : edits)
-        spans.append({ offsetOf(e.startLine, e.startChar), offsetOf(e.endLine, e.endChar), e.newText });
-    std::sort(spans.begin(), spans.end(),
-              [](const Span& a, const Span& b) { return a.start > b.start; });
-
-    QTextCursor c(doc);
-    c.beginEditBlock();
-    for (const Span& s : spans) {
-        c.setPosition(s.start);
-        c.setPosition(qMax(s.end, s.start), QTextCursor::KeepAnchor);
-        c.insertText(s.newText);
-    }
-    c.endEditBlock();
-}
-
-void MainWindow::updateLspStatus() {
-    if (!statusLsp) return;
-    CodeEditor* e = activeEditor();
-    const QString path = e ? e->property("filePath").toString() : QString();
-    const QString server = path.isEmpty() ? QString() : lsp->serverNameForFile(path);
-    if (server.isEmpty() || !e->lspEnabled()) {
-        statusLsp->setText("");
-        return;
-    }
-    if (!lsp->isReadyForFile(path)) {
-        statusLsp->setText(QStringLiteral("LSP: %1 …").arg(server));
-        return;
-    }
-    int errors = 0, warnings = 0;
-    e->diagnosticCounts(&errors, &warnings);
-    statusLsp->setText(QStringLiteral("LSP: %1 ✓ E%2 W%3").arg(server).arg(errors).arg(warnings));
-    e->setLspCompletionTriggers(lsp->completionTriggersForFile(path));   // v2：自動補全觸發字元
+    connect(lspController->lsp(), &LspManager::statusChanged, this,
+            [this]() { lspStatusController->update(activeEditor()); });
 }
 
 // ----------------------------------------------------------------
-// Git gutter 行標示：緩衝區 vs HEAD 版本
+// Git gutter 行標示：緩衝區 vs HEAD 版本（實作已搬到 GitGutterController）
 // ----------------------------------------------------------------
-void MainWindow::fetchGitHead(const QString& path) {
-    if (path.isEmpty() || gitUntracked.contains(path)) return;
-    const QFileInfo fi(path);
-    auto* p = new QProcess(this);
-    p->setWorkingDirectory(fi.absolutePath());
-    connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, p, path](int code, QProcess::ExitStatus) {
-        if (code == 0) {
-            QString head = QString::fromUtf8(p->readAllStandardOutput());
-            head.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-            gitHeadCache.insert(path, head);
-            if (CodeEditor* e = editorForPath(path)) recomputeGitGutter(e);
-        } else {
-            gitUntracked.insert(path);               // 不在版控（或非 git 目錄）：不重試
-            if (CodeEditor* e = editorForPath(path)) e->setGitLineStates({});
-        }
-        p->deleteLater();
-    });
-    // "HEAD:./檔名" 相對於工作目錄解析，免去計算 repo 內相對路徑
-    p->start("git", {"show", "HEAD:./" + fi.fileName()});
-}
-
-void MainWindow::recomputeGitGutter(CodeEditor* editor) {
-    if (!editor || editor->property("bigFile").toBool()) return;
-    const QString path = editor->property("filePath").toString();
-    const auto it = gitHeadCache.constFind(path);
-    if (path.isEmpty() || it == gitHeadCache.constEnd()) return;
-    editor->setGitLineStates(GitGutter::diffLineStates(
-        it.value().split('\n'), editor->toPlainText().split('\n')));
-}
 
 
 // ----------------------------------------------------------------
@@ -407,9 +284,11 @@ void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& file
     editor->setProperty("language", SyntaxHighlighter::languageName(lang));
     editor->setCommentPrefix(commentPrefix);
     editor->setSyntaxLanguage(lang, filePath);      // 支援語言用 tree-sitter，其餘 regex（含 Unknown 清空）
-    applySnippetsToEditor(editor);                  // 語言確定後注入對應 snippet
+    snippetsController->applyTo(editor);            // 語言確定後注入對應 snippet
     updateStatusBar();
     updateBreadcrumb();
+    if (functionListController->dock()->isVisible())
+        functionListController->refresh(editor);
 }
 
 // ----------------------------------------------------------------
@@ -426,7 +305,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
     editor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
     editor->setStickyScrollEnabled(AppSettings().value("editor/stickyScroll", true).toBool());
     editor->setMinimapEnabled(AppSettings().value("editor/minimap", true).toBool());
-    applySnippetsToEditor(editor);                  // 通用（language 為空）snippet
+    snippetsController->applyTo(editor);            // 通用（language 為空）snippet
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::recordNavLocation);
@@ -439,16 +318,16 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
 
     // LSP：請求轉發與內容變更同步
     connect(editor, &CodeEditor::lspCompletionRequested, this, [this, editor](int line, int ch) {
-        lsp->requestCompletion(editor->property("filePath").toString(), line, ch);
+        lspController->lsp()->requestCompletion(editor->property("filePath").toString(), line, ch);
     });
     connect(editor, &CodeEditor::lspDefinitionRequested, this, [this, editor](int line, int ch) {
-        lsp->requestDefinition(editor->property("filePath").toString(), line, ch);
+        lspController->lsp()->requestDefinition(editor->property("filePath").toString(), line, ch);
     });
     connect(editor, &CodeEditor::lspHoverRequested, this, [this, editor](int line, int ch) {
-        lsp->requestHover(editor->property("filePath").toString(), line, ch);
+        lspController->lsp()->requestHover(editor->property("filePath").toString(), line, ch);
     });
     connect(editor, &CodeEditor::lspReferencesRequested, this, [this, editor](int line, int ch) {
-        lsp->requestReferences(editor->property("filePath").toString(), line, ch);
+        lspController->lsp()->requestReferences(editor->property("filePath").toString(), line, ch);
     });
     connect(editor, &CodeEditor::lspRenameRequested, this, [this, editor](int line, int ch) {
         // 取游標下字詞作為預設名稱
@@ -459,24 +338,27 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
             tr("新名稱（套用至專案內所有引用）："),
             QLineEdit::Normal, c.selectedText(), &ok);
         if (ok && !newName.trimmed().isEmpty())
-            lsp->requestRename(editor->property("filePath").toString(), line, ch, newName.trimmed());
+            lspController->lsp()->requestRename(editor->property("filePath").toString(), line, ch, newName.trimmed());
     });
     connect(editor, &CodeEditor::lspFormatRequested, this, [this, editor]() {
         AppSettings settings;
-        lsp->requestFormatting(editor->property("filePath").toString(),
+        lspController->lsp()->requestFormatting(editor->property("filePath").toString(),
                                settings.value("editor/tabWidth", 4).toInt(), true);
     });
-    connect(editor, &CodeEditor::wikilinkActivated, this, &MainWindow::openOrCreateWikilink);
-    connect(editor, &CodeEditor::projectReferencesRequested, this, &MainWindow::findProjectReferences);
+    connect(editor, &CodeEditor::wikilinkActivated, this,
+            [this](const QString& target) { mdLinkController->openOrCreateWikilink(target, projectFolder); });
+    connect(editor, &CodeEditor::projectReferencesRequested, this,
+            [this](const QString& name) { symbolController->findReferences(name); });
     connect(editor, &QPlainTextEdit::textChanged, this, [this, editor]() {
         if (editor->lspEnabled()) {
-            if (!lspDirtyEditors.contains(editor)) lspDirtyEditors.append(editor);
-            lspChangeTimer->start();
+            lspSyncController->markDirty(editor);
         }
         if (editor->assistEnabled() && !editor->property("filePath").toString().isEmpty())
             gitGutterTimer->start();                    // Git gutter 重算（防抖；大檔停用）
         if (mdDock && mdDock->isVisible() && editor == activeEditor())
             mdTimer->start();                           // Markdown 預覽刷新（防抖）
+        if (editor == activeEditor())
+            functionListTimer->start();                 // 函式清單重新整理（防抖）
     });
 
     int idx = tabWidget->addTab(editor, title);
@@ -501,6 +383,8 @@ void MainWindow::setupUI() {
         if (filterCountLabel) filterCountLabel->setText("");
         updateStatusBar();
         updateBreadcrumb();
+        if (functionListController->dock()->isVisible())
+            functionListController->refresh(activeEditor());
     });
 
     // 麵包屑列 + 分頁（容器置中）
@@ -677,7 +561,8 @@ void MainWindow::setupUI() {
 
     QAction* projSymbolAction = new QAction(tr("Go to Symbol in Project..."), this);
     projSymbolAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
-    connect(projSymbolAction, &QAction::triggered, this, &MainWindow::showProjectSymbolSearch);
+    connect(projSymbolAction, &QAction::triggered, this,
+            [this]() { symbolController->showSearch(projectFolder); });
     addAction(projSymbolAction);                              // 全域快捷鍵
 
     toggleBookmarkAction = new QAction(tr("Toggle Bookmark"), this);
@@ -696,6 +581,39 @@ void MainWindow::setupUI() {
     prevBookmarkAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F2));
     connect(prevBookmarkAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->prevBookmark();
+    });
+
+    // 書籤批次操作（Notepad++ 的 Search→Bookmark 選單）
+    auto* bookmarkMatchAction = new QAction(tr("標記符合的行為書籤…"), this);
+    connect(bookmarkMatchAction, &QAction::triggered, this, &MainWindow::showBookmarkMatchingDialog);
+
+    auto* copyBookmarkedAction = new QAction(tr("複製書籤行"), this);
+    connect(copyBookmarkedAction, &QAction::triggered, this, [this]() {
+        if (auto* editor = activeEditor())
+            QApplication::clipboard()->setText(editor->bookmarkedLinesText());
+    });
+
+    auto* cutBookmarkedAction = new QAction(tr("剪下書籤行"), this);
+    connect(cutBookmarkedAction, &QAction::triggered, this, [this]() {
+        if (auto* editor = activeEditor()) {
+            QApplication::clipboard()->setText(editor->bookmarkedLinesText());
+            editor->deleteBookmarkedLines();
+        }
+    });
+
+    auto* deleteBookmarkedAction = new QAction(tr("刪除書籤行"), this);
+    connect(deleteBookmarkedAction, &QAction::triggered, this, [this]() {
+        if (auto* editor = activeEditor()) editor->deleteBookmarkedLines();
+    });
+
+    auto* deleteNonBookmarkedAction = new QAction(tr("刪除非書籤行"), this);
+    connect(deleteNonBookmarkedAction, &QAction::triggered, this, [this]() {
+        if (auto* editor = activeEditor()) editor->deleteNonBookmarkedLines();
+    });
+
+    auto* invertBookmarksAction = new QAction(tr("反轉書籤"), this);
+    connect(invertBookmarksAction, &QAction::triggered, this, [this]() {
+        if (auto* editor = activeEditor()) editor->invertBookmarks();
     });
 
     navBackAction = new QAction(tr("Navigate Back"), this);
@@ -765,14 +683,9 @@ void MainWindow::setupUI() {
     fileMenu->addAction(newAction);
     fileMenu->addAction(openAction);
 
-    recentFilesMenu = fileMenu->addMenu(tr("Open Recent"));
-    for (int i = 0; i < 15; ++i) {
-        recentFileActions[i] = new QAction(this);
-        recentFileActions[i]->setVisible(false);
-        connect(recentFileActions[i], &QAction::triggered, this, &MainWindow::openRecentFile);
-        recentFilesMenu->addAction(recentFileActions[i]);
-    }
-    updateRecentFileActions();
+    recentFilesController = new RecentFilesController(fileMenu, this);
+    connect(recentFilesController, &RecentFilesController::fileOpenRequested, this,
+            [this](const QString& path) { openFileByPath(path); });
 
     fileMenu->addAction(openFolderAction);
     fileMenu->addAction(quickOpenAction);
@@ -820,6 +733,15 @@ void MainWindow::setupUI() {
     searchMenu->addAction(toggleBookmarkAction);
     searchMenu->addAction(nextBookmarkAction);
     searchMenu->addAction(prevBookmarkAction);
+    QMenu* bookmarkBatchMenu = searchMenu->addMenu(tr("書籤批次"));
+    bookmarkBatchMenu->addAction(bookmarkMatchAction);
+    bookmarkBatchMenu->addSeparator();
+    bookmarkBatchMenu->addAction(copyBookmarkedAction);
+    bookmarkBatchMenu->addAction(cutBookmarkedAction);
+    bookmarkBatchMenu->addAction(deleteBookmarkedAction);
+    bookmarkBatchMenu->addAction(deleteNonBookmarkedAction);
+    bookmarkBatchMenu->addSeparator();
+    bookmarkBatchMenu->addAction(invertBookmarksAction);
 
     // ---------- Tools 工具箱 ----------
     QMenu* toolsMenu = menuBar->addMenu(tr("Tools"));
@@ -1095,7 +1017,7 @@ void MainWindow::setupUI() {
         openFileByPath(LspManager::configFilePath());   // 首次啟動已寫入預設（clangd / pylsp）
     });
     extMenu->addAction(tr("編輯 Snippet 設定檔"), this, [this]() {
-        openFileByPath(snippetConfigPath());            // 存檔後自動重新載入
+        openFileByPath(SnippetsController::configPath());  // 存檔後自動重新載入
     });
     extMenu->addAction(tr("編輯快捷鍵設定檔"), this, [this]() {
         applyKeymap();                                  // 確保模板已產生
@@ -1131,26 +1053,55 @@ void MainWindow::setupUI() {
         if (on) refreshMarkdownPreview();
     });
     viewMenu->addAction(mdAction);
+    // Backlinks/Graph 的 dock 必須在這裡（用到之前）就建好，見 MarkdownLinkController 開頭註解：
+    // 原本的寫法是 dock 晚點才 new，但下面 visibilityChanged 的 connect() 馬上就要用到，
+    // 導致 connect 在 dock 還是 nullptr 時執行、Qt 印警告且完全沒接上。
+    mdLinkController = new MarkdownLinkController(this, this);
+    connect(mdLinkController, &MarkdownLinkController::statusMessage, this,
+            [this](const QString& text, int ms) { statusBar()->showMessage(text, ms); });
+    connect(mdLinkController, &MarkdownLinkController::fileOpenRequested, this,
+            [this](const QString& path) { openFileByPath(path); });
+
     QAction* backlinksAction = new QAction(tr("Backlinks（反向連結）"), this);
     backlinksAction->setCheckable(true);
     connect(backlinksAction, &QAction::toggled, this, [this](bool on) {
-        backlinksDock->setVisible(on);
-        if (on) { rebuildLinkIndex(); refreshBacklinks(); }
+        mdLinkController->backlinksDock()->setVisible(on);
+        if (on) { mdLinkController->rebuildIndex(projectFolder, currentFilePath());
+                  mdLinkController->refreshBacklinks(currentFilePath()); }
     });
-    connect(backlinksDock, &QDockWidget::visibilityChanged, this, [backlinksAction](bool v) {
+    connect(mdLinkController->backlinksDock(), &QDockWidget::visibilityChanged, this,
+            [backlinksAction](bool v) {
         if (backlinksAction->isChecked() != v) backlinksAction->setChecked(v);
     });
     viewMenu->addAction(backlinksAction);
     QAction* graphAction = new QAction(tr("關係圖（Graph）"), this);
     graphAction->setCheckable(true);
     connect(graphAction, &QAction::toggled, this, [this](bool on) {
-        graphDock->setVisible(on);
-        if (on) { rebuildLinkIndex(); showGraphView(); }
+        mdLinkController->graphDock()->setVisible(on);
+        if (on) { mdLinkController->rebuildIndex(projectFolder, currentFilePath());
+                  mdLinkController->showGraphView(currentFilePath()); }
     });
-    connect(graphDock, &QDockWidget::visibilityChanged, this, [graphAction](bool v) {
+    connect(mdLinkController->graphDock(), &QDockWidget::visibilityChanged, this,
+            [graphAction](bool v) {
         if (graphAction->isChecked() != v) graphAction->setChecked(v);
     });
     viewMenu->addAction(graphAction);
+
+    // Function List 常駐面板（Notepad++ 風）：dock 一樣要先建好才能接 visibilityChanged
+    functionListController = new FunctionListController(this, this);
+    connect(functionListController, &FunctionListController::lineActivated, this,
+            [this](int line) { if (CodeEditor* e = activeEditor()) e->gotoLine(line + 1); });
+    QAction* functionListAction = new QAction(tr("函式清單（Function List）"), this);
+    functionListAction->setCheckable(true);
+    connect(functionListAction, &QAction::toggled, this, [this](bool on) {
+        functionListController->dock()->setVisible(on);
+        if (on) functionListController->refresh(activeEditor());
+    });
+    connect(functionListController->dock(), &QDockWidget::visibilityChanged, this,
+            [functionListAction](bool v) {
+        if (functionListAction->isChecked() != v) functionListAction->setChecked(v);
+    });
+    viewMenu->addAction(functionListAction);
     QAction* whitespaceAction = new QAction(tr("顯示空白字元"), this);
     whitespaceAction->setCheckable(true);
     whitespaceAction->setChecked(AppSettings().value("editor/showWhitespace", false).toBool());
@@ -1206,6 +1157,7 @@ void MainWindow::setupUI() {
 
     // ---------- Filter Results dock（含 5.6 命中密度條）----------
     QDockWidget* dock = new QDockWidget("FILTER RESULTS", this);
+    filterResultsDock = dock;
     dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
     QWidget* filterWrap = new QWidget(this);
     auto* filterLay = new QVBoxLayout(filterWrap);
@@ -1255,7 +1207,7 @@ void MainWindow::setupUI() {
     mdView->setOpenExternalLinks(false);
     connect(mdView, &QTextBrowser::anchorClicked, this, [this](const QUrl& url) {
         if (url.scheme() == QLatin1String("alexcode"))
-            openOrCreateWikilink(url.path());           // path() 已解碼，如 "Project Alpha"
+            mdLinkController->openOrCreateWikilink(url.path(), projectFolder);   // path() 已解碼，如 "Project Alpha"
         else
             QDesktopServices::openUrl(url);
     });
@@ -1267,32 +1219,34 @@ void MainWindow::setupUI() {
     mdTimer->setInterval(500);
     connect(mdTimer, &QTimer::timeout, this, &MainWindow::refreshMarkdownPreview);
 
-    // ---------- 專案符號索引（Source Insight 風）----------
-    projectSymbolIndex = new ProjectSymbolIndex();
+    functionListTimer = new QTimer(this);
+    functionListTimer->setSingleShot(true);
+    functionListTimer->setInterval(500);
+    connect(functionListTimer, &QTimer::timeout, this, [this]() {
+        if (functionListController->dock()->isVisible())
+            functionListController->refresh(activeEditor());
+    });
 
-    // ---------- Backlinks（Obsidian 風：誰連到目前這篇）----------
-    mdLinkIndex = new MarkdownLinkIndex();
+    // ---------- 專案符號索引（Source Insight 風）----------
+    // 拆到 ProjectSymbolController：索引本身、Ctrl+T 對話框、找引用邏輯都搬過去了，
+    // 這裡只接 statusBar()/開檔跳行 兩條 signal。
+    symbolController = new ProjectSymbolController(this, lspController->refsList(), lspController->refsDock(), this);
+    connect(symbolController, &ProjectSymbolController::statusMessage, this,
+            [this](const QString& text, int ms) { statusBar()->showMessage(text, ms); });
+    connect(symbolController, &ProjectSymbolController::symbolChosen, this,
+            [this](const QString& file, int line) {
+                openFileByPath(file);
+                if (CodeEditor* e = activeEditor()) e->gotoLine(line + 1);   // line 0-based
+            });
+
+    // ---------- Backlinks / 關係圖 的 dock 已在 MarkdownLinkController 建構子建立 ----------
+    // 這裡只留計時器：需要在觸發當下取「目前」的 projectFolder / 作用中檔案，
+    // 所以留在 MainWindow（controller 維持不認識目前 UI 狀態，方法都吃參數）。
     mdIndexTimer = new QTimer(this);
     mdIndexTimer->setSingleShot(true);
     mdIndexTimer->setInterval(800);
-    connect(mdIndexTimer, &QTimer::timeout, this, [this]() { rebuildLinkIndex(); });
-    backlinksDock = new QDockWidget(tr("BACKLINKS — 反向連結"), this);
-    backlinksList = new QListWidget(this);
-    backlinksDock->setWidget(backlinksList);
-    addDockWidget(Qt::RightDockWidgetArea, backlinksDock);
-    backlinksDock->hide();
-    connect(backlinksList, &QListWidget::itemActivated, this, [this](QListWidgetItem* it) {
-        if (it) openFileByPath(it->data(Qt::UserRole).toString());
-    });
-
-    // ---------- 關係圖（Obsidian 風：節點=檔，邊=連結）----------
-    graphDock = new QDockWidget(tr("GRAPH — 關係圖"), this);
-    graphView = new GraphView(this);
-    graphDock->setWidget(graphView);
-    addDockWidget(Qt::RightDockWidgetArea, graphDock);
-    graphDock->hide();
-    connect(graphView, &GraphView::nodeClicked, this, [this](const QString& f) {
-        openFileByPath(f);
+    connect(mdIndexTimer, &QTimer::timeout, this, [this]() {
+        mdLinkController->rebuildIndex(projectFolder, currentFilePath());
     });
 
     // ---------- 互動式終端機（ConPTY；首次顯示時才啟動 shell）----------
@@ -1317,7 +1271,7 @@ void MainWindow::setupUI() {
     connect(tabWidget, &QTabWidget::currentChanged, this, [this](int) {
         syncSplitView();
         refreshMarkdownPreview();
-        refreshBacklinks();
+        mdLinkController->refreshBacklinks(currentFilePath());
     });
 
     // ---------- 輸出面板（終端機 v1：指令執行 + 輸出 + 點錯誤跳行）----------
@@ -1475,9 +1429,7 @@ void MainWindow::setupStatusBar() {
     statusEol->setCursor(Qt::PointingHandCursor);
     statusEncoding->installEventFilter(this);
     statusEol->installEventFilter(this);
-    statusLsp = new QLabel("", this);
-    statusLsp->setToolTip(tr("LSP 狀態（E=錯誤 W=警告）；設定檔：") + LspManager::configFilePath());
-    sb->addPermanentWidget(statusLsp);
+    sb->addPermanentWidget(lspStatusController->label());   // QLabel 已在 setupLsp() 建好，這裡只負責排位置
     sb->addPermanentWidget(statusGit);
     sb->addPermanentWidget(statusLineCol);
     sb->addPermanentWidget(statusSel);
@@ -1502,7 +1454,7 @@ void MainWindow::updateStatusBar() {
     statusEncoding->setText(enc.isEmpty() ? "UTF-8" : enc);
     const QString eol = editor->property("eol").toString();
     statusEol->setText(eol.isEmpty() ? "LF" : eol);
-    updateLspStatus();
+    lspStatusController->update(editor);
 }
 
 // ----------------------------------------------------------------
@@ -1563,37 +1515,6 @@ void MainWindow::refreshMarkdownPreview() {
 // ----------------------------------------------------------------
 // Snippet 樣板（與 LSP / 外部工具相同模式：首次啟動寫入預設 JSON）
 // ----------------------------------------------------------------
-QString MainWindow::snippetConfigPath() {
-    return Portable::dataDir() + QStringLiteral("/alexcode-snippets.json");
-}
-
-void MainWindow::loadSnippets() {
-    const QString cfgPath = snippetConfigPath();
-    if (!QFileInfo::exists(cfgPath)) {
-        QFile f(cfgPath);
-        if (f.open(QIODevice::WriteOnly)) {
-            f.write(QByteArray(
-"[\n"
-"  {\"trigger\": \"forr\",  \"language\": \"cpp\",    \"body\": \"for (int i = 0; i < ${1:n}; ++i) {\\n    $0\\n}\"},\n"
-"  {\"trigger\": \"main\",  \"language\": \"cpp\",    \"body\": \"int main(int argc, char** argv) {\\n    $0\\n    return 0;\\n}\"},\n"
-"  {\"trigger\": \"deff\",  \"language\": \"python\", \"body\": \"def ${1:name}():\\n    $0\"},\n"
-"  {\"trigger\": \"ifmain\",\"language\": \"python\", \"body\": \"if __name__ == \\\"__main__\\\":\\n    $0\"},\n"
-"  {\"trigger\": \"todo\",  \"language\": \"\",       \"body\": \"TODO($0): \"}\n"
-"]\n"));
-        }
-    }
-    snippetDefs.clear();
-    QFile f(cfgPath);
-    if (!f.open(QIODevice::ReadOnly)) return;
-    for (const QJsonValue& v : QJsonDocument::fromJson(f.readAll()).array()) {
-        const QJsonObject o = v.toObject();
-        SnippetDef d{ o.value("trigger").toString(),
-                      o.value("language").toString().toLower(),
-                      o.value("body").toString() };
-        if (!d.trigger.isEmpty() && !d.body.isEmpty()) snippetDefs.append(d);
-    }
-}
-
 // ----------------------------------------------------------------
 // 6.2 快捷鍵自訂：以動作顯示名稱為鍵的 JSON；空字串 = 移除快捷鍵
 // 僅涵蓋選單動作（編輯器內建鍵如 F12 / Ctrl+Space 不在此列）
@@ -1640,18 +1561,6 @@ void MainWindow::applyKeymap() {
     if (!conflicts.isEmpty())
         statusBar()->showMessage(
             tr("⚠ 快捷鍵衝突：") + conflicts.join(QStringLiteral("；")), 8000);
-}
-
-void MainWindow::applySnippetsToEditor(CodeEditor* editor) {
-    if (!editor) return;
-    const QString lang = editor->property("language").toString();   // "C/C++" / "Python" / …
-    const QString key = lang == "C/C++" ? QStringLiteral("cpp")
-                      : lang == "Python" ? QStringLiteral("python") : QString();
-    QHash<QString, QString> map;
-    for (const SnippetDef& d : snippetDefs)
-        if (d.language.isEmpty() || d.language == key)
-            map.insert(d.trigger, d.body);
-    editor->setSnippets(map);
 }
 
 void MainWindow::openFile() {
@@ -1730,12 +1639,12 @@ void MainWindow::openFileByPath(const QString& fileName) {
     updateTabTitle(newEditor);
 
     if (!highlightOff) applyHighlighterForPath(newEditor, fileName);
-    if (!assistOff && !lsp->languageIdForFile(fileName).isEmpty()) {
+    if (!assistOff && !lspController->lsp()->languageIdForFile(fileName).isEmpty()) {
         newEditor->setLspEnabled(true);
-        lsp->documentOpened(fileName, text);
+        lspController->lsp()->documentOpened(fileName, text);
     }
-    if (!assistOff) fetchGitHead(fileName);             // Git gutter
-    addToRecentFiles(fileName);
+    if (!assistOff) gitGutterController->fetchHead(fileName);   // Git gutter
+    recentFilesController->addFile(fileName);
     if (fileWatcher) fileWatcher->addPath(fileName);
     statusBar()->showMessage("Opened " + fileName, 3000);
 }
@@ -1772,7 +1681,7 @@ void MainWindow::saveFile() {
         currentEditor->setProperty("baseTitle", fileInfo.fileName());
         tabWidget->setTabToolTip(tabWidget->currentIndex(), fileName);
         applyHighlighterForPath(currentEditor, fileName);
-        addToRecentFiles(fileName);
+        recentFilesController->addFile(fileName);
     }
 
     QString originalText = currentEditor->toPlainText();
@@ -1808,7 +1717,7 @@ void MainWindow::saveFile() {
             && (fileToSave.endsWith(".md", Qt::CaseInsensitive)
                 || fileToSave.endsWith(".markdown", Qt::CaseInsensitive)))
             mdIndexTimer->start();
-        updateProjectSymbolFile(fileToSave);             // 存檔 → 增量更新專案符號索引
+        symbolController->updateFile(projectFolder, fileToSave);   // 存檔 → 增量更新專案符號索引
     };
 
     if (fileName.endsWith(".cpp") || fileName.endsWith(".h") || fileName.endsWith(".hpp") || fileName.endsWith(".c")) {
@@ -1886,20 +1795,20 @@ void MainWindow::saveFile() {
 
     // LSP：另存新檔後若語言有對應伺服器則啟用；通知 didSave
     if (!currentEditor->lspEnabled() && !currentEditor->property("bigFile").toBool()
-        && !lsp->languageIdForFile(fileName).isEmpty()) {
+        && !lspController->lsp()->languageIdForFile(fileName).isEmpty()) {
         currentEditor->setLspEnabled(true);
-        lsp->documentOpened(fileName, currentEditor->toPlainText());
-        updateLspStatus();
+        lspController->lsp()->documentOpened(fileName, currentEditor->toPlainText());
+        lspStatusController->update(currentEditor);
     }
-    lsp->documentSaved(fileName);
+    lspController->lsp()->documentSaved(fileName);
 
     // Snippet 設定檔存檔 → 立即重載並套用至所有分頁
-    if (fileName == snippetConfigPath()) {
-        loadSnippets();
+    if (fileName == SnippetsController::configPath()) {
+        snippetsController->load();
         for (int i = 0; i < tabWidget->count(); ++i)
-            applySnippetsToEditor(qobject_cast<CodeEditor*>(tabWidget->widget(i)));
+            snippetsController->applyTo(qobject_cast<CodeEditor*>(tabWidget->widget(i)));
         statusBar()->showMessage(tr("Snippet 設定已重新載入（%1 個）")
-                                     .arg(snippetDefs.size()), 3000);
+                                     .arg(snippetsController->count()), 3000);
     }
     // 快捷鍵設定檔存檔 → 立即重新套用
     if (fileName == keymapConfigPath()) {
@@ -1908,8 +1817,8 @@ void MainWindow::saveFile() {
     }
 
     // Git gutter：另存的新路徑可能在版控中，重抓 HEAD（已知未版控者不重試）
-    if (!gitHeadCache.contains(fileName)) fetchGitHead(fileName);
-    else recomputeGitGutter(currentEditor);
+    if (!gitGutterController->hasHead(fileName)) gitGutterController->fetchHead(fileName);
+    else gitGutterController->recompute(currentEditor);
 }
 
 // ----------------------------------------------------------------
@@ -1938,8 +1847,8 @@ bool MainWindow::closeTab(int index) {
     auto widget = tabWidget->widget(index);
     if (auto e = qobject_cast<CodeEditor*>(widget)) {
         const QString path = e->property("filePath").toString();
-        if (!path.isEmpty()) lsp->documentClosed(path);
-        lspDirtyEditors.removeAll(QPointer<CodeEditor>(e));
+        if (!path.isEmpty()) lspController->lsp()->documentClosed(path);
+        lspSyncController->editorClosed(e);
         if (splitEditor && splitEditor->document() == e->document())
             splitEditor->setDocument(splitOwnDoc);   // 文件即將隨分頁銷毀
     }
@@ -1998,6 +1907,13 @@ void MainWindow::showFindDialog() {
         layout->addWidget(wholeWordCheck, 2, 2);
         layout->addWidget(regexCheck, 2, 3);
 
+        findCountLabel = new QLabel(findDialog);
+        findCountLabel->setStyleSheet("color:#00e5ff;");
+        layout->addWidget(findCountLabel, 3, 1, 1, 3);
+
+        replaceAllTabsCheck = new QCheckBox(tr("套用到全部開啟分頁"), findDialog);
+        layout->addWidget(replaceAllTabsCheck, 4, 1, 1, 3);
+
         QPushButton* findNextBtn   = new QPushButton("Find Next", findDialog);
         QPushButton* findPrevBtn   = new QPushButton("Find Prev", findDialog);
         QPushButton* replaceBtn    = new QPushButton("Replace", findDialog);
@@ -2007,18 +1923,37 @@ void MainWindow::showFindDialog() {
         btnLayout->addWidget(findPrevBtn);
         btnLayout->addWidget(replaceBtn);
         btnLayout->addWidget(replaceAllBtn);
-        layout->addLayout(btnLayout, 3, 0, 1, 4);
+        layout->addLayout(btnLayout, 5, 0, 1, 4);
+
+        QPushButton* countBtn    = new QPushButton(tr("Count"), findDialog);
+        QPushButton* markAllBtn  = new QPushButton(tr("Mark All"), findDialog);
+        QPushButton* findAllBtn  = new QPushButton(tr("Find All"), findDialog);
+        QHBoxLayout* btnLayout2 = new QHBoxLayout();
+        btnLayout2->addWidget(countBtn);
+        btnLayout2->addWidget(markAllBtn);
+        btnLayout2->addWidget(findAllBtn);
+        layout->addLayout(btnLayout2, 6, 0, 1, 4);
 
         connect(findNextBtn,   &QPushButton::clicked, this, &MainWindow::performFind);
         connect(findPrevBtn,   &QPushButton::clicked, this, &MainWindow::performFindPrev);
         connect(replaceBtn,    &QPushButton::clicked, this, &MainWindow::performReplace);
         connect(replaceAllBtn, &QPushButton::clicked, this, &MainWindow::performReplaceAll);
+        connect(countBtn,      &QPushButton::clicked, this, &MainWindow::performFindCount);
+        connect(markAllBtn,    &QPushButton::clicked, this, &MainWindow::performMarkAll);
+        connect(findAllBtn,    &QPushButton::clicked, this, &MainWindow::performFindAll);
         connect(findInput, &QLineEdit::returnPressed, this, &MainWindow::performFind);
 
-        // 輸入時即時標示所有符合項目
+        // 輸入時即時標示所有符合項目 + 更新計數
         auto refreshHighlight = [this]() {
-            if (auto editor = activeEditor())
-                editor->setSearchHighlightPattern(buildFindRegex());
+            if (auto editor = activeEditor()) {
+                const QRegularExpression re = buildFindRegex();
+                editor->setSearchHighlightPattern(re);
+                if (re.pattern().isEmpty()) { findCountLabel->clear(); return; }
+                int n = 0;
+                QTextCursor c(editor->document());
+                while (!(c = editor->document()->find(re, c, buildFindFlags())).isNull()) ++n;
+                findCountLabel->setText(tr("%1 個符合").arg(n));
+            }
         };
         connect(findInput, &QLineEdit::textChanged, this, refreshHighlight);
         connect(caseCheck, &QCheckBox::toggled, this, refreshHighlight);
@@ -2061,6 +1996,11 @@ QRegularExpression MainWindow::buildFindRegex() const {
 QTextDocument::FindFlags MainWindow::buildFindFlags(bool backward) const {
     QTextDocument::FindFlags flags;
     if (backward) flags |= QTextDocument::FindBackward;
+    // 修正既有 bug：QTextDocument::find() 對 QRegularExpression 版本的多載，
+    // 大小寫是否相符要看這個旗標，不是看 regex 本身的 CaseInsensitiveOption
+    // （這點跟 QRegularExpression::match() 的行為不一樣，很容易誤踩）。
+    // 少了這一行，「Match case」核取方塊勾了也不會有效果。
+    if (caseCheck && caseCheck->isChecked()) flags |= QTextDocument::FindCaseSensitively;
     return flags;
 }
 
@@ -2108,27 +2048,106 @@ void MainWindow::performReplace() {
 }
 
 void MainWindow::performReplaceAll() {
-    if (auto editor = activeEditor()) {
-        if (!findDialog) return;
-        QRegularExpression re = buildFindRegex();
-        if (!re.isValid() || re.pattern().isEmpty()) return;
-        QString replaceText = replaceInput->text();
+    if (!findDialog) return;
+    QRegularExpression re = buildFindRegex();
+    if (!re.isValid() || re.pattern().isEmpty()) return;
+    const QString replaceText = replaceInput->text();
 
+    // 對單一編輯器做全部取代（單一 Undo 步驟），回傳取代筆數
+    const QTextDocument::FindFlags findFlags = buildFindFlags();
+    auto replaceInEditor = [&re, &replaceText, findFlags](CodeEditor* editor) -> int {
         QTextCursor cursor(editor->document());
         cursor.beginEditBlock();
         int count = 0;
-        QTextCursor found = editor->document()->find(re, 0);
+        QTextCursor found = editor->document()->find(re, 0, findFlags);
         while (!found.isNull()) {
             const int after = found.selectionEnd();
             found.insertText(replaceText);
             count++;
             int next = found.position();
-            if (replaceText.isEmpty() && next == after) next++; // 避免空字串無限迴圈
-            found = editor->document()->find(re, next);
+            if (replaceText.isEmpty() && next == after) next++;   // 避免空字串無限迴圈
+            found = editor->document()->find(re, next, findFlags);
         }
         cursor.endEditBlock();
+        return count;
+    };
+
+    if (replaceAllTabsCheck && replaceAllTabsCheck->isChecked()) {
+        int total = 0, filesTouched = 0;
+        for (int i = 0; i < tabWidget->count(); ++i) {
+            if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
+                const int n = replaceInEditor(e);
+                if (n > 0) { total += n; ++filesTouched; }
+            }
+        }
+        statusBar()->showMessage(tr("%1 個分頁、共 %2 處取代完成").arg(filesTouched).arg(total), 5000);
+    } else if (auto editor = activeEditor()) {
+        const int count = replaceInEditor(editor);
         statusBar()->showMessage(QString::number(count) + " replacements made.", 4000);
     }
+}
+
+// Find 強化：計數（不標示，只回報符合筆數 —— Notepad++ 的 Count 按鈕）
+void MainWindow::performFindCount() {
+    auto editor = activeEditor();
+    if (!editor) return;
+    const QRegularExpression re = buildFindRegex();
+    if (!re.isValid() || re.pattern().isEmpty()) {
+        statusBar()->showMessage(tr("請先輸入搜尋內容"), 3000);
+        return;
+    }
+    int n = 0;
+    QTextCursor c(editor->document());
+    while (!(c = editor->document()->find(re, c, buildFindFlags())).isNull()) ++n;
+    if (findCountLabel) findCountLabel->setText(tr("%1 個符合").arg(n));
+    statusBar()->showMessage(tr("找到 %1 個符合").arg(n), 4000);
+}
+
+// Find 強化：標示全部符合（等同即時高亮，但可在不打字的情況下手動觸發一次）
+void MainWindow::performMarkAll() {
+    auto editor = activeEditor();
+    if (!editor) return;
+    const QRegularExpression re = buildFindRegex();
+    editor->setSearchHighlightPattern(re);
+    if (!re.isValid() || re.pattern().isEmpty()) {
+        if (findCountLabel) findCountLabel->clear();
+        return;
+    }
+    int n = 0;
+    QTextCursor c(editor->document());
+    while (!(c = editor->document()->find(re, c, buildFindFlags())).isNull()) ++n;
+    if (findCountLabel) findCountLabel->setText(tr("%1 個符合").arg(n));
+    statusBar()->showMessage(tr("已標示 %1 處符合").arg(n), 4000);
+}
+
+// Find 強化：Find All → 結果清單，重用既有的 FILTER RESULTS 面板（雙擊跳轉邏輯共用 onResultDoubleClicked）
+void MainWindow::performFindAll() {
+    auto editor = activeEditor();
+    if (!editor || !resultsList) return;
+    const QRegularExpression re = buildFindRegex();
+    if (!re.isValid() || re.pattern().isEmpty()) {
+        statusBar()->showMessage(tr("請先輸入搜尋內容"), 3000);
+        return;
+    }
+
+    resultsList->clear();
+    int count = 0;
+    QTextBlock block = editor->document()->begin();
+    int lineIndex = 0;
+    while (block.isValid()) {
+        if (re.match(block.text()).hasMatch()) {
+            auto* item = new QListWidgetItem(
+                QStringLiteral("Line %1: %2").arg(lineIndex + 1).arg(block.text()));
+            item->setData(Qt::UserRole, lineIndex);
+            resultsList->addItem(item);
+            ++count;
+        }
+        block = block.next();
+        ++lineIndex;
+    }
+    if (filterCountLabel) filterCountLabel->setText(tr("%1 hits").arg(count));
+    if (filterResultsDock) { filterResultsDock->show(); filterResultsDock->raise(); }
+    statusBar()->showMessage(tr("Find All：找到 %1 處符合").arg(count), 4000);
 }
 
 void MainWindow::showGotoLineDialog() {
@@ -2140,6 +2159,39 @@ void MainWindow::showGotoLineDialog() {
                                     editor->textCursor().blockNumber() + 1,
                                     1, editor->blockCount(), 1, &ok);
     if (ok) editor->gotoLine(line);
+}
+
+// 「標記符合的行為書籤」小對話框（Notepad++ 的 Search→Bookmark→Bookmark Line... 對應功能）
+void MainWindow::showBookmarkMatchingDialog() {
+    CodeEditor* editor = activeEditor();
+    if (!editor) return;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("標記符合的行為書籤"));
+    auto* layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr("尋找目標："), &dlg));
+    auto* patternEdit = new QLineEdit(&dlg);
+    layout->addWidget(patternEdit);
+    auto* caseBox = new QCheckBox(tr("大小寫相符"), &dlg);
+    auto* regexBox = new QCheckBox(tr("正規表達式"), &dlg);
+    layout->addWidget(caseBox);
+    layout->addWidget(regexBox);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    patternEdit->setFocus();
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    const QString pattern = patternEdit->text();
+    if (pattern.isEmpty()) return;
+
+    const int added = editor->bookmarkMatchingLines(pattern, caseBox->isChecked(), regexBox->isChecked());
+    if (added < 0) {
+        statusBar()->showMessage(tr("正規表達式錯誤"), 4000);
+    } else {
+        statusBar()->showMessage(tr("已將 %1 行符合的內容加入書籤").arg(added), 4000);
+    }
 }
 
 // ----------------------------------------------------------------
@@ -2238,49 +2290,6 @@ void MainWindow::onFindInFilesResultDoubleClicked(QListWidgetItem* item) {
 }
 
 // ----------------------------------------------------------------
-// Recent Files
-// ----------------------------------------------------------------
-void MainWindow::openRecentFile() {
-    QAction* action = qobject_cast<QAction*>(sender());
-    if (action) {
-        openFileByPath(action->data().toString());
-    }
-}
-
-void MainWindow::updateRecentFileActions() {
-    int numRecentFiles = qMin(recentFiles.size(), 15);
-    for (int i = 0; i < numRecentFiles; ++i) {
-        QString text = tr("&%1 %2").arg(i + 1).arg(QFileInfo(recentFiles[i]).fileName());
-        recentFileActions[i]->setText(text);
-        recentFileActions[i]->setData(recentFiles[i]);
-        recentFileActions[i]->setVisible(true);
-    }
-    for (int j = numRecentFiles; j < 15; ++j) {
-        recentFileActions[j]->setVisible(false);
-    }
-}
-
-void MainWindow::saveRecentFiles() {
-    AppSettings settings;
-    settings.setValue("recentFileList", recentFiles);
-}
-
-void MainWindow::loadRecentFiles() {
-    AppSettings settings;
-    recentFiles = settings.value("recentFileList").toStringList();
-}
-
-void MainWindow::addToRecentFiles(const QString& filePath) {
-    recentFiles.removeAll(filePath);
-    recentFiles.prepend(filePath);
-    while (recentFiles.size() > 15) {
-        recentFiles.removeLast();
-    }
-    saveRecentFiles();
-    updateRecentFileActions();
-}
-
-// ----------------------------------------------------------------
 // 專案資料夾 / Ctrl+P 快速開檔
 // ----------------------------------------------------------------
 void MainWindow::openFolder() {
@@ -2300,23 +2309,24 @@ void MainWindow::setProjectFolder(const QString& folder) {
     if (gitTimer) gitTimer->start();
 
     // LSP：根目錄改變 → 伺服器重啟，已開啟的文件重新 didOpen
-    lsp->setRootPath(folder);
+    lspController->lsp()->setRootPath(folder);
     for (int i = 0; i < tabWidget->count(); ++i) {
         auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i));
         if (!e || !e->lspEnabled()) continue;
         const QString path = e->property("filePath").toString();
-        if (!path.isEmpty()) lsp->documentOpened(path, e->toPlainText());
+        if (!path.isEmpty()) lspController->lsp()->documentOpened(path, e->toPlainText());
     }
-    updateLspStatus();
+    lspStatusController->update(activeEditor());
 
-    rebuildLinkIndex();                                 // 重建 Markdown 連結關係圖
-    rebuildProjectSymbolIndex();                         // 建立專案符號索引（Source Insight 風）
+    mdLinkController->rebuildIndex(projectFolder, currentFilePath());   // 重建 Markdown 連結關係圖
+    symbolController->rebuild(projectFolder);            // 建立專案符號索引（Source Insight 風）
     statusBar()->showMessage("Folder: " + folder, 3000);
 }
 
 void MainWindow::openVaultForShot(const QString& folder) {
     setProjectFolder(folder);
-    if (backlinksDock) { backlinksDock->show(); refreshBacklinks(); }
+    mdLinkController->backlinksDock()->show();
+    mdLinkController->refreshBacklinks(currentFilePath());
 }
 
 void MainWindow::showMarkdownPreviewForShot() {
@@ -2325,73 +2335,9 @@ void MainWindow::showMarkdownPreviewForShot() {
 
 void MainWindow::openGraphForShot(const QString& folder) {
     setProjectFolder(folder);
-    if (graphDock) { graphDock->show(); graphDock->resize(560, 520); showGraphView(); }
-}
-
-void MainWindow::showGraphView() {
-    if (!graphView || !mdLinkIndex) return;
-    CodeEditor* e = activeEditor();
-    const QString active = e ? QFileInfo(e->property("filePath").toString()).absoluteFilePath()
-                             : QString();
-    graphView->setGraph(mdLinkIndex->files(), mdLinkIndex->edges(), active);
-}
-
-void MainWindow::rebuildLinkIndex() {
-    if (!mdLinkIndex) return;
-    if (projectFolder.isEmpty()) return;
-    mdLinkIndex->build(projectFolder);
-    refreshBacklinks();
-    if (graphDock && graphDock->isVisible()) showGraphView();   // 關係圖同步更新
-}
-
-void MainWindow::refreshBacklinks() {
-    if (!backlinksList || !mdLinkIndex) return;
-    backlinksList->clear();
-    CodeEditor* e = activeEditor();
-    const QString path = e ? e->property("filePath").toString() : QString();
-    const bool isMd = path.endsWith(QLatin1String(".md"), Qt::CaseInsensitive)
-                   || path.endsWith(QLatin1String(".markdown"), Qt::CaseInsensitive);
-    if (!isMd) {
-        auto* it = new QListWidgetItem(tr("（非 Markdown 檔）"));
-        it->setFlags(Qt::NoItemFlags);
-        backlinksList->addItem(it);
-        return;
-    }
-    const QStringList back = mdLinkIndex->backlinks(QFileInfo(path).absoluteFilePath());
-    if (back.isEmpty()) {
-        auto* it = new QListWidgetItem(tr("（沒有其他檔連到這篇）"));
-        it->setFlags(Qt::NoItemFlags);
-        backlinksList->addItem(it);
-        return;
-    }
-    for (const QString& src : back) {
-        auto* it = new QListWidgetItem(QFileInfo(src).fileName());
-        it->setData(Qt::UserRole, src);
-        it->setToolTip(src);
-        backlinksList->addItem(it);
-    }
-}
-
-void MainWindow::openOrCreateWikilink(const QString& target) {
-    if (!mdLinkIndex) return;
-    QString resolved = mdLinkIndex->resolve(target);
-    if (resolved.isEmpty()) {
-        // vault 內找不到 → 在 projectFolder 建立新筆記（Obsidian 行為）
-        if (projectFolder.isEmpty()) {
-            statusBar()->showMessage(tr("找不到 [[%1]]，且尚未開啟資料夾").arg(target), 4000);
-            return;
-        }
-        QString name = target;
-        if (!name.endsWith(QLatin1String(".md"), Qt::CaseInsensitive)) name += QStringLiteral(".md");
-        resolved = QDir(projectFolder).absoluteFilePath(name);
-        QFile f(resolved);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            f.write(QStringLiteral("# %1\n\n").arg(target).toUtf8());
-            f.close();
-        }
-        rebuildLinkIndex();
-    }
-    openFileByPath(resolved);
+    mdLinkController->graphDock()->show();
+    mdLinkController->graphDock()->resize(560, 520);
+    mdLinkController->showGraphView(currentFilePath());
 }
 
 void MainWindow::showQuickOpen() {
@@ -2437,28 +2383,6 @@ void MainWindow::showCommandPalette() {
     commandPalette->openWith(gatherCommands(this));
 }
 
-void MainWindow::rebuildProjectSymbolIndex() {
-    if (!projectSymbolIndex || projectFolder.isEmpty()) return;
-    if (symIndexWatcher && symIndexWatcher->isRunning()) return;   // 已在索引中
-
-    if (!symIndexWatcher) {
-        symIndexWatcher = new QFutureWatcher<ProjectSymbolIndex>(this);
-        connect(symIndexWatcher, &QFutureWatcher<ProjectSymbolIndex>::finished, this, [this]() {
-            *projectSymbolIndex = symIndexWatcher->result();      // 在主執行緒換上新索引
-            statusBar()->showMessage(
-                tr("專案符號索引完成：%1 檔、%2 個符號")
-                    .arg(projectSymbolIndex->fileCount()).arg(projectSymbolIndex->symbolCount()), 4000);
-        });
-    }
-    statusBar()->showMessage(tr("正在背景索引專案符號…"), 0);
-    const QString folder = projectFolder;
-    symIndexWatcher->setFuture(QtConcurrent::run([folder]() {       // 背景掃描+解析，不卡 UI
-        ProjectSymbolIndex idx;
-        idx.build(folder);
-        return idx;
-    }));
-}
-
 void MainWindow::openMenuForShot(int index, const QString& outPng) {
     const QList<QAction*> acts = menuBar()->actions();
     if (index < 0 || index >= acts.size() || !acts[index]->menu()) return;
@@ -2475,65 +2399,8 @@ void MainWindow::openCallGraphForShot(const QString& outPng) {
 }
 
 void MainWindow::findRefsForShot(const QString& name) {
-    if (projectSymbolIndex && !projectFolder.isEmpty())
-        projectSymbolIndex->build(projectFolder);        // 截圖：同步建索引（避開背景非同步）
-    findProjectReferences(name);
-}
-
-// 文字版「找引用」：掃描已索引的原始碼檔，列出符號名整字出現處到 REFERENCES 面板。
-void MainWindow::findProjectReferences(const QString& name) {
-    if (!projectSymbolIndex || name.isEmpty() || !refsList) return;
-    refsList->clear();
-    int count = 0;
-    for (const QString& file : projectSymbolIndex->files()) {
-        QFile f(file);
-        if (f.size() > 4 * 1024 * 1024 || !f.open(QIODevice::ReadOnly)) continue;
-        const QString content = QString::fromUtf8(f.readAll());
-        f.close();
-        for (const TextRefs::Hit& h : TextRefs::findWholeWord(content, name)) {
-            auto* item = new QListWidgetItem(QStringLiteral("%1:%2:  %3")
-                .arg(QFileInfo(file).fileName()).arg(h.line + 1).arg(h.text));
-            item->setToolTip(file);
-            item->setData(Qt::UserRole, QVariantMap{{"filePath", file}, {"lineNum", h.line + 1}});
-            refsList->addItem(item);
-            if (++count >= 5000) break;
-        }
-        if (count >= 5000) break;
-    }
-    refsDock->setWindowTitle(tr("REFERENCES — 專案引用「%1」（%2 處）").arg(name).arg(count));
-    if (count == 0) {
-        statusBar()->showMessage(tr("專案中找不到「%1」的引用").arg(name), 4000);
-    } else {
-        refsDock->show();
-        refsDock->raise();                               // 帶到前面（底部 dock 可能被 tab 疊住）
-    }
-}
-
-// 增量更新：存檔 / 外部變更某檔後，只重解析該檔並更新索引中的符號。
-void MainWindow::updateProjectSymbolFile(const QString& file) {
-    if (!projectSymbolIndex || projectFolder.isEmpty() || file.isEmpty()) return;
-    const QString abs = QFileInfo(file).absoluteFilePath();
-    const QString root = QFileInfo(projectFolder).absoluteFilePath();
-    if (!abs.startsWith(root)) return;                            // 只管專案資料夾內的檔
-    projectSymbolIndex->updateFileFromDisk(abs);                  // 不支援/已刪則自動移除
-}
-
-void MainWindow::showProjectSymbolSearch() {
-    if (!projectSymbolIndex) return;
-    if (projectFolder.isEmpty()) {
-        statusBar()->showMessage(tr("請先開啟資料夾（Ctrl+Alt+O）以建立專案符號索引"), 3500);
-        return;
-    }
-    if (projectSymbolIndex->symbolCount() == 0) rebuildProjectSymbolIndex();
-    if (!projectSymbolDialog) {
-        projectSymbolDialog = new ProjectSymbolDialog(this);
-        connect(projectSymbolDialog, &ProjectSymbolDialog::symbolChosen, this,
-                [this](const QString& file, int line) {
-                    openFileByPath(file);
-                    if (CodeEditor* e = activeEditor()) e->gotoLine(line + 1);   // line 0-based
-                });
-    }
-    projectSymbolDialog->openWith(projectSymbolIndex);
+    symbolController->buildSync(projectFolder);   // 截圖：同步建索引（避開背景非同步）
+    symbolController->findReferences(name);
 }
 
 void MainWindow::openCommandPaletteForShot(const QString& outPng) {
@@ -2545,11 +2412,10 @@ void MainWindow::openCommandPaletteForShot(const QString& outPng) {
 }
 
 void MainWindow::openProjectSymbolForShot(const QString& outPng) {
-    rebuildProjectSymbolIndex();
-    if (!projectSymbolDialog) projectSymbolDialog = new ProjectSymbolDialog(this);
-    projectSymbolDialog->openWith(projectSymbolIndex, QStringLiteral("do"));
+    symbolController->rebuild(projectFolder);
+    symbolController->showSearch(projectFolder);
     QTimer::singleShot(700, this, [this, outPng]() {
-        if (projectSymbolDialog) projectSymbolDialog->grab().save(outPng);
+        if (symbolController->dialog()) symbolController->dialog()->grab().save(outPng);
     });
 }
 
@@ -2609,7 +2475,7 @@ void MainWindow::onFileChangedExternally(const QString& path) {
     // 檔案可能被覆寫重建，重新加回監看
     if (QFileInfo::exists(path) && !fileWatcher->files().contains(path))
         fileWatcher->addPath(path);
-    updateProjectSymbolFile(path);                       // 外部變更 → 增量更新符號索引
+    symbolController->updateFile(projectFolder, path);   // 外部變更 → 增量更新符號索引
     if (!editor || !QFileInfo::exists(path)) return;
 
     const bool tail = tailAction && tailAction->isChecked();
@@ -2937,7 +2803,7 @@ static QList<QPair<QString, QString>> gatherShortcutActions(const QObject* w) {
 }
 
 void MainWindow::openSettingsForShot(const QString& outPng) {
-    auto* dlg = new SettingsDialog(LspManager::configFilePath(), snippetConfigPath(),
+    auto* dlg = new SettingsDialog(LspManager::configFilePath(), SnippetsController::configPath(),
                                    keymapConfigPath(), gatherShortcutActions(this), this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->show();
@@ -2969,14 +2835,14 @@ void MainWindow::openAboutForShot(const QString& outPng) {
 
 void MainWindow::showSettingsCenter() {
     applyKeymap();          // 確保快捷鍵模板已存在
-    SettingsDialog dlg(LspManager::configFilePath(), snippetConfigPath(),
+    SettingsDialog dlg(LspManager::configFilePath(), SnippetsController::configPath(),
                        keymapConfigPath(), gatherShortcutActions(this), this);
     if (dlg.exec() != QDialog::Accepted) return;
     dlg.save();
-    lsp->reloadConfig();
-    loadSnippets();
+    lspController->lsp()->reloadConfig();
+    snippetsController->load();
     for (int i = 0; i < tabWidget->count(); ++i)
-        applySnippetsToEditor(qobject_cast<CodeEditor*>(tabWidget->widget(i)));
+        snippetsController->applyTo(qobject_cast<CodeEditor*>(tabWidget->widget(i)));
     applyKeymap();
     statusBar()->showMessage(tr("設定已套用"), 3000);
 }
@@ -3226,7 +3092,7 @@ void MainWindow::updateGitStatus() {
     // Git gutter：順帶刷新當前分頁的 HEAD 快取（commit 後標示自動消除）
     if (CodeEditor* e = activeEditor()) {
         const QString p = e->property("filePath").toString();
-        if (!p.isEmpty() && !e->property("bigFile").toBool()) fetchGitHead(p);
+        if (!p.isEmpty() && !e->property("bigFile").toBool()) gitGutterController->fetchHead(p);
     }
     if (projectFolder.isEmpty() || !statusGit) return;
     auto* p = new QProcess(this);

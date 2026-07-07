@@ -1649,6 +1649,103 @@ void CodeEditor::setBookmarkedLines(const QList<int>& lines) {
     lineNumberArea->update();
 }
 
+int CodeEditor::bookmarkMatchingLines(const QString& pattern, bool caseSensitive, bool useRegex) {
+    if (pattern.isEmpty()) return 0;
+    QRegularExpression re;
+    if (useRegex) {
+        re = QRegularExpression(pattern, caseSensitive ? QRegularExpression::NoPatternOption
+                                                        : QRegularExpression::CaseInsensitiveOption);
+        if (!re.isValid()) return -1;      // 讓呼叫端顯示「正規表達式錯誤」
+    }
+    QSet<int> already;
+    for (const QTextCursor& c : m_bookmarks) already.insert(c.blockNumber());
+    int added = 0;
+    for (QTextBlock b = document()->firstBlock(); b.isValid(); b = b.next()) {
+        if (already.contains(b.blockNumber())) continue;
+        const bool hit = useRegex ? re.match(b.text()).hasMatch()
+                                  : b.text().contains(pattern, caseSensitive ? Qt::CaseSensitive
+                                                                              : Qt::CaseInsensitive);
+        if (hit) {
+            m_bookmarks.append(QTextCursor(b));
+            already.insert(b.blockNumber());
+            ++added;
+        }
+    }
+    lineNumberArea->update();
+    return added;
+}
+
+QString CodeEditor::bookmarkedLinesText() const {
+    QStringList lines;
+    for (int ln : bookmarkedLines()) {                 // 已排序、去重
+        QTextBlock b = document()->findBlockByNumber(ln);
+        if (b.isValid()) lines << b.text();
+    }
+    return lines.join(QStringLiteral("\n"));
+}
+
+// 刪除單一整行（含結尾換行），處理「最後一行」「唯一一行」等邊界，避免留下多餘空行。
+static void removeWholeLine(QTextDocument* doc, int blockNumber) {
+    QTextBlock b = doc->findBlockByNumber(blockNumber);
+    if (!b.isValid()) return;
+    QTextCursor c(doc);
+    if (b.next().isValid()) {
+        // 不是最後一行：連同結尾換行一起刪
+        c.setPosition(b.position());
+        c.setPosition(b.position() + b.length(), QTextCursor::KeepAnchor);
+    } else if (b.previous().isValid()) {
+        // 是最後一行、但不是唯一一行：把前一行結尾的換行也吃掉。
+        // 注意：Qt 對「文件最後一個 block」的 length() 仍會 +1(即使實際上沒有換行字元)，
+        // 所以結尾不能用 b.position()+b.length()（會溢位一格），要夾在 characterCount()-1。
+        c.setPosition(b.previous().position() + b.previous().length() - 1);
+        c.setPosition(doc->characterCount() - 1, QTextCursor::KeepAnchor);
+    } else {
+        // 整份文件只有這一行：直接清空
+        c.setPosition(0);
+        c.setPosition(doc->characterCount() - 1, QTextCursor::KeepAnchor);
+    }
+    c.removeSelectedText();
+}
+
+void CodeEditor::deleteBookmarkedLines() {
+    const QList<int> lines = bookmarkedLines();
+    if (lines.isEmpty()) return;
+    QTextCursor edit(document());
+    edit.beginEditBlock();
+    for (int i = lines.size() - 1; i >= 0; --i)      // 由後往前，避免行號位移
+        removeWholeLine(document(), lines[i]);
+    edit.endEditBlock();
+    m_bookmarks.clear();
+    lineNumberArea->update();
+}
+
+void CodeEditor::deleteNonBookmarkedLines() {
+    const QList<int> bmLines = bookmarkedLines();
+    const QSet<int> keep(bmLines.begin(), bmLines.end());
+    if (keep.isEmpty()) return;                      // 沒有書籤：不動作（避免整份清空的意外）
+    const int total = document()->blockCount();
+    QTextCursor edit(document());
+    edit.beginEditBlock();
+    for (int ln = total - 1; ln >= 0; --ln)           // 由後往前
+        if (!keep.contains(ln)) removeWholeLine(document(), ln);
+    edit.endEditBlock();
+    // 刪除後行號全部位移，書籤重新對齊到現在的每一行（原本書籤的行都保留下來了）
+    QList<int> newLines;
+    for (int ln = 0; ln < document()->blockCount(); ++ln) newLines << ln;
+    setBookmarkedLines(newLines);
+}
+
+void CodeEditor::invertBookmarks() {
+    QSet<int> marked;
+    for (const QTextCursor& c : m_bookmarks) marked.insert(c.blockNumber());
+    QList<QTextCursor> inverted;
+    for (QTextBlock b = document()->firstBlock(); b.isValid(); b = b.next())
+        if (!marked.contains(b.blockNumber())) inverted.append(QTextCursor(b));
+    m_bookmarks = inverted;
+    lineNumberArea->update();
+}
+
+
 // ----------------------------------------------------------------
 // 字詞自動完成（QCompleter，掃描目前文件識別字）
 // ----------------------------------------------------------------

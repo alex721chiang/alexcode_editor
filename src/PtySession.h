@@ -22,6 +22,10 @@ public:
     void stop();
     bool isRunning() const { return m_running.load(); }
 
+    // 目前僅 Windows（ConPTY）有實作；其他平台 start() 恆回傳 false。
+    // 讓呼叫端（TerminalWidget）能區分「此平台不支援」與「真的啟動失敗」，顯示正確訊息。
+    static bool isPlatformSupported();
+
 signals:
     void dataReceived(const QByteArray& data);   // queued 至 GUI 執行緒
     void exited();
@@ -32,6 +36,9 @@ private:
     std::atomic<bool> m_running{false};
     std::atomic<bool> m_stopping{false};   // 關閉中：抑制 reader 對外發訊號，避免事件迴圈拆除時的競態
 #ifdef Q_OS_WIN
+    std::atomic<bool> m_readerDone{false}; // reader 執行緒真正跑完才會設 true；stop() 靠這個判斷何時可安全 join
+    std::atomic<DWORD> m_readerTid{0};     // reader 的 Win32 thread id（0 = 尚未啟動）；
+                                           // stop() 用 OpenThread 換 HANDLE 給 CancelSynchronousIo
     HPCON  m_hPC      = nullptr;
     HANDLE m_inWrite  = nullptr;   // 我們寫 → 子行程 stdin
     HANDLE m_outRead  = nullptr;   // 我們讀 ← 子行程 stdout

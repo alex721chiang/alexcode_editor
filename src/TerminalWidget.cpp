@@ -75,10 +75,17 @@ void TerminalWidget::startShell(const QString& workingDir) {
 #endif
     m_started = m_pty.start(shell, workingDir, m_vt.cols(), m_vt.rows());
     if (!m_started) {
-        // 啟動失敗時於畫面顯示訊息，而非靜默
-        m_vt.feed(QByteArray("\r\n  [無法啟動終端機：找不到或無法執行 ")
-                  + shell.toUtf8() + "]\r\n"
-                  + "  [Failed to start terminal shell: " + shell.toUtf8() + "]\r\n");
+        // 啟動失敗時於畫面顯示訊息，而非靜默；區分「此平台不支援」與「真的啟動失敗」，
+        // 避免在 macOS/Linux 上顯示「找不到或無法執行 /bin/bash」這種誤導訊息
+        // （bash 通常存在，真正原因是內建終端機目前只有 Windows 版實作）。
+        if (!PtySession::isPlatformSupported()) {
+            m_vt.feed(QByteArray("\r\n  [此平台尚未支援內建終端機（目前僅支援 Windows）]\r\n")
+                      + "  [Built-in terminal is not supported on this platform yet (Windows only for now)]\r\n");
+        } else {
+            m_vt.feed(QByteArray("\r\n  [無法啟動終端機：找不到或無法執行 ")
+                      + shell.toUtf8() + "]\r\n"
+                      + "  [Failed to start terminal shell: " + shell.toUtf8() + "]\r\n");
+        }
         update();
     }
     setFocus();

@@ -1,7 +1,5 @@
 #pragma once
 #include <QMainWindow>
-#include <QFutureWatcher>
-#include "ProjectSymbolIndex.h"
 #include <QTabWidget>
 #include <QListWidget>
 #include <QLineEdit>
@@ -29,7 +27,6 @@ class QFileSystemModel;
 class GitFileSystemModel;
 class QFileSystemWatcher;
 class QDockWidget;
-class LspManager;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -62,10 +59,10 @@ private slots:
     void performReplace();
     void performReplaceAll();
     void showGotoLineDialog();
+    void showBookmarkMatchingDialog();   // 「標記符合的行為書籤」小對話框（Notepad++ 風）
     void showFontDialog();
     void showFindInFilesDialog();
     void onFindInFilesResultDoubleClicked(QListWidgetItem* item);
-    void openRecentFile();
     void updateStatusBar();
     void onModificationChanged(bool modified);
     void openFolder();
@@ -89,15 +86,9 @@ private:
     class QLabel* breadcrumbLabel = nullptr;          // 編輯器頂部麵包屑（檔 > 類別 > 函式）
     class SymbolDialog* symbolDialog = nullptr;       // Ctrl+Shift+O 跳至符號
     class CommandPalette* commandPalette = nullptr;   // Ctrl+Shift+P 命令面板
-    ProjectSymbolIndex* projectSymbolIndex = nullptr;         // 專案級符號索引（Source Insight 風）
-    class ProjectSymbolDialog* projectSymbolDialog = nullptr; // Ctrl+T 專案符號搜尋
-    QFutureWatcher<ProjectSymbolIndex>* symIndexWatcher = nullptr;   // 背景索引
+    class ProjectSymbolController* symbolController = nullptr;   // 專案符號索引子系統（拆自 MainWindow）
     void showGoToSymbol();
     void showCommandPalette();
-    void showProjectSymbolSearch();
-    void rebuildProjectSymbolIndex();                         // 背景重建整個索引
-    void updateProjectSymbolFile(const QString& file);        // 增量：重解析單一檔
-    void findProjectReferences(const QString& name);          // 文字版跨檔找引用 → REFERENCES dock
     void updateBreadcrumb();
     QListWidget* resultsList = nullptr;
     QLineEdit* filterInput = nullptr;
@@ -118,6 +109,12 @@ private:
     QCheckBox* caseCheck = nullptr;
     QCheckBox* wholeWordCheck = nullptr;
     QCheckBox* regexCheck = nullptr;
+    QCheckBox* replaceAllTabsCheck = nullptr;    // Find 強化：Replace All 是否套用到全部開啟分頁
+    QLabel* findCountLabel = nullptr;            // Find 強化：即時顯示符合筆數
+    QDockWidget* filterResultsDock = nullptr;    // FILTER RESULTS dock（Find All 結果也共用這個面板）
+    void performFindCount();                     // 計數：目前作用中分頁裡符合的筆數
+    void performMarkAll();                       // 標示全部符合（沿用即時高亮 + 顯示筆數）
+    void performFindAll();                       // 列出全部符合到 FILTER RESULTS 面板（雙擊跳轉）
     FindInFilesDialog* findInFilesDialog;
 
     // 狀態列
@@ -127,14 +124,8 @@ private:
     QLabel* statusLang = nullptr;
     QLabel* statusEncoding = nullptr;
 
-    // Recent Files
-    QMenu* recentFilesMenu;
-    QAction* recentFileActions[15];
-    QStringList recentFiles;
-    void updateRecentFileActions();
-    void saveRecentFiles();
-    void loadRecentFiles();
-    void addToRecentFiles(const QString& filePath);
+    // Recent Files — 拆到 RecentFilesController
+    class RecentFilesController* recentFilesController = nullptr;
 
     // Actions
     QAction* newAction;
@@ -203,23 +194,16 @@ private:
     QTimer* gitTimer = nullptr;
 
     // LSP（語言伺服器）
-    LspManager* lsp = nullptr;
-    QLabel* statusLsp = nullptr;
-    QTimer* lspChangeTimer = nullptr;                 // didChange 防抖
-    QList<QPointer<CodeEditor>> lspDirtyEditors;
-    QDockWidget* refsDock = nullptr;                  // 「全部引用」結果面板
-    QListWidget* refsList = nullptr;
+    class LspController* lspController = nullptr;                // LSP 子系統核心 + REFERENCES dock
+    class LspStatusController* lspStatusController = nullptr;   // LSP 子系統拆分第 1 段：狀態列
+    class LspSyncController* lspSyncController = nullptr;   // LSP 子系統拆分第 2 段：變更防抖同步
     void setupLsp();
-    void updateLspStatus();
     CodeEditor* editorForPath(const QString& path);   // nullptr = 未開啟
-    void applyTextEditsToEditor(CodeEditor* editor, const QList<LspProtocol::TextEdit>& edits);
 
     // Git gutter 行標示
-    QHash<QString, QString> gitHeadCache;             // path → HEAD 內容
-    QSet<QString> gitUntracked;                       // 不在版控中的檔案（不重試）
-    QTimer* gitGutterTimer = nullptr;                 // 編輯後重算防抖
-    void fetchGitHead(const QString& path);           // 非同步抓 HEAD 版本後重算
-    void recomputeGitGutter(CodeEditor* editor);
+    QTimer* gitGutterTimer = nullptr;                 // 編輯後重算防抖(留在 MainWindow：
+                                                       // 需要在觸發當下取目前 activeEditor())
+    class GitGutterController* gitGutterController = nullptr;
 
     // 分割視窗（同文件雙視圖）
     QDockWidget* splitDock = nullptr;
@@ -232,21 +216,15 @@ private:
     QDockWidget* mdDock = nullptr;
     class QTextBrowser* mdView = nullptr;
     QTimer* mdTimer = nullptr;                        // 編輯後刷新防抖
+    class FunctionListController* functionListController = nullptr;   // Function List 常駐面板
+    QTimer* functionListTimer = nullptr;              // 編輯後重新整理防抖
     void refreshMarkdownPreview();
 
-    // Markdown wikilink / backlinks（Obsidian 風）
-    QDockWidget* backlinksDock = nullptr;
-    class QListWidget* backlinksList = nullptr;
-    class MarkdownLinkIndex* mdLinkIndex = nullptr;   // vault 連結關係圖
-    QTimer* mdIndexTimer = nullptr;                   // 存檔 .md 後重建索引（防抖）
-    void rebuildLinkIndex();                          // 掃 projectFolder 重建索引
-    void refreshBacklinks();                          // 依目前檔顯示反向連結
-    void openOrCreateWikilink(const QString& target); // 解析→開啟；不存在→於 vault 建立
-
-    // Markdown 關係圖（Obsidian 風）
-    QDockWidget* graphDock = nullptr;
-    class GraphView* graphView = nullptr;
-    void showGraphView();                             // 以 mdLinkIndex 填入節點/邊
+    // Markdown wikilink / backlinks / 關係圖（Obsidian 風）— 拆到 MarkdownLinkController
+    class MarkdownLinkController* mdLinkController = nullptr;
+    QTimer* mdIndexTimer = nullptr;                   // 存檔 .md 後重建索引（防抖，留在 MainWindow：
+                                                       // 需要在計時器觸發當下取目前 projectFolder/作用中檔）
+    QString currentFilePath();                        // activeEditor() 的檔案路徑(給 controller 呼叫用)
 public:
     void openVaultForShot(const QString& folder);     // 截圖用：設資料夾並顯示 backlinks
     void openGraphForShot(const QString& folder);     // 截圖用：設資料夾並顯示關係圖
@@ -260,12 +238,8 @@ public:
     void openMenuForShot(int index, const QString& outPng);  // 截圖：彈出某選單列選單以驗證 i18n
 private:
 
-    // Snippet 樣板（trigger + Tab 展開；JSON 設定）
-    struct SnippetDef { QString trigger, language, body; };
-    QList<SnippetDef> snippetDefs;
-    static QString snippetConfigPath();
-    void loadSnippets();                              // 讀設定（首次寫入預設）
-    void applySnippetsToEditor(CodeEditor* editor);   // 依語言過濾後注入
+    // Snippet 樣板 — 拆到 SnippetsController
+    class SnippetsController* snippetsController = nullptr;
 
     // 6.2 快捷鍵自訂（JSON：動作名稱 → 快捷鍵；含衝突偵測）
     static QString keymapConfigPath();

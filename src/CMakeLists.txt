@@ -25,6 +25,15 @@ set(SRCS
     ProjectSymbolIndex.cpp
     ProjectSymbolIndexBuild.cpp
     ProjectSymbolDialog.cpp
+    ProjectSymbolController.cpp
+    MarkdownLinkController.cpp
+    RecentFilesController.cpp
+    SnippetsController.cpp
+    GitGutterController.cpp
+    LspStatusController.cpp
+    LspSyncController.cpp
+    LspController.cpp
+    FunctionListController.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

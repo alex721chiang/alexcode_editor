@@ -4,6 +4,7 @@
 #include <QByteArray>
 #include <QVector>
 #include <QHash>
+#include <QMap>
 #include "TsSymbols.h"
 
 // 專案級符號索引（Source Insight 風）：掃描資料夾、用 tree-sitter 擷取每個檔的符號，
@@ -40,6 +41,12 @@ public:
     bool updateFileFromDisk(const QString& file);                    // 重新解析單一檔（false = 已移除/不支援）
 
 private:
+    void removeFromIndices(const QString& file);   // 移除該檔在 m_nameIndex/m_sortedNameIndex 中的項目
+
     QHash<QString, QVector<Entry>> m_byFile;     // 絕對檔路徑 → 該檔符號
     QHash<QString, qint64> m_mtime;              // 絕對檔路徑 → 上次索引時的 mtime（秒）
+
+    // --- 記憶體內索引（加速 exact()/search()，與 m_byFile 增量同步維護）---
+    QHash<QString, QVector<Entry>> m_nameIndex;      // 精確名稱（大小寫敏感）→ 符號；exact() 用，O(1)
+    QMap<QString, QVector<Entry>> m_sortedNameIndex; // 小寫名稱（排序）→ 符號；search() 前綴快速路徑用
 };
