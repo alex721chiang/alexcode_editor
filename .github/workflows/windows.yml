@@ -15,7 +15,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v4
@@ -41,7 +41,7 @@ jobs:
         windeployqt --release --no-translations --compiler-runtime build/src/Release/AlexCode.exe
 
     - name: Upload Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       continue-on-error: true        # 工件儲存配額用罄等基礎設施問題不應讓建置變紅（建置/測試已通過）
       with:
         name: AlexCode-Windows
@@ -76,3 +76,40 @@ jobs:
           dist/AlexCode-Windows-${{ github.ref_name }}.zip
           dist/AlexCode-Setup-*.exe
         generate_release_notes: true
+
+  # MinGW 建置：對齊本機開發工具鏈（Qt 6.8.3 + MinGW 13.1 + Ninja）。
+  # MSVC 能過但 MinGW 編不過的程式碼（如 std::thread::native_handle() 轉 HANDLE）
+  # 只有這個 job 抓得到；不打包、不發佈，純建置+測試。
+  build-mingw:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Qt (MinGW)
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.8.3'
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_mingw'
+        modules: 'qt5compat'
+        tools: 'tools_mingw1310 tools_ninja'
+
+    - name: Configure CMake
+      shell: pwsh
+      run: |
+        $env:PATH = "$env:IQTA_TOOLS\mingw1310_64\bin;$env:IQTA_TOOLS\Ninja;" + $env:PATH
+        cmake -B build-mingw -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      shell: pwsh
+      run: |
+        $env:PATH = "$env:IQTA_TOOLS\mingw1310_64\bin;$env:IQTA_TOOLS\Ninja;" + $env:PATH
+        cmake --build build-mingw
+
+    - name: Run unit tests
+      shell: pwsh
+      run: |
+        $env:PATH = "$env:IQTA_TOOLS\mingw1310_64\bin;$env:IQTA_TOOLS\Ninja;" + $env:PATH
+        ctest --test-dir build-mingw --output-on-failure
