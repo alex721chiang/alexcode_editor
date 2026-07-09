@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AlexCode VERSION 4.7.1 LANGUAGES C CXX)   # C：tree-sitter 執行期與文法
+project(AlexCode VERSION 4.8.0 LANGUAGES C CXX)   # C：tree-sitter 執行期與文法
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
