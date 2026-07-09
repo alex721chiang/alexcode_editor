@@ -80,6 +80,10 @@
 #include "DiffCalc.h"
 #include "DiffViewer.h"
 #include "PluginManager.h"
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <dwmapi.h>
+#endif
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
@@ -115,6 +119,7 @@ MainWindow::MainWindow(QWidget *parent)
     setAcceptDrops(true);
     setWindowTitle(QStringLiteral("AlexCode v%1 — Neon Edition").arg(ALEXCODE_VERSION));
     resize(1100, 720);
+    applyTitleBarTheme();                   // 標題列跟主題同色（Win11 DWM；Win10 退回深色模式）
 
     AppSettings settings;
     if (settings.value("session/restore", true).toBool())
@@ -2064,6 +2069,24 @@ void MainWindow::rebuildPluginMenu() {
     });
 }
 
+// 標題列著色：原生標題列預設亮色，與深色主題格格不入。Win11（build 22000+）可直接
+// 指定標題列底色/文字色/邊框色；Win10 沒有這些屬性（呼叫失敗無害），退回「沉浸式深色
+// 模式」讓標題列變深灰。Paper Light 主題時底色是亮的，深色模式旗標會自動關閉。
+void MainWindow::applyTitleBarTheme() {
+#ifdef Q_OS_WIN
+    const QColor bg(Theme::LINE_NUM_BG);        // 與選單列/面板同色
+    const QColor fg(Theme::EDITOR_FG);
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    BOOL dark = bg.lightness() < 128;
+    DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &dark, sizeof(dark));
+    COLORREF caption = RGB(bg.red(), bg.green(), bg.blue());
+    COLORREF text    = RGB(fg.red(), fg.green(), fg.blue());
+    DwmSetWindowAttribute(hwnd, 35 /*DWMWA_CAPTION_COLOR*/, &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, 34 /*DWMWA_BORDER_COLOR*/,  &caption, sizeof(caption));
+    DwmSetWindowAttribute(hwnd, 36 /*DWMWA_TEXT_COLOR*/,    &text, sizeof(text));
+#endif
+}
+
 // 自繪霓虹線條圖示：呼叫當下取 Theme 色，主題切換後重呼叫即可換色
 void MainWindow::applyActionIcons() {
     newAction->setIcon(NeonIcons::icon(QStringLiteral("new")));
@@ -2867,6 +2890,7 @@ void MainWindow::showPreferences() {
         Theme::setTheme(themeCombo->currentText());
         qApp->setStyleSheet(Theme::stylesheet());
         applyActionIcons();                           // 圖示線色/點綴色跟隨主題
+        applyTitleBarTheme();                         // 標題列底色跟隨主題
         for (int i = 0; i < tabWidget->count(); ++i)
             if (auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
                 e->refreshSyntaxTheme();              // 語法高亮色票跟隨主題

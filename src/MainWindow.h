@@ -142,6 +142,7 @@ private:
     QAction* gotoLineAction;
     QAction* findInFilesAction;
     void applyActionIcons();     // 自繪霓虹圖示（主題切換時重呼叫換色）
+    void applyTitleBarTheme();   // 標題列底色跟主題（Win11 DWM；其他平台為 no-op）
     QAction* wrapAction = nullptr;
     QAction* fontAction;
     QAction* zoomInAction;

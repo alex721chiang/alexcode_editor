@@ -64,6 +64,7 @@ if(WIN32)
     target_compile_definitions(alexcode_lib PUBLIC
         _WIN32_WINNT=0x0A00 WINVER=0x0A00 NTDDI_VERSION=0x0A000006
         NOMINMAX)   # 避免 windows.h 的 min/max 巨集破壞 std::min/std::max（MSVC）
+    target_link_libraries(alexcode_lib PUBLIC dwmapi)   # 標題列著色（DwmSetWindowAttribute）
 endif()
 
 # 編譯警告（不加 -Werror，避免 CI 因既有警告變紅；逐步清理）
