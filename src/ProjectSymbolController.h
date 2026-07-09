@@ -8,6 +8,8 @@ class QListWidget;
 class QDockWidget;
 class QWidget;
 class ProjectSymbolDialog;
+class QFileSystemWatcher;
+class QTimer;
 
 // 從 MainWindow 拆出的「專案符號索引」子系統：背景/同步建索引、Ctrl+T 符號搜尋、
 // 文字版「找引用」（填 REFERENCES dock）。原本是 MainWindow 的 5 個私有方法 + 3 個成員，
@@ -25,6 +27,8 @@ public:
                             QObject* parent = nullptr);
 
     void rebuild(const QString& projectFolder);                    // 背景重建整個索引（不卡 UI）
+    void enableAutoRefresh(const QString& projectFolder);          // 監看資料夾：外部變更（git pull 等）
+                                                                   // 自動觸發 mtime 增量重建
     void buildSync(const QString& projectFolder);                  // 同步建索引（截圖/CLI 用）
     void updateFile(const QString& projectFolder, const QString& file);  // 增量：重解析單一檔
     void showSearch(const QString& projectFolder);                 // 開 Ctrl+T 專案符號搜尋對話框
@@ -39,6 +43,7 @@ signals:
 
 private:
     void ensureDialog();
+    void rescanWatchedDirs();                      // 重掃子目錄清單（剪掉 skipDirs、上限保護）
 
     ProjectSymbolIndex m_index;
     QPointer<ProjectSymbolDialog> m_dialog;
@@ -46,4 +51,9 @@ private:
     QWidget* m_dialogParent = nullptr;
     QListWidget* m_refsList = nullptr;
     QDockWidget* m_refsDock = nullptr;
+
+    // 資料夾監看（Phase 3）：目錄內新增/刪除/更名 → debounce → 增量 rebuild
+    QFileSystemWatcher* m_fsWatcher = nullptr;
+    QTimer* m_fsDebounce = nullptr;
+    QString m_folder;
 };

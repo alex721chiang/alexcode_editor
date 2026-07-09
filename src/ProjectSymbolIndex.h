@@ -39,6 +39,7 @@ public:
     // ---- 需要 tree-sitter / 檔案系統 ----
     void build(const QString& folder);                               // 依 mtime 增量重建 + 讀寫 .alexcode 快取
     bool updateFileFromDisk(const QString& file);                    // 重新解析單一檔（false = 已移除/不支援）
+    static const QStringList& skipDirs();                            // 建索引/資料夾監看共用的排除清單
 
 private:
     void removeFromIndices(const QString& file);   // 移除該檔在 m_nameIndex/m_sortedNameIndex 中的項目

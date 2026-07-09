@@ -8,6 +8,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QFileSystemWatcher>
+#include <QTimer>
+#include <QDir>
 
 ProjectSymbolController::ProjectSymbolController(QWidget* dialogParent, QListWidget* refsList,
                                                  QDockWidget* refsDock, QObject* parent)
@@ -24,6 +27,7 @@ void ProjectSymbolController::rebuild(const QString& projectFolder) {
             emit statusMessage(
                 tr("專案符號索引完成：%1 檔、%2 個符號")
                     .arg(m_index.fileCount()).arg(m_index.symbolCount()), 4000);
+            rescanWatchedDirs();                // 子目錄可能有增減，重掃監看清單
         });
     }
     emit statusMessage(tr("正在背景索引專案符號…"), 0);
@@ -33,6 +37,50 @@ void ProjectSymbolController::rebuild(const QString& projectFolder) {
         idx.build(folder);
         return idx;
     }));
+}
+
+// Phase 3：監看專案資料夾。QFileSystemWatcher 的 directoryChanged 只在目錄內
+// 新增/刪除/更名時觸發（單純改內容不會），正好對應「git pull / 外部工具產生檔案」
+// 這種現有 updateFile()（存檔 hook）涵蓋不到的情境。debounce 吸收批次變更風暴，
+// rebuild() 走 mtime 增量，未變更的檔不重解析，代價很低。
+void ProjectSymbolController::enableAutoRefresh(const QString& projectFolder) {
+    m_folder = projectFolder;
+    if (!m_fsWatcher) {
+        m_fsWatcher = new QFileSystemWatcher(this);
+        m_fsDebounce = new QTimer(this);
+        m_fsDebounce->setSingleShot(true);
+        m_fsDebounce->setInterval(1500);
+        connect(m_fsWatcher, &QFileSystemWatcher::directoryChanged, this,
+                [this](const QString&) { m_fsDebounce->start(); });
+        connect(m_fsDebounce, &QTimer::timeout, this, [this]() {
+            if (m_watcher && m_watcher->isRunning()) { m_fsDebounce->start(); return; }   // 建置中，稍後再試
+            rebuild(m_folder);
+        });
+    }
+    rescanWatchedDirs();
+}
+
+void ProjectSymbolController::rescanWatchedDirs() {
+    if (!m_fsWatcher || m_folder.isEmpty()) return;
+    const QStringList old = m_fsWatcher->directories();
+    if (!old.isEmpty()) m_fsWatcher->removePaths(old);
+
+    // BFS + 剪枝（不進 skipDirs），並設監看上限：Windows 每個目錄佔一個
+    // ReadDirectoryChangesW 資源，超大型專案全掛監看反而拖累系統。
+    constexpr int kMaxWatchedDirs = 512;
+    QStringList dirs{m_folder};
+    QStringList queue{m_folder};
+    while (!queue.isEmpty() && dirs.size() < kMaxWatchedDirs) {
+        const QString cur = queue.takeFirst();
+        const QFileInfoList subs = QDir(cur).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo& fi : subs) {
+            if (ProjectSymbolIndex::skipDirs().contains(fi.fileName())) continue;   // 剪枝
+            if (dirs.size() >= kMaxWatchedDirs) break;
+            dirs.append(fi.absoluteFilePath());
+            queue.append(fi.absoluteFilePath());
+        }
+    }
+    m_fsWatcher->addPaths(dirs);
 }
 
 void ProjectSymbolController::buildSync(const QString& projectFolder) {

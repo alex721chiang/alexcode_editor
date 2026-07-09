@@ -9,6 +9,13 @@
 #include <QDateTime>
 #include <QSet>
 
+// 建索引/監看都不進入的目錄（版控中繼資料、建置輸出、套件快取）
+const QStringList& ProjectSymbolIndex::skipDirs() {
+    static const QStringList dirs = {".git", "build", "node_modules", ".vs",
+                                     "__pycache__", ".idea", "dist", "out", ".alexcode"};
+    return dirs;
+}
+
 bool ProjectSymbolIndex::updateFileFromDisk(const QString& file) {
     const QString ext = QFileInfo(file).suffix();
     if (!TsSymbolParser::supports(ext)) { removeFile(file); return false; }
@@ -30,18 +37,17 @@ void ProjectSymbolIndex::build(const QString& folder) {
         if (cf.open(QIODevice::ReadOnly)) { deserialize(cf.readAll()); cf.close(); }
     }
 
-    static const QStringList skipDirs = {".git", "build", "node_modules", ".vs",
-                                         "__pycache__", ".idea", "dist", "out", ".alexcode"};
+    const QStringList& skip = skipDirs();
     QSet<QString> seen;
     QDirIterator it(folder, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
         const QString path = it.next();
         const QString ext = QFileInfo(path).suffix();
         if (!TsSymbolParser::supports(ext)) continue;
-        bool skip = false;
-        for (const QString& d : skipDirs)
-            if (path.contains("/" + d + "/") || path.contains("\\" + d + "\\")) { skip = true; break; }
-        if (skip) continue;
+        bool skipped = false;
+        for (const QString& d : skip)
+            if (path.contains("/" + d + "/") || path.contains("\\" + d + "\\")) { skipped = true; break; }
+        if (skipped) continue;
 
         const QFileInfo fi(path);
         const QString abs = fi.absoluteFilePath();

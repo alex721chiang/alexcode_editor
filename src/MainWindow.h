@@ -53,11 +53,6 @@ private slots:
     void saveAllFiles();
     bool closeTab(int index);
     void closeAllTabs();
-    void showFindDialog();
-    void performFind();
-    void performFindPrev();
-    void performReplace();
-    void performReplaceAll();
     void showGotoLineDialog();
     void showBookmarkMatchingDialog();   // 「標記符合的行為書籤」小對話框（Notepad++ 風）
     void showFontDialog();
@@ -102,19 +97,9 @@ private:
     FilterEngine engine;
     AICompletionProvider* aiProvider = nullptr;
 
-    // Find & Replace
-    QDialog* findDialog;
-    QLineEdit* findInput = nullptr;
-    QLineEdit* replaceInput = nullptr;
-    QCheckBox* caseCheck = nullptr;
-    QCheckBox* wholeWordCheck = nullptr;
-    QCheckBox* regexCheck = nullptr;
-    QCheckBox* replaceAllTabsCheck = nullptr;    // Find 強化：Replace All 是否套用到全部開啟分頁
-    QLabel* findCountLabel = nullptr;            // Find 強化：即時顯示符合筆數
+    // Find & Replace — 拆到 FindController（對話框、Find/Replace/Count/Mark All/Find All）
+    class FindController* findController = nullptr;
     QDockWidget* filterResultsDock = nullptr;    // FILTER RESULTS dock（Find All 結果也共用這個面板）
-    void performFindCount();                     // 計數：目前作用中分頁裡符合的筆數
-    void performMarkAll();                       // 標示全部符合（沿用即時高亮 + 顯示筆數）
-    void performFindAll();                       // 列出全部符合到 FILTER RESULTS 面板（雙擊跳轉）
     FindInFilesDialog* findInFilesDialog;
 
     // 狀態列

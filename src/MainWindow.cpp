@@ -75,6 +75,7 @@
 #include "LspSyncController.h"
 #include "LspController.h"
 #include "FunctionListController.h"
+#include "FindController.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
@@ -99,7 +100,7 @@ public:
 };
 
 MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent), findDialog(nullptr), findInFilesDialog(nullptr)
+    : QMainWindow(parent), findInFilesDialog(nullptr)
 {
     defaultEditorFont = loadFont();
     isFontSet = true;
@@ -312,6 +313,11 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor]() {
         if (editor == activeEditor()) updateBreadcrumb();
     });
+    connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor]() {
+        // Function List 游標追蹤：面板可見時同步高亮游標所在的符號（不搶焦點）
+        if (editor == activeEditor() && functionListController->dock()->isVisible())
+            functionListController->highlightLine(editor->textCursor().blockNumber());
+    });
     connect(editor, &QPlainTextEdit::selectionChanged, this, &MainWindow::updateStatusBar);
     connect(editor->document(), &QTextDocument::modificationChanged,
             this, &MainWindow::onModificationChanged);
@@ -519,18 +525,20 @@ void MainWindow::setupUI() {
     });
 
     // ---------- Search actions ----------
+    // findController 在 setupUI 稍後（FILTER RESULTS 面板建好後）才建立；
+    // lambda 延遲取值，觸發時必已存在
     findAction = new QAction(tr("Find / Replace..."), this);
     findAction->setShortcut(QKeySequence::Find);
     findAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogContentsView));
-    connect(findAction, &QAction::triggered, this, &MainWindow::showFindDialog);
+    connect(findAction, &QAction::triggered, this, [this]() { findController->showDialog(); });
 
     findNextAction = new QAction(tr("Find Next"), this);
     findNextAction->setShortcut(QKeySequence(Qt::Key_F3));
-    connect(findNextAction, &QAction::triggered, this, &MainWindow::performFind);
+    connect(findNextAction, &QAction::triggered, this, [this]() { findController->findNext(); });
 
     findPrevAction = new QAction(tr("Find Previous"), this);
     findPrevAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F3));
-    connect(findPrevAction, &QAction::triggered, this, &MainWindow::performFindPrev);
+    connect(findPrevAction, &QAction::triggered, this, [this]() { findController->findPrev(); });
 
     gotoLineAction = new QAction(tr("Go to Line..."), this);
     gotoLineAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
@@ -1334,6 +1342,22 @@ void MainWindow::setupToolBar() {
     filterCountLabel = new QLabel("", this);
     filterCountLabel->setStyleSheet("color:#00e5ff; padding:0 8px;");
 
+    // ---------- Find & Replace 子系統（拆到 FindController）----------
+    // 依賴 resultsList / filterCountLabel / filterResultsDock（Find All 沿用 FILTER RESULTS 面板），
+    // 所以在這裡（皆已建好）才建立；Search 選單的 action 用 lambda 延遲呼叫
+    findController = new FindController(
+        this,
+        [this]() { return activeEditor(); },
+        [this]() {
+            QList<CodeEditor*> editors;
+            for (int i = 0; i < tabWidget->count(); ++i)
+                if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) editors.append(e);
+            return editors;
+        },
+        resultsList, filterCountLabel, filterResultsDock, this);
+    connect(findController, &FindController::statusMessage, this,
+            [this](const QString& text, int ms) { statusBar()->showMessage(text, ms); });
+
     filterToolBar->addWidget(filterInput);
     filterToolBar->addWidget(logicCombo);
     filterToolBar->addWidget(fuzzyCheck);
@@ -1885,270 +1909,6 @@ void MainWindow::dropEvent(QDropEvent* event) {
     }
 }
 
-// ----------------------------------------------------------------
-// Find & Replace（大小寫 / 全字 / Regex / 全部標示 / F3）
-// ----------------------------------------------------------------
-void MainWindow::showFindDialog() {
-    if (!findDialog) {
-        findDialog = new QDialog(this);
-        findDialog->setWindowTitle("Find & Replace");
-        QGridLayout* layout = new QGridLayout(findDialog);
-        layout->addWidget(new QLabel("Find:", findDialog), 0, 0);
-        findInput = new QLineEdit(findDialog);
-        layout->addWidget(findInput, 0, 1, 1, 3);
-        layout->addWidget(new QLabel("Replace:", findDialog), 1, 0);
-        replaceInput = new QLineEdit(findDialog);
-        layout->addWidget(replaceInput, 1, 1, 1, 3);
-
-        caseCheck      = new QCheckBox("Match case", findDialog);
-        wholeWordCheck = new QCheckBox("Whole word", findDialog);
-        regexCheck     = new QCheckBox("Regex", findDialog);
-        layout->addWidget(caseCheck, 2, 1);
-        layout->addWidget(wholeWordCheck, 2, 2);
-        layout->addWidget(regexCheck, 2, 3);
-
-        findCountLabel = new QLabel(findDialog);
-        findCountLabel->setStyleSheet("color:#00e5ff;");
-        layout->addWidget(findCountLabel, 3, 1, 1, 3);
-
-        replaceAllTabsCheck = new QCheckBox(tr("套用到全部開啟分頁"), findDialog);
-        layout->addWidget(replaceAllTabsCheck, 4, 1, 1, 3);
-
-        QPushButton* findNextBtn   = new QPushButton("Find Next", findDialog);
-        QPushButton* findPrevBtn   = new QPushButton("Find Prev", findDialog);
-        QPushButton* replaceBtn    = new QPushButton("Replace", findDialog);
-        QPushButton* replaceAllBtn = new QPushButton("Replace All", findDialog);
-        QHBoxLayout* btnLayout = new QHBoxLayout();
-        btnLayout->addWidget(findNextBtn);
-        btnLayout->addWidget(findPrevBtn);
-        btnLayout->addWidget(replaceBtn);
-        btnLayout->addWidget(replaceAllBtn);
-        layout->addLayout(btnLayout, 5, 0, 1, 4);
-
-        QPushButton* countBtn    = new QPushButton(tr("Count"), findDialog);
-        QPushButton* markAllBtn  = new QPushButton(tr("Mark All"), findDialog);
-        QPushButton* findAllBtn  = new QPushButton(tr("Find All"), findDialog);
-        QHBoxLayout* btnLayout2 = new QHBoxLayout();
-        btnLayout2->addWidget(countBtn);
-        btnLayout2->addWidget(markAllBtn);
-        btnLayout2->addWidget(findAllBtn);
-        layout->addLayout(btnLayout2, 6, 0, 1, 4);
-
-        connect(findNextBtn,   &QPushButton::clicked, this, &MainWindow::performFind);
-        connect(findPrevBtn,   &QPushButton::clicked, this, &MainWindow::performFindPrev);
-        connect(replaceBtn,    &QPushButton::clicked, this, &MainWindow::performReplace);
-        connect(replaceAllBtn, &QPushButton::clicked, this, &MainWindow::performReplaceAll);
-        connect(countBtn,      &QPushButton::clicked, this, &MainWindow::performFindCount);
-        connect(markAllBtn,    &QPushButton::clicked, this, &MainWindow::performMarkAll);
-        connect(findAllBtn,    &QPushButton::clicked, this, &MainWindow::performFindAll);
-        connect(findInput, &QLineEdit::returnPressed, this, &MainWindow::performFind);
-
-        // 輸入時即時標示所有符合項目 + 更新計數
-        auto refreshHighlight = [this]() {
-            if (auto editor = activeEditor()) {
-                const QRegularExpression re = buildFindRegex();
-                editor->setSearchHighlightPattern(re);
-                if (re.pattern().isEmpty()) { findCountLabel->clear(); return; }
-                int n = 0;
-                QTextCursor c(editor->document());
-                while (!(c = editor->document()->find(re, c, buildFindFlags())).isNull()) ++n;
-                findCountLabel->setText(tr("%1 個符合").arg(n));
-            }
-        };
-        connect(findInput, &QLineEdit::textChanged, this, refreshHighlight);
-        connect(caseCheck, &QCheckBox::toggled, this, refreshHighlight);
-        connect(wholeWordCheck, &QCheckBox::toggled, this, refreshHighlight);
-        connect(regexCheck, &QCheckBox::toggled, this, refreshHighlight);
-        connect(findDialog, &QDialog::finished, this, [this](int) {
-            if (auto editor = activeEditor())
-                editor->setSearchHighlightPattern(QRegularExpression());
-        });
-    }
-    // 預填目前選取文字
-    if (auto editor = activeEditor()) {
-        const QString sel = editor->textCursor().selectedText();
-        if (!sel.isEmpty() && !sel.contains(QChar(0x2029)))
-            findInput->setText(sel);
-    }
-    findDialog->show();
-    findDialog->raise();
-    findDialog->activateWindow();
-    findInput->setFocus();
-    findInput->selectAll();
-}
-
-QRegularExpression MainWindow::buildFindRegex() const {
-    if (!findInput) return QRegularExpression();
-    QString text = findInput->text();
-    if (text.isEmpty()) return QRegularExpression();
-
-    QString pattern = (regexCheck && regexCheck->isChecked())
-                          ? text : QRegularExpression::escape(text);
-    if (wholeWordCheck && wholeWordCheck->isChecked())
-        pattern = QStringLiteral("\\b") + pattern + QStringLiteral("\\b");
-
-    QRegularExpression::PatternOptions opts = QRegularExpression::NoPatternOption;
-    if (!caseCheck || !caseCheck->isChecked())
-        opts |= QRegularExpression::CaseInsensitiveOption;
-    return QRegularExpression(pattern, opts);
-}
-
-QTextDocument::FindFlags MainWindow::buildFindFlags(bool backward) const {
-    QTextDocument::FindFlags flags;
-    if (backward) flags |= QTextDocument::FindBackward;
-    // 修正既有 bug：QTextDocument::find() 對 QRegularExpression 版本的多載，
-    // 大小寫是否相符要看這個旗標，不是看 regex 本身的 CaseInsensitiveOption
-    // （這點跟 QRegularExpression::match() 的行為不一樣，很容易誤踩）。
-    // 少了這一行，「Match case」核取方塊勾了也不會有效果。
-    if (caseCheck && caseCheck->isChecked()) flags |= QTextDocument::FindCaseSensitively;
-    return flags;
-}
-
-void MainWindow::performFind() {
-    auto editor = activeEditor();
-    if (!editor || !findDialog) { showFindDialog(); return; }
-    QRegularExpression re = buildFindRegex();
-    if (!re.isValid() || re.pattern().isEmpty()) return;
-
-    if (!editor->find(re, buildFindFlags(false))) {
-        QTextCursor cursor = editor->textCursor();
-        cursor.movePosition(QTextCursor::Start);
-        editor->setTextCursor(cursor);
-        if (!editor->find(re, buildFindFlags(false)))
-            statusBar()->showMessage("Cannot find \"" + findInput->text() + "\"", 3000);
-    }
-}
-
-void MainWindow::performFindPrev() {
-    auto editor = activeEditor();
-    if (!editor || !findDialog) { showFindDialog(); return; }
-    QRegularExpression re = buildFindRegex();
-    if (!re.isValid() || re.pattern().isEmpty()) return;
-
-    if (!editor->find(re, buildFindFlags(true))) {
-        QTextCursor cursor = editor->textCursor();
-        cursor.movePosition(QTextCursor::End);
-        editor->setTextCursor(cursor);
-        if (!editor->find(re, buildFindFlags(true)))
-            statusBar()->showMessage("Cannot find \"" + findInput->text() + "\"", 3000);
-    }
-}
-
-void MainWindow::performReplace() {
-    if (auto editor = activeEditor()) {
-        if (!findDialog) return;
-        QRegularExpression re = buildFindRegex();
-        if (!re.isValid() || re.pattern().isEmpty()) return;
-        QString replaceText = replaceInput->text();
-        QTextCursor cursor = editor->textCursor();
-        if (cursor.hasSelection() && re.match(cursor.selectedText()).capturedLength() == cursor.selectedText().length())
-            cursor.insertText(replaceText);
-        performFind();
-    }
-}
-
-void MainWindow::performReplaceAll() {
-    if (!findDialog) return;
-    QRegularExpression re = buildFindRegex();
-    if (!re.isValid() || re.pattern().isEmpty()) return;
-    const QString replaceText = replaceInput->text();
-
-    // 對單一編輯器做全部取代（單一 Undo 步驟），回傳取代筆數
-    const QTextDocument::FindFlags findFlags = buildFindFlags();
-    auto replaceInEditor = [&re, &replaceText, findFlags](CodeEditor* editor) -> int {
-        QTextCursor cursor(editor->document());
-        cursor.beginEditBlock();
-        int count = 0;
-        QTextCursor found = editor->document()->find(re, 0, findFlags);
-        while (!found.isNull()) {
-            const int after = found.selectionEnd();
-            found.insertText(replaceText);
-            count++;
-            int next = found.position();
-            if (replaceText.isEmpty() && next == after) next++;   // 避免空字串無限迴圈
-            found = editor->document()->find(re, next, findFlags);
-        }
-        cursor.endEditBlock();
-        return count;
-    };
-
-    if (replaceAllTabsCheck && replaceAllTabsCheck->isChecked()) {
-        int total = 0, filesTouched = 0;
-        for (int i = 0; i < tabWidget->count(); ++i) {
-            if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
-                const int n = replaceInEditor(e);
-                if (n > 0) { total += n; ++filesTouched; }
-            }
-        }
-        statusBar()->showMessage(tr("%1 個分頁、共 %2 處取代完成").arg(filesTouched).arg(total), 5000);
-    } else if (auto editor = activeEditor()) {
-        const int count = replaceInEditor(editor);
-        statusBar()->showMessage(QString::number(count) + " replacements made.", 4000);
-    }
-}
-
-// Find 強化：計數（不標示，只回報符合筆數 —— Notepad++ 的 Count 按鈕）
-void MainWindow::performFindCount() {
-    auto editor = activeEditor();
-    if (!editor) return;
-    const QRegularExpression re = buildFindRegex();
-    if (!re.isValid() || re.pattern().isEmpty()) {
-        statusBar()->showMessage(tr("請先輸入搜尋內容"), 3000);
-        return;
-    }
-    int n = 0;
-    QTextCursor c(editor->document());
-    while (!(c = editor->document()->find(re, c, buildFindFlags())).isNull()) ++n;
-    if (findCountLabel) findCountLabel->setText(tr("%1 個符合").arg(n));
-    statusBar()->showMessage(tr("找到 %1 個符合").arg(n), 4000);
-}
-
-// Find 強化：標示全部符合（等同即時高亮，但可在不打字的情況下手動觸發一次）
-void MainWindow::performMarkAll() {
-    auto editor = activeEditor();
-    if (!editor) return;
-    const QRegularExpression re = buildFindRegex();
-    editor->setSearchHighlightPattern(re);
-    if (!re.isValid() || re.pattern().isEmpty()) {
-        if (findCountLabel) findCountLabel->clear();
-        return;
-    }
-    int n = 0;
-    QTextCursor c(editor->document());
-    while (!(c = editor->document()->find(re, c, buildFindFlags())).isNull()) ++n;
-    if (findCountLabel) findCountLabel->setText(tr("%1 個符合").arg(n));
-    statusBar()->showMessage(tr("已標示 %1 處符合").arg(n), 4000);
-}
-
-// Find 強化：Find All → 結果清單，重用既有的 FILTER RESULTS 面板（雙擊跳轉邏輯共用 onResultDoubleClicked）
-void MainWindow::performFindAll() {
-    auto editor = activeEditor();
-    if (!editor || !resultsList) return;
-    const QRegularExpression re = buildFindRegex();
-    if (!re.isValid() || re.pattern().isEmpty()) {
-        statusBar()->showMessage(tr("請先輸入搜尋內容"), 3000);
-        return;
-    }
-
-    resultsList->clear();
-    int count = 0;
-    QTextBlock block = editor->document()->begin();
-    int lineIndex = 0;
-    while (block.isValid()) {
-        if (re.match(block.text()).hasMatch()) {
-            auto* item = new QListWidgetItem(
-                QStringLiteral("Line %1: %2").arg(lineIndex + 1).arg(block.text()));
-            item->setData(Qt::UserRole, lineIndex);
-            resultsList->addItem(item);
-            ++count;
-        }
-        block = block.next();
-        ++lineIndex;
-    }
-    if (filterCountLabel) filterCountLabel->setText(tr("%1 hits").arg(count));
-    if (filterResultsDock) { filterResultsDock->show(); filterResultsDock->raise(); }
-    statusBar()->showMessage(tr("Find All：找到 %1 處符合").arg(count), 4000);
-}
 
 void MainWindow::showGotoLineDialog() {
     auto editor = activeEditor();
@@ -2320,6 +2080,7 @@ void MainWindow::setProjectFolder(const QString& folder) {
 
     mdLinkController->rebuildIndex(projectFolder, currentFilePath());   // 重建 Markdown 連結關係圖
     symbolController->rebuild(projectFolder);            // 建立專案符號索引（Source Insight 風）
+    symbolController->enableAutoRefresh(projectFolder);  // 外部變更（git pull 等）自動增量更新索引
     statusBar()->showMessage("Folder: " + folder, 3000);
 }
 
