@@ -12,7 +12,7 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-find_package(Qt6 COMPONENTS Core Gui Widgets Network Concurrent Core5Compat REQUIRED)
+find_package(Qt6 COMPONENTS Core Gui Widgets Network Concurrent Core5Compat Qml REQUIRED)   # Qml：QJSEngine（腳本外掛）
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TreeSitter.cmake)   # 語法樹高亮（tree-sitter + 文法）
 

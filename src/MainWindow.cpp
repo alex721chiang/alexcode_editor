@@ -79,6 +79,7 @@
 #include "NeonIcons.h"
 #include "DiffCalc.h"
 #include "DiffViewer.h"
+#include "PluginManager.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
@@ -1048,6 +1049,17 @@ void MainWindow::setupUI() {
 
     toolsMenu->addAction(tr("設定中心（LSP / Snippet / 快捷鍵）…"), this, [this]() { showSettingsCenter(); });
 
+    // ---------- 腳本外掛（QJSEngine；資料夾內 *.js 啟動時載入）----------
+    pluginManager = new PluginManager(
+        [this]() { return activeEditor(); },
+        [this](const QString& path) { openFileByPath(path); },
+        QString(), this);
+    connect(pluginManager, &PluginManager::statusRequested, this,
+            [this](const QString& msg, int ms) { statusBar()->showMessage(msg, ms); });
+    pluginMenu = toolsMenu->addMenu(tr("腳本外掛"));
+    connect(pluginManager, &PluginManager::commandsChanged, this, &MainWindow::rebuildPluginMenu);
+    pluginManager->reload();
+
     QMenu* extMenu = toolsMenu->addMenu(tr("外部工具"));
     extMenu->addAction(tr("執行外部工具…"), this, [this]() { runExternalTool(); });
     extMenu->addAction(tr("編輯 LSP 設定檔"), this, [this]() {
@@ -1936,6 +1948,29 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // 下次啟動完整還原。個別關閉分頁 (Ctrl+W) 仍會提示儲存。
     saveSession();
     event->accept();
+}
+
+// 外掛選單重建：指令列表（依註冊順序）+ 管理項
+void MainWindow::rebuildPluginMenu() {
+    if (!pluginMenu) return;
+    pluginMenu->clear();
+    const QStringList names = pluginManager->commandNames();
+    for (const QString& name : names) {
+        pluginMenu->addAction(name, this, [this, name]() { pluginManager->runCommand(name); });
+    }
+    if (!names.isEmpty()) pluginMenu->addSeparator();
+    pluginMenu->addAction(tr("重新載入外掛"), this, [this]() {
+        pluginManager->reload();
+        statusBar()->showMessage(tr("外掛已重新載入：%1 個腳本、%2 個指令")
+                                     .arg(pluginManager->scriptCount())
+                                     .arg(pluginManager->commandNames().size()), 4000);
+    });
+    pluginMenu->addAction(tr("開啟外掛資料夾"), this, [this]() {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(pluginManager->pluginsDir()));
+    });
+    pluginMenu->addAction(tr("編輯範例外掛"), this, [this]() {
+        openFileByPath(pluginManager->pluginsDir() + QStringLiteral("/examples.js"));
+    });
 }
 
 // 自繪霓虹線條圖示：呼叫當下取 Theme 色，主題切換後重呼叫即可換色

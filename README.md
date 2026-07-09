@@ -64,6 +64,18 @@ Ctrl+點擊新增/移除游標、Alt+拖曳欄選；輸入/刪除/導覽/貼上�
 | 本地智慧補全 | 未啟用 LSP 時 Ctrl+Space：從文件擷取識別字，依前綴/模糊 × 出現頻率 × 與游標就近度排序（離線、免金鑰） |
 | Snippet 樣板 | trigger + Tab 展開（`alexcode-snippets.json`，支援 `${1:預設}` / `$0`、跟隨縮排） |
 
+### 腳本外掛（JavaScript）
+工具→腳本外掛。把 `.js` 放進外掛資料夾（選單可直接開啟），透過全域 `alexcode` 物件擴充編輯器：
+```js
+alexcode.registerCommand("插入日期時間", function() {
+    alexcode.insertText(new Date().toLocaleString());
+});
+```
+API：`text()/setText()`（可 Ctrl+Z 復原）、`selectedText()/insertText()`、
+`currentLine()/lineCount()/line(n)/gotoLine(n)`、`currentFilePath()/openFile()`、
+`statusMessage()/prompt()`。首次啟動自動附上範例（`examples.js`）；改完選「重新載入外掛」即生效。
+選 JS 而非 C++ DLL：無編譯器 ABI 相容問題，存檔即用。
+
 ### 整合終端機
 Ctrl+\` 開啟互動式終端機（停靠面板）。Windows 透過 ConPTY 接 PowerShell、
 Linux/macOS 透過 forkpty 接 `$SHELL`（v4.7 起），支援 VT100/ANSI

@@ -232,6 +232,11 @@ private:
     // Snippet 樣板 — 拆到 SnippetsController
     class SnippetsController* snippetsController = nullptr;
 
+    // 腳本外掛（QJSEngine）
+    class PluginManager* pluginManager = nullptr;
+    QMenu* pluginMenu = nullptr;
+    void rebuildPluginMenu();
+
     // 6.2 快捷鍵自訂（JSON：動作名稱 → 快捷鍵；含衝突偵測）
     static QString keymapConfigPath();
     void applyKeymap();                               // 首次寫入現況為模板
