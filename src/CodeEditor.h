@@ -104,6 +104,12 @@ public:
     // ---- Snippet 樣板（trigger + Tab 展開）----
     void setSnippets(const QHash<QString, QString>& snippets) { m_snippets = snippets; }
 
+    // ---- AI ghost text（游標後灰字建議：Tab 接受、Esc 拒絕、編輯/移動自動清除）----
+    void setGhostText(const QString& t);         // 綁定目前游標位置顯示
+    void clearGhostText();
+    bool hasGhostText() const { return !m_ghostText.isEmpty(); }
+    bool acceptGhostText();                      // 於游標插入完整建議；false = 無 ghost
+
     // ---- 多游標（Sublime 式核心）----
     void addNextOccurrence();                            // Ctrl+Shift+D：加選下一個相同字串
     void selectAllOccurrences();                         // Alt+F3：全選所有相同字串
@@ -217,6 +223,10 @@ private:
     // Snippet
     QHash<QString, QString> m_snippets;                  // trigger → body
     bool expandSnippet();                                // 游標前字詞為 trigger 時展開
+
+    // AI ghost text
+    QString m_ghostText;
+    int m_ghostPos = -1;                         // 顯示時的游標位置；游標離開即失效
 
     // 多游標（持久游標，編輯後位置自動跟隨）
     QList<QTextCursor> m_extraCursors;

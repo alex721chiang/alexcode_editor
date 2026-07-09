@@ -371,6 +371,8 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
             mdTimer->start();                           // Markdown 預覽刷新（防抖）
         if (editor == activeEditor())
             functionListTimer->start();                 // 函式清單重新整理（防抖）
+        if (editor == activeEditor() && aiProvider->config().autoTrigger)
+            aiGhostTimer->start(aiProvider->config().autoDelayMs);   // AI ghost 補全（設定檔開啟時）
     });
 
     int idx = tabWidget->addTab(editor, title);
@@ -382,6 +384,21 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
 
 void MainWindow::setupUI() {
     aiProvider = new AICompletionProvider(this);
+    connect(aiProvider, &AICompletionProvider::suggestionsReady, this, [this](const QStringList& s) {
+        statusBar()->clearMessage();
+        if (s.isEmpty() || s.first().trimmed().isEmpty()) {
+            statusBar()->showMessage(tr("AI 沒有建議"), 3000);
+            return;
+        }
+        if (CodeEditor* e = activeEditor()) e->setGhostText(s.first());
+    });
+    connect(aiProvider, &AICompletionProvider::chatReady, this, &MainWindow::onAiChatReady);
+    connect(aiProvider, &AICompletionProvider::errorOccurred, this, [this](const QString& err) {
+        statusBar()->showMessage(tr("AI 錯誤：%1（工具→AI 輔助→編輯 AI 設定檔）").arg(err), 6000);
+    });
+    aiGhostTimer = new QTimer(this);                     // 自動觸發（設定檔 autoTrigger 開啟時）
+    aiGhostTimer->setSingleShot(true);
+    connect(aiGhostTimer, &QTimer::timeout, this, &MainWindow::triggerAiCompletion);
 
     tabWidget = new QTabWidget(this);
     tabWidget->setTabsClosable(true);
@@ -1048,6 +1065,19 @@ void MainWindow::setupUI() {
     });
 
     toolsMenu->addAction(tr("設定中心（LSP / Snippet / 快捷鍵）…"), this, [this]() { showSettingsCenter(); });
+
+    // ---------- AI 輔助（OpenAI 相容端點：本機 LM Studio/Ollama 或雲端）----------
+    QMenu* aiMenu = toolsMenu->addMenu(tr("AI 輔助"));
+    QAction* aiCompleteAction = new QAction(tr("AI 補全（游標處）"), this);
+    aiCompleteAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A));
+    connect(aiCompleteAction, &QAction::triggered, this, &MainWindow::triggerAiCompletion);
+    aiMenu->addAction(aiCompleteAction);
+    aiMenu->addAction(tr("AI：解釋選取"), this, [this]() { runAiOnSelection(false); });
+    aiMenu->addAction(tr("AI：重構選取"), this, [this]() { runAiOnSelection(true); });
+    aiMenu->addSeparator();
+    aiMenu->addAction(tr("編輯 AI 設定檔"), this, [this]() {
+        openFileByPath(AIConfig::configFilePath());      // 存檔後自動重新載入
+    });
 
     // ---------- 腳本外掛（QJSEngine；資料夾內 *.js 啟動時載入）----------
     pluginManager = new PluginManager(
@@ -1887,6 +1917,11 @@ void MainWindow::saveFile() {
         statusBar()->showMessage(tr("Snippet 設定已重新載入（%1 個）")
                                      .arg(snippetsController->count()), 3000);
     }
+    // AI 設定檔存檔 → 立即重載
+    if (fileName == AIConfig::configFilePath()) {
+        aiProvider->reloadConfig();
+        statusBar()->showMessage(tr("AI 設定已重新載入"), 3000);
+    }
     // 快捷鍵設定檔存檔 → 立即重新套用
     if (fileName == keymapConfigPath()) {
         applyKeymap();
@@ -1948,6 +1983,62 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // 下次啟動完整還原。個別關閉分頁 (Ctrl+W) 仍會提示儲存。
     saveSession();
     event->accept();
+}
+
+// ----------------------------------------------------------------
+// AI 輔助：ghost 補全（游標前文脈）與選取指令（解釋/重構）
+// ----------------------------------------------------------------
+void MainWindow::triggerAiCompletion() {
+    CodeEditor* e = activeEditor();
+    if (!e) return;
+    QTextCursor c = e->textCursor();
+    const int startBlock = qMax(0, c.blockNumber() - 200);   // 至多帶 200 行前文
+    QTextCursor ctx(e->document());
+    ctx.setPosition(e->document()->findBlockByNumber(startBlock).position());
+    ctx.setPosition(c.position(), QTextCursor::KeepAnchor);
+    const QString context = ctx.selectedText().replace(QChar(0x2029), QChar('\n'));
+    if (context.trimmed().isEmpty()) return;
+    statusBar()->showMessage(tr("AI 補全請求中…"), 0);
+    aiProvider->requestCompletion(context, e->property("language").toString());
+}
+
+void MainWindow::runAiOnSelection(bool refactor) {
+    CodeEditor* e = activeEditor();
+    if (!e) return;
+    const QString sel = e->textCursor().selectedText().replace(QChar(0x2029), QChar('\n'));
+    if (sel.trimmed().isEmpty()) { statusBar()->showMessage(tr("請先選取程式碼"), 3000); return; }
+    m_aiRefactorMode = refactor;
+    m_aiSelection = sel;
+    m_aiCursor = e->textCursor();                        // 持久游標：套用時仍指向原選取
+    statusBar()->showMessage(refactor ? tr("AI 重構中…") : tr("AI 解釋中…"), 0);
+    const QString lang = e->property("language").toString();
+    if (refactor) {
+        aiProvider->requestChat(
+            QStringLiteral("You are a senior %1 developer. Refactor the given code to be cleaner "
+                           "and more idiomatic while preserving behavior. Output ONLY the "
+                           "refactored code, no fences, no commentary.").arg(lang), sel);
+    } else {
+        aiProvider->requestChat(
+            QStringLiteral("You are a senior %1 developer. Explain the given code concisely in "
+                           "Traditional Chinese: purpose, key logic, pitfalls.").arg(lang), sel);
+    }
+}
+
+void MainWindow::onAiChatReady(const QString& content) {
+    statusBar()->clearMessage();
+    if (content.trimmed().isEmpty()) { statusBar()->showMessage(tr("AI 沒有回應內容"), 3000); return; }
+    if (m_aiRefactorMode) {
+        showSideBySideDiff(tr("目前選取"), m_aiSelection, tr("AI 重構建議"), content);
+        if (QMessageBox::question(this, tr("AI 重構"),
+                                  tr("要以 AI 建議取代原選取內容嗎？（可 Ctrl+Z 復原）"))
+                == QMessageBox::Yes) {
+            if (!m_aiCursor.isNull()) m_aiCursor.insertText(content);
+        }
+    } else {
+        CodeEditor* e = createEditorTab(tr("AI 解釋"));
+        e->setPlainText(content);
+        e->document()->setModified(false);
+    }
 }
 
 // 外掛選單重建：指令列表（依註冊順序）+ 管理項

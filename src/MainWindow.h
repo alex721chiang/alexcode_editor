@@ -237,6 +237,15 @@ private:
     QMenu* pluginMenu = nullptr;
     void rebuildPluginMenu();
 
+    // AI 輔助（ghost 補全 / 解釋 / 重構）
+    QTimer* aiGhostTimer = nullptr;      // autoTrigger 開啟時的編輯停頓觸發
+    bool m_aiRefactorMode = false;       // chatReady 的路由：重構 vs 解釋
+    QString m_aiSelection;               // 重構 diff 的左側原文
+    QTextCursor m_aiCursor;              // 原選取（持久游標，套用取代用）
+    void triggerAiCompletion();
+    void runAiOnSelection(bool refactor);
+    void onAiChatReady(const QString& content);
+
     // 6.2 快捷鍵自訂（JSON：動作名稱 → 快捷鍵；含衝突偵測）
     static QString keymapConfigPath();
     void applyKeymap();                               // 首次寫入現況為模板

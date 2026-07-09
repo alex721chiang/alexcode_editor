@@ -42,6 +42,9 @@ CodeEditor::CodeEditor(QWidget *parent) : QPlainTextEdit(parent) {
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::updateExtraHighlights);
+    connect(this, &CodeEditor::cursorPositionChanged, this, [this]() {
+        if (hasGhostText() && textCursor().position() != m_ghostPos) clearGhostText();
+    });
     // 游標落入摺疊隱藏區（搜尋/跳行等）→ 自動展開所在區域
     connect(this, &CodeEditor::cursorPositionChanged, this, [this]() {
         while (!m_folds.isEmpty() && !textCursor().block().isVisible())
@@ -574,6 +577,21 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
     if (m_macroRecording)
         m_macro.append({e->key(), e->modifiers(), e->text()});
 
+    // AI ghost text：Tab 接受、Esc 拒絕；其他按鍵先清除再照常處理
+    if (hasGhostText()) {
+        if (e->key() == Qt::Key_Tab && e->modifiers() == Qt::NoModifier) {
+            acceptGhostText();
+            e->accept();
+            return;
+        }
+        if (e->key() == Qt::Key_Escape) {
+            clearGhostText();
+            e->accept();
+            return;
+        }
+        clearGhostText();
+    }
+
     // 補全選單開啟時，讓選單接管導覽鍵
     if (m_completer && m_completer->popup()->isVisible()) {
         switch (e->key()) {
@@ -1014,6 +1032,31 @@ void CodeEditor::setGitLineStates(const QHash<int, int>& states) {
 }
 
 // ----------------------------------------------------------------
+// AI ghost text：游標後灰字建議（Copilot 式）。只綁定顯示當下的游標位置，
+// 游標移動/任何編輯即失效；Tab 插入完整建議（含多行）。
+// ----------------------------------------------------------------
+void CodeEditor::setGhostText(const QString& t) {
+    m_ghostText = t;
+    m_ghostPos = t.isEmpty() ? -1 : textCursor().position();
+    viewport()->update();
+}
+
+void CodeEditor::clearGhostText() {
+    if (m_ghostText.isEmpty()) return;
+    m_ghostText.clear();
+    m_ghostPos = -1;
+    viewport()->update();
+}
+
+bool CodeEditor::acceptGhostText() {
+    if (m_ghostText.isEmpty()) return false;
+    const QString t = m_ghostText;
+    clearGhostText();                     // 先清除：insertText 觸發的 cursorPositionChanged 才不會誤清
+    textCursor().insertText(t);
+    return true;
+}
+
+// ----------------------------------------------------------------
 // 多游標（精簡版）：Ctrl+D 逐一選取下一個相同字串，輸入/刪除同步套用全部位置
 // Esc 或滑鼠點擊結束多游標狀態
 // ----------------------------------------------------------------
@@ -1212,6 +1255,20 @@ void CodeEditor::paintIndentGuides(QPaintEvent* event) {
 void CodeEditor::paintEvent(QPaintEvent* event) {
     QPlainTextEdit::paintEvent(event);
     if (!m_largeFile) paintIndentGuides(event);   // 縮排輔助線（畫在前導空白區，不蓋文字）
+
+    // AI ghost text：第一行畫在游標後（斜體註解色）；多行建議加上行數提示
+    if (hasGhostText() && textCursor().position() == m_ghostPos) {
+        QPainter p(viewport());
+        QFont f = font();
+        f.setItalic(true);
+        p.setFont(f);
+        p.setPen(QColor(Theme::SYN_COMMENT));
+        const QRect r = cursorRect();
+        const QStringList lines = m_ghostText.split(QChar('\n'));
+        QString shown = lines.first();
+        if (lines.size() > 1) shown += tr("  ⏎ +%1 行（Tab 接受）").arg(lines.size() - 1);
+        p.drawText(QPoint(r.right() + 2, r.top() + fontMetrics().ascent()), shown);
+    }
 
     if (m_extraCursors.isEmpty()) return;
     QPainter p(viewport());                       // 額外游標 caret（強調色細線）
