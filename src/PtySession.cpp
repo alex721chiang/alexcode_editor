@@ -116,13 +116,121 @@ void PtySession::stop() {
                      HeapFree(GetProcessHeap(), 0, m_attrList); m_attrList = nullptr; }
 }
 
-#else   // 非 Windows：佔位（本專案目前僅 Windows）
+#else   // POSIX（Linux/macOS）：forkpty 實作
 
-bool PtySession::start(const QString&, const QString&, int, int) { return false; }
-void PtySession::readerLoop() {}
-void PtySession::writeData(const QByteArray&) {}
-void PtySession::resize(int, int) {}
-void PtySession::stop() { if (m_reader.joinable()) m_reader.join(); }
-bool PtySession::isPlatformSupported() { return false; }
+#if defined(Q_OS_MACOS)
+#include <util.h>      // macOS 的 forkpty 在這
+#else
+#include <pty.h>       // glibc/musl 的 forkpty（舊 glibc 需連 -lutil）
+#endif
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/ioctl.h>
+#include <poll.h>
+#include <csignal>
+#include <cerrno>
+
+bool PtySession::start(const QString& program, const QString& workingDir, int cols, int rows) {
+    if (m_running) return false;
+    // wake pipe：stop() 用它喚醒 poll()，避免「關 fd 逼 read 返回」的競態
+    //（與 Windows 分支的 CancelSynchronousIo 同一類問題、同一種解法思路）
+    if (pipe(m_wakePipe) != 0) return false;
+
+    winsize ws{};
+    ws.ws_row = static_cast<unsigned short>(qMax(rows, 1));
+    ws.ws_col = static_cast<unsigned short>(qMax(cols, 1));
+
+    const pid_t pid = forkpty(&m_masterFd, nullptr, nullptr, &ws);
+    if (pid < 0) {
+        close(m_wakePipe[0]); close(m_wakePipe[1]);
+        m_wakePipe[0] = m_wakePipe[1] = -1;
+        return false;
+    }
+    if (pid == 0) {
+        // 子行程：切工作目錄、設 TERM 後 exec。用 sh -c 讓 program 可以是任意命令列。
+        if (!workingDir.isEmpty()) {
+            if (chdir(workingDir.toUtf8().constData()) != 0) { /* 沿用繼承的目錄 */ }
+        }
+        setenv("TERM", "xterm-256color", 1);
+        execl("/bin/sh", "sh", "-c", program.toUtf8().constData(), static_cast<char*>(nullptr));
+        _exit(127);   // exec 失敗
+    }
+
+    m_childPid = pid;
+    m_running = true;
+    m_reader = std::thread(&PtySession::readerLoop, this);
+    return true;
+}
+
+void PtySession::readerLoop() {
+    std::vector<char> buf(4096);
+    while (m_running && !m_stopping) {
+        pollfd fds[2];
+        fds[0] = { m_masterFd, POLLIN, 0 };
+        fds[1] = { m_wakePipe[0], POLLIN, 0 };
+        if (poll(fds, 2, -1) < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (fds[1].revents) break;                       // stop() 要求退出
+        // 先讀 POLLIN 再理會 POLLHUP：Linux 上子行程結束時兩者常同時回報，
+        // 先 break 會漏掉 pty 緩衝區裡最後一批輸出（read 讀到 0/EIO 才是真結束）
+        if (fds[0].revents & POLLIN) {
+            const ssize_t n = read(m_masterFd, buf.data(), buf.size());
+            if (n <= 0) break;
+            emit dataReceived(QByteArray(buf.data(), static_cast<int>(n)));
+            continue;
+        }
+        if (fds[0].revents & (POLLHUP | POLLERR)) break; // 子行程結束、slave 端全關
+    }
+    m_running = false;
+    if (!m_stopping) emit exited();      // 由 stop() 主動關閉時不再發訊號
+}
+
+void PtySession::writeData(const QByteArray& data) {
+    if (m_masterFd >= 0 && !data.isEmpty()) {
+        const ssize_t written = write(m_masterFd, data.constData(), data.size());
+        (void)written;
+    }
+}
+
+void PtySession::resize(int cols, int rows) {
+    if (m_masterFd < 0) return;
+    winsize ws{};
+    ws.ws_row = static_cast<unsigned short>(qMax(rows, 1));
+    ws.ws_col = static_cast<unsigned short>(qMax(cols, 1));
+    ioctl(m_masterFd, TIOCSWINSZ, &ws);
+}
+
+bool PtySession::isPlatformSupported() { return true; }
+
+void PtySession::stop() {
+    if (m_stopping.exchange(true)) return;   // 僅執行一次
+    m_running = false;
+    if (m_reader.joinable()) {
+        if (m_wakePipe[1] >= 0) {
+            const char b = 0;
+            const ssize_t w = write(m_wakePipe[1], &b, 1);   // 喚醒 poll，reader 自行退出
+            (void)w;
+        }
+        m_reader.join();
+    }
+    if (m_masterFd >= 0)    { close(m_masterFd); m_masterFd = -1; }   // 子行程收到 SIGHUP
+    if (m_wakePipe[0] >= 0) { close(m_wakePipe[0]); m_wakePipe[0] = -1; }
+    if (m_wakePipe[1] >= 0) { close(m_wakePipe[1]); m_wakePipe[1] = -1; }
+    if (m_childPid > 0) {
+        kill(m_childPid, SIGTERM);                        // SIGHUP 可能被 shell 忽略，補一刀
+        int status = 0;
+        if (waitpid(m_childPid, &status, WNOHANG) == 0) { // 還沒退：給 200ms 寬限再 SIGKILL
+            for (int i = 0; i < 20 && waitpid(m_childPid, &status, WNOHANG) == 0; ++i)
+                usleep(10 * 1000);
+            if (waitpid(m_childPid, &status, WNOHANG) == 0) {
+                kill(m_childPid, SIGKILL);
+                waitpid(m_childPid, &status, 0);          // SIGKILL 後必定可回收
+            }
+        }
+        m_childPid = -1;
+    }
+}
 
 #endif

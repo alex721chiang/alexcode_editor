@@ -71,13 +71,14 @@ void TerminalWidget::startShell(const QString& workingDir) {
 #ifdef Q_OS_WIN
     const QString shell = QStringLiteral("powershell.exe");
 #else
-    const QString shell = QStringLiteral("/bin/bash");
+    // 尊重使用者的預設 shell；沒設 $SHELL 時退回 bash
+    const QString shell = qEnvironmentVariable("SHELL", QStringLiteral("/bin/bash"));
 #endif
     m_started = m_pty.start(shell, workingDir, m_vt.cols(), m_vt.rows());
     if (!m_started) {
-        // 啟動失敗時於畫面顯示訊息，而非靜默；區分「此平台不支援」與「真的啟動失敗」，
-        // 避免在 macOS/Linux 上顯示「找不到或無法執行 /bin/bash」這種誤導訊息
-        // （bash 通常存在，真正原因是內建終端機目前只有 Windows 版實作）。
+        // 啟動失敗時於畫面顯示訊息，而非靜默；區分「此平台不支援」與「真的啟動失敗」。
+        // Windows(ConPTY) 與 Linux/macOS(forkpty) 均已實作，「不支援」分支目前僅是
+        // 未來新平台的安全網。
         if (!PtySession::isPlatformSupported()) {
             m_vt.feed(QByteArray("\r\n  [此平台尚未支援內建終端機（目前僅支援 Windows）]\r\n")
                       + "  [Built-in terminal is not supported on this platform yet (Windows only for now)]\r\n");

@@ -6,9 +6,12 @@
 #include <atomic>
 #ifdef Q_OS_WIN
 #include <windows.h>
+#else
+#include <sys/types.h>   // pid_t
 #endif
 
-// Windows ConPTY 會話：開一個虛擬主控台接 PowerShell/cmd，雙向 I/O。
+// 互動式終端機會話：Windows 用 ConPTY（虛擬主控台接 PowerShell/cmd），
+// Linux/macOS 用 forkpty()（pty 接 $SHELL）。雙向 I/O；
 // 讀取在背景執行緒進行，透過 queued signal 把資料丟回 GUI 執行緒。
 class PtySession : public QObject {
     Q_OBJECT
@@ -22,7 +25,7 @@ public:
     void stop();
     bool isRunning() const { return m_running.load(); }
 
-    // 目前僅 Windows（ConPTY）有實作；其他平台 start() 恆回傳 false。
+    // Windows（ConPTY）與 Linux/macOS（forkpty）皆有實作。
     // 讓呼叫端（TerminalWidget）能區分「此平台不支援」與「真的啟動失敗」，顯示正確訊息。
     static bool isPlatformSupported();
 
@@ -45,5 +48,9 @@ private:
     HANDLE m_hProcess = nullptr;
     HANDLE m_hThread  = nullptr;
     LPPROC_THREAD_ATTRIBUTE_LIST m_attrList = nullptr;
+#else
+    int   m_masterFd    = -1;      // pty master 端（讀寫子行程）
+    pid_t m_childPid    = -1;
+    int   m_wakePipe[2] = {-1, -1};   // stop() 喚醒 poll() 用（避免 close-while-read 競態）
 #endif
 };

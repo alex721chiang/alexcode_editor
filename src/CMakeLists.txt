@@ -47,6 +47,9 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/Version.h.in ${CMAKE_CURRENT_BINARY_D
 add_library(alexcode_lib STATIC ${LIB_SRCS})
 target_include_directories(alexcode_lib PUBLIC ${CMAKE_CURRENT_BINARY_DIR} ${TREESITTER_INCLUDE} ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(alexcode_lib PUBLIC Qt6::Widgets Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Core5Compat ${TREESITTER_LIBS})
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(alexcode_lib PUBLIC util)   # forkpty（舊 glibc 在 libutil；2.34 起為空 stub）
+endif()
 
 add_executable(AlexCode WIN32 main.cpp resources.qrc $<$<BOOL:${WIN32}>:alexcode.rc>)
 target_link_libraries(AlexCode PRIVATE alexcode_lib)
