@@ -1,5 +1,6 @@
 #include "QuickOpenDialog.h"
 #include "FilterEngine.h"
+#include "Theme.h"
 #include <QVBoxLayout>
 #include <QDirIterator>
 #include <QKeyEvent>
@@ -20,7 +21,8 @@ QuickOpenDialog::QuickOpenDialog(QWidget* parent)
     layout->addWidget(input);
     layout->addWidget(list);
 
-    setStyleSheet("QuickOpenDialog { border: 1px solid #00e5ff; border-radius: 8px; }");
+    setStyleSheet(QStringLiteral("QuickOpenDialog { border: 1px solid %1; border-radius: 8px; }")
+                      .arg(Theme::ACCENT));
 
     indexWatcher = new QFutureWatcher<QStringList>(this);
     connect(indexWatcher, &QFutureWatcher<QStringList>::finished, this, [this]() {

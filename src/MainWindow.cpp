@@ -76,6 +76,7 @@
 #include "LspController.h"
 #include "FunctionListController.h"
 #include "FindController.h"
+#include "NeonIcons.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
@@ -412,17 +413,15 @@ void MainWindow::setupUI() {
     // ---------- File actions ----------
     newAction = new QAction(tr("New File"), this);
     newAction->setShortcut(QKeySequence::New);
-    newAction->setIcon(style()->standardIcon(QStyle::SP_FileIcon));
+    // 圖示統一由 applyActionIcons() 設定（自繪霓虹線條圖示，主題切換時重設）
     connect(newAction, &QAction::triggered, this, &MainWindow::newFile);
 
     openAction = new QAction(tr("Open..."), this);
     openAction->setShortcut(QKeySequence::Open);
-    openAction->setIcon(style()->standardIcon(QStyle::SP_DirOpenIcon));
     connect(openAction, &QAction::triggered, this, &MainWindow::openFile);
 
     saveAction = new QAction(tr("Save"), this);
     saveAction->setShortcut(QKeySequence::Save);
-    saveAction->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
     connect(saveAction, &QAction::triggered, this, &MainWindow::saveFile);
 
     saveAsAction = new QAction(tr("Save As..."), this);
@@ -446,14 +445,12 @@ void MainWindow::setupUI() {
     // ---------- Edit actions ----------
     undoAction = new QAction(tr("Undo"), this);
     undoAction->setShortcut(QKeySequence::Undo);
-    undoAction->setIcon(style()->standardIcon(QStyle::SP_ArrowBack));
     connect(undoAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->undo();
     });
 
     redoAction = new QAction(tr("Redo"), this);
     redoAction->setShortcut(QKeySequence::Redo);
-    redoAction->setIcon(style()->standardIcon(QStyle::SP_ArrowForward));
     connect(redoAction, &QAction::triggered, this, [this]() {
         if (auto editor = activeEditor()) editor->redo();
     });
@@ -529,7 +526,6 @@ void MainWindow::setupUI() {
     // lambda 延遲取值，觸發時必已存在
     findAction = new QAction(tr("Find / Replace..."), this);
     findAction->setShortcut(QKeySequence::Find);
-    findAction->setIcon(style()->standardIcon(QStyle::SP_FileDialogContentsView));
     connect(findAction, &QAction::triggered, this, [this]() { findController->showDialog(); });
 
     findNextAction = new QAction(tr("Find Next"), this);
@@ -546,8 +542,9 @@ void MainWindow::setupUI() {
 
     findInFilesAction = new QAction(tr("Find in Files..."), this);
     findInFilesAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_F));
-    findInFilesAction->setIcon(style()->standardIcon(QStyle::SP_DirIcon));
     connect(findInFilesAction, &QAction::triggered, this, &MainWindow::showFindInFilesDialog);
+
+    applyActionIcons();   // 自繪霓虹圖示（工具列/選單共用；主題切換時會重呼叫換色）
 
     openFolderAction = new QAction(tr("Open Folder..."), this);
     openFolderAction->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_O));   // 讓出 Ctrl+Shift+O 給 Go to Symbol
@@ -1328,7 +1325,8 @@ void MainWindow::setupToolBar() {
     filterToolBar->setMovable(false);
 
     QLabel* filterIcon = new QLabel(tr("  \xE2\x9A\xA1 FILTER "), this);
-    filterIcon->setStyleSheet("color:#ff2d95; font-weight:700; letter-spacing:1px;");
+    filterIcon->setStyleSheet(QStringLiteral("color:%1; font-weight:700; letter-spacing:1px;")
+                                  .arg(Theme::ACCENT2));
     filterToolBar->addWidget(filterIcon);
 
     filterInput = new QLineEdit(this);
@@ -1340,7 +1338,7 @@ void MainWindow::setupToolBar() {
     fuzzyCheck->setToolTip(tr("模糊比對：子序列匹配，例如 mwin 可比對 MainWindow"));
     filterBtn = new QPushButton("Filter", this);
     filterCountLabel = new QLabel("", this);
-    filterCountLabel->setStyleSheet("color:#00e5ff; padding:0 8px;");
+    filterCountLabel->setStyleSheet(QStringLiteral("color:%1; padding:0 8px;").arg(Theme::ACCENT));
 
     // ---------- Find & Replace 子系統（拆到 FindController）----------
     // 依賴 resultsList / filterCountLabel / filterResultsDock（Find All 沿用 FILTER RESULTS 面板），
@@ -1893,6 +1891,17 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // 下次啟動完整還原。個別關閉分頁 (Ctrl+W) 仍會提示儲存。
     saveSession();
     event->accept();
+}
+
+// 自繪霓虹線條圖示：呼叫當下取 Theme 色，主題切換後重呼叫即可換色
+void MainWindow::applyActionIcons() {
+    newAction->setIcon(NeonIcons::icon(QStringLiteral("new")));
+    openAction->setIcon(NeonIcons::icon(QStringLiteral("open")));
+    saveAction->setIcon(NeonIcons::icon(QStringLiteral("save")));
+    undoAction->setIcon(NeonIcons::icon(QStringLiteral("undo")));
+    redoAction->setIcon(NeonIcons::icon(QStringLiteral("redo")));
+    findAction->setIcon(NeonIcons::icon(QStringLiteral("find")));
+    findInFilesAction->setIcon(NeonIcons::icon(QStringLiteral("find-in-files")));
 }
 
 // ----------------------------------------------------------------
@@ -2686,6 +2695,7 @@ void MainWindow::showPreferences() {
     if (themeCombo->currentText() != Theme::currentThemeName) {
         Theme::setTheme(themeCombo->currentText());
         qApp->setStyleSheet(Theme::stylesheet());
+        applyActionIcons();                           // 圖示線色/點綴色跟隨主題
         for (int i = 0; i < tabWidget->count(); ++i)
             if (auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
                 e->refreshSyntaxTheme();              // 語法高亮色票跟隨主題

@@ -138,6 +138,7 @@ private:
     QAction* findPrevAction;
     QAction* gotoLineAction;
     QAction* findInFilesAction;
+    void applyActionIcons();     // 自繪霓虹圖示（主題切換時重呼叫換色）
     QAction* wrapAction = nullptr;
     QAction* fontAction;
     QAction* zoomInAction;

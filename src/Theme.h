@@ -2,6 +2,7 @@
 #include <QString>
 #include <QStringList>
 #include <QHash>
+#include <QColor>
 
 // ============================================================
 //  AlexCode 主題系統（6.3）
@@ -111,8 +112,8 @@ QMainWindow, QDialog, QWidget {
 
 /* ---------- 選單列 ---------- */
 QMenuBar {
-    background-color: @panel@;
-    border-bottom: 1px solid @accent@;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @panel@, stop:1 @bg@);
+    border-bottom: 1px solid @accentGlow@;
     padding: 2px;
 }
 QMenuBar::item {
@@ -134,8 +135,9 @@ QMenu::item {
     border-radius: 4px;
 }
 QMenu::item:selected {
-    background-color: @hover@;
+    background-color: @accentFaint@;
     color: @accent@;
+    border-left: 2px solid @accent@;
 }
 QMenu::separator {
     height: 1px;
@@ -145,7 +147,7 @@ QMenu::separator {
 
 /* ---------- 工具列 ---------- */
 QToolBar {
-    background-color: @panel@;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @panel@, stop:1 @bg@);
     border: none;
     border-bottom: 1px solid @border@;
     padding: 3px;
@@ -164,38 +166,38 @@ QToolButton {
     color: @fgDim@;
 }
 QToolButton:hover {
-    background-color: @hover@;
-    border: 1px solid @accent@;
+    background-color: @accentFaint@;
+    border: 1px solid @accentGlow@;
     color: @accent@;
 }
 QToolButton:pressed {
     background-color: @pressed@;
 }
 
-/* ---------- 分頁 ---------- */
+/* ---------- 分頁（現代編輯器風：平面 + 強調色底線指示） ---------- */
 QTabWidget::pane {
-    border: 1px solid @border@;
-    border-top: 2px solid @accent@;
+    border: none;
+    border-top: 1px solid @border@;
+}
+QTabBar {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @panel@, stop:1 @bg@);
 }
 QTabBar::tab {
-    background: @panel@;
+    background: transparent;
     color: @fgDim2@;
-    border: 1px solid @border@;
-    border-bottom: none;
-    padding: 7px 16px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 7px 18px;
     margin-right: 2px;
-    border-top-left-radius: 6px;
-    border-top-right-radius: 6px;
 }
 QTabBar::tab:selected {
-    background: @currentLine@;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 transparent, stop:0.75 transparent, stop:1 @accentFaint@);
     color: @accent@;
-    border: 1px solid @accent@;
-    border-bottom: none;
+    border-bottom: 2px solid @accent@;
 }
 QTabBar::tab:hover:!selected {
-    background: @hover@;
     color: @fgList@;
+    border-bottom: 2px solid @accentGlow@;
 }
 QTabBar::close-button {
     image: none;
@@ -220,15 +222,16 @@ QLineEdit::placeholder { color: @faint@; }
 
 /* ---------- 按鈕 ---------- */
 QPushButton {
-    background-color: @hover@;
-    border: 1px solid @accent@;
-    border-radius: 5px;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @hover@, stop:1 @panel@);
+    border: 1px solid @accentGlow@;
+    border-radius: 6px;
     padding: 6px 18px;
     color: @accent@;
     font-weight: 600;
 }
 QPushButton:hover {
-    background-color: @accent@;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @accent@, stop:1 @accentDim@);
+    border-color: @accent@;
     color: @bg@;
 }
 QPushButton:pressed {
@@ -270,39 +273,54 @@ QCheckBox::indicator:checked {
     border-color: @accent@;
 }
 
-/* ---------- 清單 ---------- */
-QListWidget {
+/* ---------- 清單 / 樹狀（Function List 等） ---------- */
+QListWidget, QTreeWidget, QTreeView {
     background-color: @bg@;
     border: 1px solid @border@;
     border-radius: 4px;
     color: @fgList@;
     outline: none;
 }
-QListWidget::item { padding: 4px 8px; border-radius: 3px; }
-QListWidget::item:hover { background-color: @currentLine@; }
-QListWidget::item:selected {
-    background-color: @hover@;
+QListWidget::item, QTreeWidget::item, QTreeView::item { padding: 4px 8px; border-radius: 3px; }
+QListWidget::item:hover, QTreeWidget::item:hover, QTreeView::item:hover {
+    background-color: @currentLine@;
+}
+QListWidget::item:selected, QTreeWidget::item:selected, QTreeView::item:selected {
+    background-color: @accentFaint@;
     color: @accent@;
     border-left: 2px solid @accent2@;
 }
+QTreeWidget::branch, QTreeView::branch { background: transparent; }
+QHeaderView::section {
+    background-color: @panel@;
+    color: @fgDim@;
+    border: none;
+    border-bottom: 1px solid @border@;
+    padding: 4px 8px;
+}
 
-/* ---------- Dock ---------- */
+/* ---------- Dock（左側強調色識別條，科技標籤感） ---------- */
 QDockWidget {
     color: @accent@;
     titlebar-close-icon: none;
     font-weight: 600;
 }
 QDockWidget::title {
-    background: @panel@;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 @accentFaint@, stop:0.35 @panel@, stop:1 @panel@);
     border-bottom: 1px solid @border@;
+    border-left: 3px solid @accent@;
     padding: 6px 10px;
     text-align: left;
 }
 
+/* ---------- 分割器 ---------- */
+QSplitter::handle { background: @border@; }
+QSplitter::handle:hover { background: @accentGlow@; }
+
 /* ---------- 狀態列 ---------- */
 QStatusBar {
-    background-color: @panel@;
-    border-top: 1px solid @accent@;
+    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 @bg@, stop:1 @panel@);
+    border-top: 1px solid @accentGlow@;
     color: @fgDim2@;
 }
 QStatusBar QLabel {
@@ -312,26 +330,26 @@ QStatusBar QLabel {
     background: transparent;
 }
 
-/* ---------- 捲軸 ---------- */
+/* ---------- 捲軸（細身 + 半透明強調色光暈） ---------- */
 QScrollBar:vertical {
-    background: @bg@;
-    width: 11px;
+    background: transparent;
+    width: 10px;
     margin: 0;
 }
 QScrollBar::handle:vertical {
-    background: @border@;
-    border-radius: 5px;
+    background: @accentGlow@;
+    border-radius: 4px;
     min-height: 30px;
 }
 QScrollBar::handle:vertical:hover { background: @accent@; }
 QScrollBar:horizontal {
-    background: @bg@;
-    height: 11px;
+    background: transparent;
+    height: 10px;
     margin: 0;
 }
 QScrollBar::handle:horizontal {
-    background: @border@;
-    border-radius: 5px;
+    background: @accentGlow@;
+    border-radius: 4px;
     min-width: 30px;
 }
 QScrollBar::handle:horizontal:hover { background: @accent@; }
@@ -361,6 +379,14 @@ QToolTip {
     border-radius: 4px;
 }
 )QSS");
+    // rgba 光暈色（QSS 邊框/底色用半透明強調色，做出「發光」層次）
+    const auto rgba = [](const QString& hex, int alpha) {
+        const QColor c(hex);
+        return QStringLiteral("rgba(%1,%2,%3,%4)")
+            .arg(c.red()).arg(c.green()).arg(c.blue()).arg(alpha);
+    };
+    qss.replace("@accentGlow@", rgba(pal.accent, 110));   // 較亮：邊框/hover 底線
+    qss.replace("@accentFaint@", rgba(pal.accent, 26));   // 極淡：選取底色/漸層尾
     qss.replace("@bg@", pal.bg);
     qss.replace("@panel@", pal.panel);
     qss.replace("@border@", pal.border);

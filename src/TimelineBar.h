@@ -3,6 +3,7 @@
 #include <QPainter>
 #include <QMouseEvent>
 #include <QList>
+#include "Theme.h"
 
 // 5.6 時間軸密度條：以橫向長條呈現篩選命中於整份文件中的分布密度。
 // 點擊任一位置跳至文件對應區段（發出 jumpToLine）。
@@ -28,7 +29,7 @@ signals:
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        p.fillRect(rect(), QColor("#10141f"));
+        p.fillRect(rect(), QColor(Theme::LINE_NUM_BG));   // 跟主題（原本寫死深色，Paper Light 會出現黑帶）
         if (m_lines.isEmpty()) return;
 
         // 分桶統計：每個像素欄一桶，亮度 ∝ 命中數
@@ -41,7 +42,7 @@ protected:
         }
         for (int x = 0; x < w; ++x) {
             if (!buckets[x]) continue;
-            QColor c("#00e5ff");
+            QColor c(Theme::ACCENT);
             c.setAlphaF(0.35 + 0.65 * buckets[x] / maxCount);
             p.fillRect(x, 2, 1, height() - 4, c);
         }

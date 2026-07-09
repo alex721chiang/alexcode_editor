@@ -1,5 +1,6 @@
 #include "FindController.h"
 #include "CodeEditor.h"
+#include "Theme.h"
 #include <QDialog>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -40,7 +41,7 @@ void FindController::ensureDialog() {
     layout->addWidget(m_regexCheck, 2, 3);
 
     m_countLabel = new QLabel(m_dialog);
-    m_countLabel->setStyleSheet("color:#00e5ff;");
+    m_countLabel->setStyleSheet(QStringLiteral("color:%1;").arg(Theme::ACCENT));
     layout->addWidget(m_countLabel, 3, 1, 1, 3);
 
     m_replaceAllTabsCheck = new QCheckBox(tr("套用到全部開啟分頁"), m_dialog);

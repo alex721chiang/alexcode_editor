@@ -34,6 +34,7 @@ set(LIB_SRCS
     LspController.cpp
     FunctionListController.cpp
     FindController.cpp
+    NeonIcons.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

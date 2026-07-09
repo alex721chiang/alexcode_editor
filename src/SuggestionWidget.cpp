@@ -1,12 +1,17 @@
 #include "SuggestionWidget.h"
+#include "Theme.h"
 #include <QApplication>
 
 SuggestionWidget::SuggestionWidget(QWidget *parent)
-    : QListWidget(parent) 
+    : QListWidget(parent)
 {
     setWindowFlags(Qt::ToolTip | Qt::FramelessWindowHint);
     setFocusPolicy(Qt::StrongFocus);
-    setStyleSheet("QListWidget { border: 1px solid #444; background-color: #2b2b2b; color: #ccc; selection-background-color: #4b6eaf; }");
+    // 跟主題（原本寫死灰色系，與霓虹主題格格不入、Paper Light 下也突兀）
+    setStyleSheet(QStringLiteral(
+        "QListWidget { border: 1px solid %1; border-radius: 6px; background-color: %2;"
+        " color: %3; selection-background-color: %4; selection-color: %1; }")
+        .arg(Theme::ACCENT, Theme::LINE_NUM_BG, Theme::EDITOR_FG, Theme::BRACKET_MATCH_BG));
 }
 
 void SuggestionWidget::showSuggestions(const QStringList &suggestions, const QPoint &pos) {
