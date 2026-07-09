@@ -77,6 +77,8 @@
 #include "FunctionListController.h"
 #include "FindController.h"
 #include "NeonIcons.h"
+#include "DiffCalc.h"
+#include "DiffViewer.h"
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
 #include "TextTools.h"
@@ -179,6 +181,8 @@ void MainWindow::setupLsp() {
             [this](const QString& path) {
                 if (CodeEditor* e = editorForPath(path)) e->setGitLineStates({});
             });
+    connect(gitGutterController, &GitGutterController::blameReady, this,
+            [this](const QString&) { updateStatusBar(); });   // 游標行 blame 上線後刷新
 
     // Git gutter 重算防抖：編輯停頓 600ms 後比對 HEAD
     gitGutterTimer = new QTimer(this);
@@ -1002,6 +1006,19 @@ void MainWindow::setupUI() {
         showDiff(tr("剪貼簿"), QApplication::clipboard()->text(),
                  tr("目前內容"), e->toPlainText());
     });
+    diffMenu->addSeparator();
+    diffMenu->addAction(tr("與 Git HEAD 並排比較"), this, &MainWindow::compareActiveWithGitHead);
+    diffMenu->addAction(tr("與磁碟版本並排比較"), this, [this]() {
+        CodeEditor* e = activeEditor();
+        if (!e) return;
+        const QString path = e->property("filePath").toString();
+        if (path.isEmpty()) { statusBar()->showMessage(tr("此分頁尚未存檔"), 2500); return; }
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) return;
+        QString disk = QString::fromUtf8(f.readAll());
+        disk.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        showSideBySideDiff(tr("磁碟版本"), disk, tr("目前內容"), e->toPlainText());
+    });
 
     QMenu* macroMenu = toolsMenu->addMenu(tr("巨集"));
     QAction* recAct = macroMenu->addAction(tr("開始/停止錄製"), this, [this]() {
@@ -1458,6 +1475,8 @@ void MainWindow::setupStatusBar() {
     statusLines    = new QLabel("1 lines", this);
     statusLang     = new QLabel("Plain Text", this);
     statusGit = new QLabel("", this);
+    statusBlame = new QLabel("", this);
+    statusBlame->setStyleSheet(QStringLiteral("color:%1;").arg(Theme::SYN_COMMENT));   // 低調的行內 blame
     statusEncoding = new QLabel("UTF-8", this);
     statusEol      = new QLabel("LF", this);
     statusEncoding->setToolTip(tr("點擊切換編碼（重新載入或轉換）"));
@@ -1466,6 +1485,7 @@ void MainWindow::setupStatusBar() {
     statusEol->setCursor(Qt::PointingHandCursor);
     statusEncoding->installEventFilter(this);
     statusEol->installEventFilter(this);
+    sb->addPermanentWidget(statusBlame);                     // 游標行 blame（一般訊息區右側）
     sb->addPermanentWidget(lspStatusController->label());   // QLabel 已在 setupLsp() 建好，這裡只負責排位置
     sb->addPermanentWidget(statusGit);
     sb->addPermanentWidget(statusLineCol);
@@ -1492,6 +1512,11 @@ void MainWindow::updateStatusBar() {
     const QString eol = editor->property("eol").toString();
     statusEol->setText(eol.isEmpty() ? "LF" : eol);
     lspStatusController->update(editor);
+    if (statusBlame) {                                       // 游標行的 git blame（快取查詢，無 I/O）
+        const QString path = editor->property("filePath").toString();
+        statusBlame->setText(path.isEmpty() ? QString()
+            : gitGutterController->blameTextForLine(path, c.blockNumber()));
+    }
 }
 
 // ----------------------------------------------------------------
@@ -1680,7 +1705,10 @@ void MainWindow::openFileByPath(const QString& fileName) {
         newEditor->setLspEnabled(true);
         lspController->lsp()->documentOpened(fileName, text);
     }
-    if (!assistOff) gitGutterController->fetchHead(fileName);   // Git gutter
+    if (!assistOff) {
+        gitGutterController->fetchHead(fileName);    // Git gutter
+        gitGutterController->fetchBlame(fileName);   // 狀態列行內 blame
+    }
     recentFilesController->addFile(fileName);
     if (fileWatcher) fileWatcher->addPath(fileName);
     statusBar()->showMessage("Opened " + fileName, 3000);
@@ -1856,6 +1884,8 @@ void MainWindow::saveFile() {
     // Git gutter：另存的新路徑可能在版控中，重抓 HEAD（已知未版控者不重試）
     if (!gitGutterController->hasHead(fileName)) gitGutterController->fetchHead(fileName);
     else gitGutterController->recompute(currentEditor);
+    gitGutterController->invalidateBlame(fileName);   // 存檔後行號位移，blame 重抓
+    gitGutterController->fetchBlame(fileName);
 }
 
 // ----------------------------------------------------------------
@@ -2762,6 +2792,50 @@ void MainWindow::showDiff(const QString& titleA, const QString& a,
     // 用多色標示突顯 +/- 行首
     e->setKeywordHighlights({});
     statusBar()->showMessage(tr("比較完成：%1 處差異").arg(changes), 4000);
+}
+
+// 目前檔案 vs Git HEAD 並排比較（選單與 --gitdiff-shot 共用）
+void MainWindow::compareActiveWithGitHead() {
+    CodeEditor* e = activeEditor();
+    if (!e) return;
+    const QString path = e->property("filePath").toString();
+    if (path.isEmpty()) { statusBar()->showMessage(tr("此分頁尚未存檔"), 2500); return; }
+    QString head = gitGutterController->headText(path);
+    if (head.isEmpty()) {                        // 尚未快取：同步抓一次（選單動作可接受）
+        QProcess p;
+        p.setWorkingDirectory(QFileInfo(path).absolutePath());
+        p.start("git", {"show", "HEAD:./" + QFileInfo(path).fileName()});
+        if (!p.waitForFinished(3000) || p.exitCode() != 0) {
+            statusBar()->showMessage(tr("取不到 Git HEAD 版本（不在版控中？）"), 3500);
+            return;
+        }
+        head = QString::fromUtf8(p.readAllStandardOutput());
+        head.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    }
+    showSideBySideDiff(tr("Git HEAD"), head, tr("目前內容"), e->toPlainText());
+}
+
+// 截圖用：對目前檔案觸發 Git HEAD 並排比較後存整window圖
+void MainWindow::openGitDiffForShot(const QString& outPng) {
+    resize(1200, 800);
+    compareActiveWithGitHead();
+    QTimer::singleShot(700, this, [this, outPng]() { grab().save(outPng); });
+}
+
+// 並排 diff：DiffCalc 對齊 → DiffViewer 分頁（唯讀，關閉不提示儲存）
+void MainWindow::showSideBySideDiff(const QString& titleA, const QString& a,
+                                    const QString& titleB, const QString& b) {
+    const QStringList la = a.split('\n');
+    const QStringList lb = b.split('\n');
+    if (la.size() > 4000 || lb.size() > 4000) {
+        statusBar()->showMessage(tr("Diff 上限 4000 行"), 3000);
+        return;
+    }
+    const QList<DiffCalc::Row> rows = DiffCalc::align(la, lb);
+    auto* viewer = new DiffViewer(titleA, la, titleB, lb, rows, this);
+    const int idx = tabWidget->addTab(viewer, tr("Diff ⇄ %1 處").arg(viewer->changeCount()));
+    tabWidget->setCurrentIndex(idx);
+    statusBar()->showMessage(tr("比較完成：%1 處差異").arg(viewer->changeCount()), 4000);
 }
 
 // ----------------------------------------------------------------

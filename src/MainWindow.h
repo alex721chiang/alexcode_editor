@@ -70,6 +70,9 @@ private slots:
     void showAbout();            // 關於 AlexCode
     void showDiff(const QString& titleA, const QString& a,
                   const QString& titleB, const QString& b);
+    void showSideBySideDiff(const QString& titleA, const QString& a,
+                            const QString& titleB, const QString& b);   // 並排 diff 分頁
+    void compareActiveWithGitHead();                                     // 目前檔 vs Git HEAD（並排）
     void runExternalTool();
     void runBuildTask();
     void runCommand(const QString& cmd);
@@ -177,6 +180,7 @@ private:
     QLineEdit* cmdInput = nullptr;
     QProcess* taskProcess = nullptr;
     QLabel* statusGit = nullptr;
+    QLabel* statusBlame = nullptr;   // 游標行的 git blame（commit/作者/日期 · 摘要）
     QTimer* gitTimer = nullptr;
 
     // LSP（語言伺服器）
@@ -222,6 +226,7 @@ public:
     void findRefsForShot(const QString& name);               // 截圖/CLI：同步建索引並找引用
     void openCallGraphForShot(const QString& outPng);        // 截圖：開目前游標所在函式的 Call Graph
     void openMenuForShot(int index, const QString& outPng);  // 截圖：彈出某選單列選單以驗證 i18n
+    void openGitDiffForShot(const QString& outPng);          // 截圖：目前檔 vs HEAD 並排 diff
 private:
 
     // Snippet 樣板 — 拆到 SnippetsController

@@ -35,6 +35,9 @@ set(LIB_SRCS
     FunctionListController.cpp
     FindController.cpp
     NeonIcons.cpp
+    DiffCalc.cpp
+    DiffViewer.cpp
+    GitBlame.cpp
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp

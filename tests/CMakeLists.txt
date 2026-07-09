@@ -1,7 +1,7 @@
 include(FetchContent)
 FetchContent_Declare(googletest URL https://github.com/google/googletest/archive/03597a01ee50ed33e9dfd640b249b4be3799d395.zip)
 FetchContent_MakeAvailable(googletest)
-add_executable(AlexCodeTests FilterEngineTest.cpp PerformanceTest.cpp LspProtocolTest.cpp GitGutterTest.cpp VtParserTest.cpp BoxSelectTest.cpp LocalCompletionTest.cpp TextToolsTest.cpp TerminalSelectionTest.cpp TsCategoryTest.cpp MdLinkTest.cpp MarkdownLinkIndexTest.cpp GraphLayoutTest.cpp MarkdownRenderTest.cpp AutoPairTest.cpp TsEditTest.cpp TsSymbolsTest.cpp FileTierTest.cpp StickyScrollTest.cpp CommandMatchTest.cpp ProjectSymbolIndexTest.cpp TextRefsTest.cpp ../src/FilterEngine.cpp ../src/ProjectSymbolIndex.cpp ../src/LspProtocol.cpp ../src/GitGutter.cpp ../src/VtParser.cpp ../src/TextTools.cpp ../src/MarkdownLinkIndex.cpp ../src/GraphLayout.cpp)
+add_executable(AlexCodeTests FilterEngineTest.cpp PerformanceTest.cpp LspProtocolTest.cpp GitGutterTest.cpp VtParserTest.cpp BoxSelectTest.cpp LocalCompletionTest.cpp TextToolsTest.cpp TerminalSelectionTest.cpp TsCategoryTest.cpp MdLinkTest.cpp MarkdownLinkIndexTest.cpp GraphLayoutTest.cpp MarkdownRenderTest.cpp AutoPairTest.cpp TsEditTest.cpp TsSymbolsTest.cpp FileTierTest.cpp StickyScrollTest.cpp CommandMatchTest.cpp ProjectSymbolIndexTest.cpp TextRefsTest.cpp DiffCalcTest.cpp GitBlameTest.cpp ../src/FilterEngine.cpp ../src/ProjectSymbolIndex.cpp ../src/LspProtocol.cpp ../src/GitGutter.cpp ../src/VtParser.cpp ../src/TextTools.cpp ../src/MarkdownLinkIndex.cpp ../src/GraphLayout.cpp ../src/DiffCalc.cpp ../src/GitBlame.cpp)
 target_link_libraries(AlexCodeTests PRIVATE gtest_main Qt6::Core)
 add_test(NAME AlexCodeUnitTests COMMAND AlexCodeTests)   # 讓 ctest 能跑（CI 用）
 

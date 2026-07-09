@@ -28,6 +28,24 @@ void GitGutterController::fetchHead(const QString& path) {
     p->start("git", {"show", "HEAD:./" + fi.fileName()});
 }
 
+void GitGutterController::fetchBlame(const QString& path) {
+    if (path.isEmpty() || m_untracked.contains(path) || m_blameInFlight.contains(path)) return;
+    m_blameInFlight.insert(path);
+    const QFileInfo fi(path);
+    auto* p = new QProcess(this);
+    p->setWorkingDirectory(fi.absolutePath());
+    connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, p, path](int code, QProcess::ExitStatus) {
+        m_blameInFlight.remove(path);
+        if (code == 0) {
+            m_blameCache.insert(path, GitBlame::parsePorcelain(p->readAllStandardOutput()));
+            emit blameReady(path);
+        }
+        p->deleteLater();
+    });
+    p->start("git", {"blame", "--line-porcelain", "--", fi.fileName()});
+}
+
 void GitGutterController::recompute(CodeEditor* editor) const {
     if (!editor || editor->property("bigFile").toBool()) return;
     const QString path = editor->property("filePath").toString();

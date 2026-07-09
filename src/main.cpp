@@ -45,7 +45,7 @@ int main(int argc, char *argv[]) {
     // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
     const QStringList args = a.arguments();
-    QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir, paletteShot, projsymShot, callgraphShot, menuShot;
+    QString shotPath, termCmd, settingsShot, aboutShot, vaultDir, graphDir, paletteShot, projsymShot, callgraphShot, menuShot, gitdiffShot;
     bool wantPreview = false;
     bool wantWhitespace = false;
     QString refsName;
@@ -59,6 +59,7 @@ int main(int argc, char *argv[]) {
         else if (args[i] == "--projsym-shot" && i + 1 < args.size()) projsymShot = args[++i];
         else if (args[i] == "--callgraph-shot" && i + 1 < args.size()) callgraphShot = args[++i];
         else if (args[i] == "--menu-shot" && i + 1 < args.size()) menuShot = args[++i];
+        else if (args[i] == "--gitdiff-shot" && i + 1 < args.size()) gitdiffShot = args[++i];
         else if ((args[i] == "--folder" || args[i] == "--vault") && i + 1 < args.size()) vaultDir = args[++i];
         else if (args[i] == "--graph" && i + 1 < args.size()) graphDir = args[++i];
         else if (args[i] == "--goto" && i + 1 < args.size()) gotoLineArg = args[++i].toInt();
@@ -96,6 +97,9 @@ int main(int argc, char *argv[]) {
         w.resize(1200, 800);
         w.openMenuForShot(4, menuShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
+    } else if (!gitdiffShot.isEmpty()) {      // 截「目前檔 vs Git HEAD」並排 diff
+        w.openGitDiffForShot(gitdiffShot);
+        QTimer::singleShot(1600, &a, [&a]() { a.quit(); });
     } else if (!settingsShot.isEmpty()) {     // 截設定中心對話框
         w.resize(1200, 800);
         w.openSettingsForShot(settingsShot);

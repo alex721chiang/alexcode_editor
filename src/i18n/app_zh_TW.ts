@@ -224,272 +224,272 @@
 <context>
     <name>MainWindow</name>
     <message>
-        <location filename="../MainWindow.cpp" line="344" />
+        <location filename="../MainWindow.cpp" line="348" />
         <source>重新命名符號</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="345" />
+        <location filename="../MainWindow.cpp" line="349" />
         <source>新名稱（套用至專案內所有引用）：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="414" />
+        <location filename="../MainWindow.cpp" line="418" />
         <source>New File</source>
         <translation>開新檔案</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="419" />
+        <location filename="../MainWindow.cpp" line="423" />
         <source>Open...</source>
         <translation>開啟…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="423" />
+        <location filename="../MainWindow.cpp" line="427" />
         <source>Save</source>
         <translation>儲存</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="427" />
+        <location filename="../MainWindow.cpp" line="431" />
         <source>Save As...</source>
         <translation>另存新檔…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="431" />
+        <location filename="../MainWindow.cpp" line="435" />
         <source>Save All</source>
         <translation>全部儲存</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="435" />
+        <location filename="../MainWindow.cpp" line="439" />
         <source>Close Tab</source>
         <translation>關閉分頁</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="441" />
+        <location filename="../MainWindow.cpp" line="445" />
         <source>Close All</source>
         <translation>全部關閉</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="446" />
+        <location filename="../MainWindow.cpp" line="450" />
         <source>Undo</source>
         <translation>復原</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="452" />
+        <location filename="../MainWindow.cpp" line="456" />
         <source>Redo</source>
         <translation>重做</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="458" />
+        <location filename="../MainWindow.cpp" line="462" />
         <source>Cut</source>
         <translation>剪下</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="464" />
+        <location filename="../MainWindow.cpp" line="468" />
         <source>Copy</source>
         <translation>複製</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="470" />
+        <location filename="../MainWindow.cpp" line="474" />
         <source>Paste</source>
         <translation>貼上</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="476" />
+        <location filename="../MainWindow.cpp" line="480" />
         <source>Select All</source>
         <translation>全選</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="482" />
+        <location filename="../MainWindow.cpp" line="486" />
         <source>Duplicate Line</source>
         <translation>複製當前行</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="488" />
+        <location filename="../MainWindow.cpp" line="492" />
         <source>Delete Line</source>
         <translation>刪除當前行</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="494" />
+        <location filename="../MainWindow.cpp" line="498" />
         <source>Move Line Up</source>
         <translation>上移行</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="500" />
+        <location filename="../MainWindow.cpp" line="504" />
         <source>Move Line Down</source>
         <translation>下移行</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="506" />
+        <location filename="../MainWindow.cpp" line="510" />
         <source>Toggle Comment</source>
         <translation>切換註解</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="512" />
+        <location filename="../MainWindow.cpp" line="516" />
         <source>UPPERCASE</source>
         <translation>轉大寫</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="518" />
+        <location filename="../MainWindow.cpp" line="522" />
         <source>lowercase</source>
         <translation>轉小寫</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="527" />
+        <location filename="../MainWindow.cpp" line="531" />
         <source>Find / Replace...</source>
         <translation>尋找 / 取代…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="531" />
+        <location filename="../MainWindow.cpp" line="535" />
         <source>Find Next</source>
         <translation>找下一個</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="535" />
+        <location filename="../MainWindow.cpp" line="539" />
         <source>Find Previous</source>
         <translation>找上一個</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="539" />
+        <location filename="../MainWindow.cpp" line="543" />
         <source>Go to Line...</source>
         <translation>跳至行…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="543" />
+        <location filename="../MainWindow.cpp" line="547" />
         <source>Find in Files...</source>
         <translation>在檔案中尋找…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="549" />
+        <location filename="../MainWindow.cpp" line="553" />
         <source>Open Folder...</source>
         <translation>開啟資料夾…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="553" />
+        <location filename="../MainWindow.cpp" line="557" />
         <source>Quick Open...</source>
         <translation>快速開檔…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="557" />
+        <location filename="../MainWindow.cpp" line="561" />
         <source>Go to Symbol...</source>
         <translation>跳至符號…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="562" />
+        <location filename="../MainWindow.cpp" line="566" />
         <source>Command Palette...</source>
         <translation>命令面板…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="567" />
+        <location filename="../MainWindow.cpp" line="571" />
         <source>Go to Symbol in Project...</source>
         <translation>跳至專案符號…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="573" />
+        <location filename="../MainWindow.cpp" line="577" />
         <source>Toggle Bookmark</source>
         <translation>切換書籤</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="579" />
+        <location filename="../MainWindow.cpp" line="583" />
         <source>Next Bookmark</source>
         <translation>下一個書籤</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="585" />
+        <location filename="../MainWindow.cpp" line="589" />
         <source>Previous Bookmark</source>
         <translation>上一個書籤</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="592" />
+        <location filename="../MainWindow.cpp" line="596" />
         <source>標記符合的行為書籤…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="595" />
+        <location filename="../MainWindow.cpp" line="599" />
         <source>複製書籤行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="601" />
+        <location filename="../MainWindow.cpp" line="605" />
         <source>剪下書籤行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="609" />
+        <location filename="../MainWindow.cpp" line="613" />
         <source>刪除書籤行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="614" />
+        <location filename="../MainWindow.cpp" line="618" />
         <source>刪除非書籤行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="619" />
+        <location filename="../MainWindow.cpp" line="623" />
         <source>反轉書籤</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="624" />
+        <location filename="../MainWindow.cpp" line="628" />
         <source>Navigate Back</source>
         <translation>上一個位置</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="628" />
+        <location filename="../MainWindow.cpp" line="632" />
         <source>Navigate Forward</source>
         <translation>下一個位置</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="632" />
+        <location filename="../MainWindow.cpp" line="636" />
         <source>Run Build Task</source>
         <translation>執行建置任務</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="637" />
+        <location filename="../MainWindow.cpp" line="641" />
         <source>Document Symbols...</source>
         <translation>文件符號…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="642" />
+        <location filename="../MainWindow.cpp" line="646" />
         <source>Preferences...</source>
         <translation>偏好設定…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="646" />
+        <location filename="../MainWindow.cpp" line="650" />
         <source>Font...</source>
         <translation>字型…</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="649" />
+        <location filename="../MainWindow.cpp" line="653" />
         <source>Word Wrap</source>
         <translation>自動換行</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="660" />
+        <location filename="../MainWindow.cpp" line="664" />
         <source>Zoom In</source>
         <translation>放大</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="666" />
+        <location filename="../MainWindow.cpp" line="670" />
         <source>Zoom Out</source>
         <translation>縮小</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="672" />
+        <location filename="../MainWindow.cpp" line="676" />
         <source>Tail Mode (follow file)</source>
         <translation>Tail 模式（跟隨檔案）</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="674" />
+        <location filename="../MainWindow.cpp" line="678" />
         <source>檔案被外部寫入時自動重新載入並捲到底（log 追蹤）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="676" />
+        <location filename="../MainWindow.cpp" line="680" />
         <source>Reset Zoom</source>
         <translation>重設縮放</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="687" />
+        <location filename="../MainWindow.cpp" line="691" />
         <source>File</source>
         <translation>檔案</translation>
     </message>
@@ -498,245 +498,245 @@
         <translation type="vanished">開啟最近</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="708" />
+        <location filename="../MainWindow.cpp" line="712" />
         <source>Edit</source>
         <translation>編輯</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="726" />
+        <location filename="../MainWindow.cpp" line="730" />
         <source>Search</source>
         <translation>搜尋</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="741" />
+        <location filename="../MainWindow.cpp" line="745" />
         <source>書籤批次</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="753" />
+        <location filename="../MainWindow.cpp" line="757" />
         <source>加選下一個相同字串</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="759" />
+        <location filename="../MainWindow.cpp" line="763" />
         <source>全選所有相同字串</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="767" />
+        <location filename="../MainWindow.cpp" line="771" />
         <source>Tools</source>
         <translation>工具</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="773" />
+        <location filename="../MainWindow.cpp" line="777" />
         <source>請先選取文字</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="785" />
+        <location filename="../MainWindow.cpp" line="789" />
         <source>行整理</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="786" />
+        <location filename="../MainWindow.cpp" line="790" />
         <source>排序（遞增）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="788" />
+        <location filename="../MainWindow.cpp" line="792" />
         <source>排序（遞減）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="790" />
+        <location filename="../MainWindow.cpp" line="794" />
         <source>移除重複行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="792" />
+        <location filename="../MainWindow.cpp" line="796" />
         <source>移除空白行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="794" />
+        <location filename="../MainWindow.cpp" line="798" />
         <source>反轉行順序</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="796" />
+        <location filename="../MainWindow.cpp" line="800" />
         <source>修剪行尾空白</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="799" />
+        <location filename="../MainWindow.cpp" line="803" />
         <source>JSON</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="800" />
-        <location filename="../MainWindow.cpp" line="856" />
+        <location filename="../MainWindow.cpp" line="804" />
+        <location filename="../MainWindow.cpp" line="860" />
         <source>格式化（Pretty）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="805" />
-        <location filename="../MainWindow.cpp" line="815" />
+        <location filename="../MainWindow.cpp" line="809" />
+        <location filename="../MainWindow.cpp" line="819" />
         <source>JSON 錯誤（位移 %1）：%2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="810" />
+        <location filename="../MainWindow.cpp" line="814" />
         <source>壓縮（Minify）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="821" />
+        <location filename="../MainWindow.cpp" line="825" />
         <source>編解碼（選取文字）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="822" />
+        <location filename="../MainWindow.cpp" line="826" />
         <source>Base64 Encode</source>
         <translation>Base64 編碼</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="824" />
+        <location filename="../MainWindow.cpp" line="828" />
         <source>Base64 Decode</source>
         <translation>Base64 解碼</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="826" />
+        <location filename="../MainWindow.cpp" line="830" />
         <source>URL Encode</source>
         <translation>URL 編碼</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="828" />
+        <location filename="../MainWindow.cpp" line="832" />
         <source>URL Decode</source>
         <translation>URL 解碼</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="830" />
+        <location filename="../MainWindow.cpp" line="834" />
         <source>HTML Entity Encode</source>
         <translation>HTML 實體編碼</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="832" />
+        <location filename="../MainWindow.cpp" line="836" />
         <source>HTML Entity Decode</source>
         <translation>HTML 實體解碼</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="835" />
+        <location filename="../MainWindow.cpp" line="839" />
         <source>Unicode Escape (\uXXXX)</source>
         <translation>Unicode 跳脫 (\uXXXX)</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="837" />
+        <location filename="../MainWindow.cpp" line="841" />
         <source>Unicode Unescape</source>
         <translation>Unicode 還原</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="840" />
+        <location filename="../MainWindow.cpp" line="844" />
         <source>時間戳 ↔ 時間（選取）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="855" />
+        <location filename="../MainWindow.cpp" line="859" />
         <source>XML</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="871" />
-        <location filename="../MainWindow.cpp" line="883" />
+        <location filename="../MainWindow.cpp" line="875" />
+        <location filename="../MainWindow.cpp" line="887" />
         <source>XML 錯誤（行 %1 欄 %2）：%3</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="877" />
+        <location filename="../MainWindow.cpp" line="881" />
         <source>驗證</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="885" />
+        <location filename="../MainWindow.cpp" line="889" />
         <source>XML 格式正確 ✓</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="889" />
+        <location filename="../MainWindow.cpp" line="893" />
         <source>雜湊（選取或全文）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="900" />
+        <location filename="../MainWindow.cpp" line="904" />
         <source>%1（UTF-8，%2 字元）：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="905" />
+        <location filename="../MainWindow.cpp" line="909" />
         <source>MD5</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="906" />
+        <location filename="../MainWindow.cpp" line="910" />
         <source>SHA-1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="907" />
+        <location filename="../MainWindow.cpp" line="911" />
         <source>SHA-256</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="910" />
+        <location filename="../MainWindow.cpp" line="914" />
         <source>數字底數轉換（選取）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="913" />
+        <location filename="../MainWindow.cpp" line="917" />
         <source>請先選取數字</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="918" />
+        <location filename="../MainWindow.cpp" line="922" />
         <source>無法解析數字：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="920" />
+        <location filename="../MainWindow.cpp" line="924" />
         <source>底數轉換</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="921" />
+        <location filename="../MainWindow.cpp" line="925" />
         <source>十進位 / 十六進位 / 二進位 / 八進位：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="929" />
+        <location filename="../MainWindow.cpp" line="933" />
         <source>全形半形轉換</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="930" />
+        <location filename="../MainWindow.cpp" line="934" />
         <source>全形 → 半形</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="932" />
+        <location filename="../MainWindow.cpp" line="936" />
         <source>半形 → 全形</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="936" />
+        <location filename="../MainWindow.cpp" line="940" />
         <source>摘要統計（選取或全文）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="949" />
+        <location filename="../MainWindow.cpp" line="953" />
         <source>摘要統計</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="950" />
+        <location filename="../MainWindow.cpp" line="954" />
         <source>行數：%1
 字元數：%2（不含空白 %3）
 字數：%4
@@ -744,134 +744,149 @@ UTF-8 位元組：%5</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="956" />
+        <location filename="../MainWindow.cpp" line="960" />
         <source>匯出 HTML…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="963" />
+        <location filename="../MainWindow.cpp" line="967" />
         <source>匯出 HTML</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="981" />
+        <location filename="../MainWindow.cpp" line="985" />
         <source>已匯出：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="987" />
+        <location filename="../MainWindow.cpp" line="991" />
         <source>比較目前分頁</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="988" />
+        <location filename="../MainWindow.cpp" line="992" />
         <source>與磁碟版本比較</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="992" />
+        <location filename="../MainWindow.cpp" line="996" />
+        <location filename="../MainWindow.cpp" line="1015" />
+        <location filename="../MainWindow.cpp" line="2802" />
         <source>此分頁尚未存檔</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="997" />
+        <location filename="../MainWindow.cpp" line="1001" />
+        <location filename="../MainWindow.cpp" line="1020" />
         <source>磁碟版本</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="997" />
-        <location filename="../MainWindow.cpp" line="1003" />
+        <location filename="../MainWindow.cpp" line="1001" />
+        <location filename="../MainWindow.cpp" line="1007" />
+        <location filename="../MainWindow.cpp" line="1020" />
+        <location filename="../MainWindow.cpp" line="2815" />
         <source>目前內容</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="999" />
+        <location filename="../MainWindow.cpp" line="1003" />
         <source>與剪貼簿比較</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1002" />
+        <location filename="../MainWindow.cpp" line="1006" />
         <source>剪貼簿</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1006" />
-        <source>巨集</source>
+        <location filename="../MainWindow.cpp" line="1010" />
+        <source>與 Git HEAD 並排比較</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1007" />
-        <source>開始/停止錄製</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../MainWindow.cpp" line="1012" />
-        <source>巨集錄製完成</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../MainWindow.cpp" line="1015" />
-        <source>● 巨集錄製中…（再按一次停止）</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../MainWindow.cpp" line="1019" />
-        <source>重播一次</source>
+        <location filename="../MainWindow.cpp" line="1011" />
+        <source>與磁碟版本並排比較</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../MainWindow.cpp" line="1023" />
-        <source>重播 N 次…</source>
+        <source>巨集</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1027" />
-        <source>重播巨集</source>
+        <location filename="../MainWindow.cpp" line="1024" />
+        <source>開始/停止錄製</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1028" />
-        <source>次數：</source>
+        <location filename="../MainWindow.cpp" line="1029" />
+        <source>巨集錄製完成</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../MainWindow.cpp" line="1032" />
-        <source>設定中心（LSP / Snippet / 快捷鍵）…</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../MainWindow.cpp" line="1034" />
-        <location filename="../MainWindow.cpp" line="2783" />
-        <source>外部工具</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../MainWindow.cpp" line="1035" />
-        <source>執行外部工具…</source>
+        <source>● 巨集錄製中…（再按一次停止）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../MainWindow.cpp" line="1036" />
-        <source>編輯 LSP 設定檔</source>
+        <source>重播一次</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1039" />
-        <source>編輯 Snippet 設定檔</source>
+        <location filename="../MainWindow.cpp" line="1040" />
+        <source>重播 N 次…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1042" />
-        <source>編輯快捷鍵設定檔</source>
+        <location filename="../MainWindow.cpp" line="1044" />
+        <source>重播巨集</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1046" />
-        <source>編輯工具設定檔</source>
+        <location filename="../MainWindow.cpp" line="1045" />
+        <source>次數：</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1049" />
+        <source>設定中心（LSP / Snippet / 快捷鍵）…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../MainWindow.cpp" line="1051" />
+        <location filename="../MainWindow.cpp" line="2857" />
+        <source>外部工具</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1052" />
+        <source>執行外部工具…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1053" />
+        <source>編輯 LSP 設定檔</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1056" />
+        <source>編輯 Snippet 設定檔</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1059" />
+        <source>編輯快捷鍵設定檔</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1063" />
+        <source>編輯工具設定檔</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="1068" />
         <source>[
   {"name": "用記事本開啟", "command": "notepad %FILE%"},
   {"name": "Python 執行", "command": "python %FILE%"}
@@ -880,209 +895,209 @@ UTF-8 位元組：%5</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1056" />
+        <location filename="../MainWindow.cpp" line="1073" />
         <source>View</source>
         <translation>檢視</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1061" />
+        <location filename="../MainWindow.cpp" line="1078" />
         <source>分割視窗（同文件雙視圖）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1069" />
+        <location filename="../MainWindow.cpp" line="1086" />
         <source>Markdown 預覽</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1085" />
+        <location filename="../MainWindow.cpp" line="1102" />
         <source>Backlinks（反向連結）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1097" />
+        <location filename="../MainWindow.cpp" line="1114" />
         <source>關係圖（Graph）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1114" />
+        <location filename="../MainWindow.cpp" line="1131" />
         <source>函式清單（Function List）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1125" />
+        <location filename="../MainWindow.cpp" line="1142" />
         <source>顯示空白字元</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1135" />
+        <location filename="../MainWindow.cpp" line="1152" />
         <source>Sticky Scroll（固定標頭）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1145" />
+        <location filename="../MainWindow.cpp" line="1162" />
         <source>Minimap 縮圖</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1155" />
+        <location filename="../MainWindow.cpp" line="1172" />
         <source>終端機</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1173" />
+        <location filename="../MainWindow.cpp" line="1190" />
         <source>Help</source>
         <translation>說明</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1174" />
-        <location filename="../MainWindow.cpp" line="2609" />
-        <location filename="../MainWindow.cpp" line="2613" />
+        <location filename="../MainWindow.cpp" line="1191" />
+        <location filename="../MainWindow.cpp" line="2639" />
+        <location filename="../MainWindow.cpp" line="2643" />
         <source>關於 AlexCode</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1954" />
+        <location filename="../MainWindow.cpp" line="1984" />
         <source>標記符合的行為書籤</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1956" />
+        <location filename="../MainWindow.cpp" line="1986" />
         <source>尋找目標：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1959" />
+        <location filename="../MainWindow.cpp" line="1989" />
         <source>大小寫相符</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1960" />
+        <location filename="../MainWindow.cpp" line="1990" />
         <source>正規表達式</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1975" />
+        <location filename="../MainWindow.cpp" line="2005" />
         <source>正規表達式錯誤</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1977" />
+        <location filename="../MainWindow.cpp" line="2007" />
         <source>已將 %1 行符合的內容加入書籤</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1306" />
+        <location filename="../MainWindow.cpp" line="1323" />
         <source>輸入指令並按 Enter（工作目錄＝專案資料夾）；雙擊錯誤訊息可跳至該行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1342" />
+        <location filename="../MainWindow.cpp" line="1359" />
         <source>  ⚡ FILTER </source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1348" />
+        <location filename="../MainWindow.cpp" line="1365" />
         <source>error &amp;&amp; !heartbeat || fatal （||=或、&amp;&amp;=且、!=排除）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1353" />
+        <location filename="../MainWindow.cpp" line="1370" />
         <source>模糊比對：子序列匹配，例如 mwin 可比對 MainWindow</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1378" />
+        <location filename="../MainWindow.cpp" line="1395" />
         <source>→ Tab</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1379" />
+        <location filename="../MainWindow.cpp" line="1396" />
         <source>把篩選結果抽取成新分頁（可再次篩選做漏斗分析）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1385" />
+        <location filename="../MainWindow.cpp" line="1402" />
         <source>篩選預設集（選擇即套用）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1387" />
+        <location filename="../MainWindow.cpp" line="1404" />
         <source>💾</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1389" />
+        <location filename="../MainWindow.cpp" line="1406" />
         <source>將目前篩選條件存為預設</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1390" />
+        <location filename="../MainWindow.cpp" line="1407" />
         <source>🗑</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1392" />
+        <location filename="../MainWindow.cpp" line="1409" />
         <source>刪除選取的預設</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1410" />
+        <location filename="../MainWindow.cpp" line="1427" />
         <source>儲存篩選預設</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1411" />
+        <location filename="../MainWindow.cpp" line="1428" />
         <source>預設名稱：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1437" />
+        <location filename="../MainWindow.cpp" line="1454" />
         <source>Filtered (%1)</source>
         <translation>已篩選 (%1)</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1463" />
+        <location filename="../MainWindow.cpp" line="1482" />
         <source>點擊切換編碼（重新載入或轉換）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1464" />
+        <location filename="../MainWindow.cpp" line="1483" />
         <source>點擊切換換行符（儲存時生效）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1507" />
+        <location filename="../MainWindow.cpp" line="1532" />
         <source>● </source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1600" />
+        <location filename="../MainWindow.cpp" line="1625" />
         <source>⚠ 快捷鍵衝突：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1660" />
+        <location filename="../MainWindow.cpp" line="1685" />
         <source>大檔（%1 MB）：已停用語法高亮與自動完成以確保流暢</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1663" />
+        <location filename="../MainWindow.cpp" line="1688" />
         <source>較大檔（%1 MB）：已停用自動完成 / LSP / 即時 Git 標示，保留語法高亮</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1847" />
+        <location filename="../MainWindow.cpp" line="1875" />
         <source>Snippet 設定已重新載入（%1 個）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1853" />
+        <location filename="../MainWindow.cpp" line="1881" />
         <source>快捷鍵設定已重新套用</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="1871" />
+        <location filename="../MainWindow.cpp" line="1901" />
         <source>"%1" 尚未儲存，要儲存變更嗎？</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1099,227 +1114,244 @@ UTF-8 位元組：%5</source>
         <translation type="vanished">全部尋找</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2029" />
+        <location filename="../MainWindow.cpp" line="2059" />
         <source>%1 hits</source>
         <translation>%1 筆命中</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2213" />
+        <location filename="../MainWindow.cpp" line="2243" />
         <source>此檔無可用符號（Go to Symbol 目前支援 tree-sitter 語言：C/C++、Python、JS、JSON）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2231" />
+        <location filename="../MainWindow.cpp" line="2261" />
         <source>Untitled</source>
         <translation>未命名</translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2269" />
+        <location filename="../MainWindow.cpp" line="2299" />
         <source>"%1" 已被外部程式修改，且你有未儲存的變更。
 要放棄變更並重新載入嗎？</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2418" />
+        <location filename="../MainWindow.cpp" line="2448" />
         <source>已還原上次工作階段（%1 個分頁）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2508" />
+        <location filename="../MainWindow.cpp" line="2538" />
         <source>以 UTF-8 重新載入</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2509" />
+        <location filename="../MainWindow.cpp" line="2539" />
         <source>以 Big5 重新載入</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2511" />
+        <location filename="../MainWindow.cpp" line="2541" />
         <source>轉換為 UTF-8（儲存時生效）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2512" />
+        <location filename="../MainWindow.cpp" line="2542" />
         <source>轉換為 Big5（儲存時生效）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2522" />
+        <location filename="../MainWindow.cpp" line="2552" />
         <source>LF（Unix）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2523" />
+        <location filename="../MainWindow.cpp" line="2553" />
         <source>CRLF（Windows）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2570" />
+        <location filename="../MainWindow.cpp" line="2600" />
         <source>已以 %1 重新載入</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2632" />
+        <location filename="../MainWindow.cpp" line="2662" />
         <source>設定已套用</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2644" />
+        <location filename="../MainWindow.cpp" line="2674" />
         <source>Tab 寬度（空格數）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2648" />
+        <location filename="../MainWindow.cpp" line="2678" />
         <source>儲存時修剪行尾空白</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2652" />
+        <location filename="../MainWindow.cpp" line="2682" />
         <source>啟動時還原上次工作階段</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2656" />
+        <location filename="../MainWindow.cpp" line="2686" />
         <source> 分鐘（0 = 停用）</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2658" />
+        <location filename="../MainWindow.cpp" line="2688" />
         <source>自動快照間隔</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2662" />
-        <location filename="../MainWindow.cpp" line="2668" />
+        <location filename="../MainWindow.cpp" line="2692" />
+        <location filename="../MainWindow.cpp" line="2698" />
         <source> MB</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2664" />
+        <location filename="../MainWindow.cpp" line="2694" />
         <source>超過此大小停用自動完成/LSP</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2670" />
+        <location filename="../MainWindow.cpp" line="2700" />
         <source>超過此大小停用語法高亮</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2675" />
+        <location filename="../MainWindow.cpp" line="2705" />
         <source>主題</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2679" />
+        <location filename="../MainWindow.cpp" line="2709" />
         <source>系統預設</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2684" />
-        <location filename="../MainWindow.cpp" line="2706" />
+        <location filename="../MainWindow.cpp" line="2714" />
+        <location filename="../MainWindow.cpp" line="2736" />
         <source>介面語言</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2707" />
+        <location filename="../MainWindow.cpp" line="2737" />
         <source>介面語言將於下次啟動 AlexCode 時生效。</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2737" />
+        <location filename="../MainWindow.cpp" line="2767" />
+        <location filename="../MainWindow.cpp" line="2831" />
         <source>Diff 上限 4000 行</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2748" />
+        <location filename="../MainWindow.cpp" line="2778" />
         <source>--- %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2749" />
+        <location filename="../MainWindow.cpp" line="2779" />
         <source>+++ %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2759" />
+        <location filename="../MainWindow.cpp" line="2789" />
         <source>Diff (%1 處差異)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2764" />
+        <location filename="../MainWindow.cpp" line="2794" />
+        <location filename="../MainWindow.cpp" line="2838" />
         <source>比較完成：%1 處差異</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2774" />
+        <location filename="../MainWindow.cpp" line="2809" />
+        <source>取不到 Git HEAD 版本（不在版控中？）</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="2815" />
+        <source>Git HEAD</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="2836" />
+        <source>Diff ⇄ %1 處</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../MainWindow.cpp" line="2848" />
         <source>尚未設定外部工具，請先用「編輯工具設定檔」</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2784" />
+        <location filename="../MainWindow.cpp" line="2858" />
         <source>選擇工具：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2801" />
+        <location filename="../MainWindow.cpp" line="2875" />
         <source>已執行：%1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2803" />
+        <location filename="../MainWindow.cpp" line="2877" />
         <source>啟動失敗：%1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2811" />
+        <location filename="../MainWindow.cpp" line="2885" />
         <source>$ %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2813" />
+        <location filename="../MainWindow.cpp" line="2887" />
         <source>[前一個任務仍在執行]</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2826" />
+        <location filename="../MainWindow.cpp" line="2900" />
         <source>[完成，exit code %1]
 </source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2831" />
+        <location filename="../MainWindow.cpp" line="2905" />
         <source>[無法啟動指令：找不到直譯器或權限不足]
 </source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2854" />
+        <location filename="../MainWindow.cpp" line="2928" />
         <source>已建立任務範本，編輯後再按 F5</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2869" />
+        <location filename="../MainWindow.cpp" line="2943" />
         <source>選擇任務：</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2899" />
+        <location filename="../MainWindow.cpp" line="2973" />
         <source>⎇ %1 ●%2</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2900" />
+        <location filename="../MainWindow.cpp" line="2974" />
         <source>⎇ %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2955" />
+        <location filename="../MainWindow.cpp" line="3029" />
         <source>沒有偵測到符號</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../MainWindow.cpp" line="2960" />
+        <location filename="../MainWindow.cpp" line="3034" />
         <source>跳至符號：</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1391,8 +1423,13 @@ UTF-8 位元組：%5</source>
 <context>
     <name>QObject</name>
     <message>
-        <location filename="../MainWindow.cpp" line="2599" />
+        <location filename="../MainWindow.cpp" line="2629" />
         <source>&lt;h3&gt;AlexCode v%1 — Neon Edition&lt;/h3&gt;&lt;p&gt;輕量級 Qt 程式碼編輯器：LSP、Git、互動式終端機、多語言語法高亮、log 分析、多套主題、繁中/英文介面。&lt;/p&gt;&lt;p&gt;以 Qt %2 建置。&lt;/p&gt;&lt;p&gt;&lt;a href="https://github.com/alex721chiang/alexcode_editor"&gt;GitHub 專案&lt;/a&gt;&lt;/p&gt;</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../GitBlame.cpp" line="41" />
+        <source>⎇ 未提交變更</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
