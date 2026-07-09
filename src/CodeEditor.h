@@ -104,10 +104,12 @@ public:
     // ---- Snippet 樣板（trigger + Tab 展開）----
     void setSnippets(const QHash<QString, QString>& snippets) { m_snippets = snippets; }
 
-    // ---- 多游標（精簡版：Ctrl+D 加入下一個相同字串，輸入同步套用）----
-    void addNextOccurrence();                            // Ctrl+D
+    // ---- 多游標（Sublime 式核心）----
+    void addNextOccurrence();                            // Ctrl+Shift+D：加選下一個相同字串
+    void selectAllOccurrences();                         // Alt+F3：全選所有相同字串
     void clearExtraCursors();                            // Esc / 滑鼠點擊
     bool hasExtraCursors() const { return !m_extraCursors.isEmpty(); }
+    int  cursorCount() const { return 1 + m_extraCursors.size(); }
 
     // ---- 程式碼摺疊（大括號 + 縮排混合判斷）----
     void toggleFoldAt(int line);                 // 0-based；摺疊/展開該行起始的區域
@@ -219,6 +221,8 @@ private:
     // 多游標（持久游標，編輯後位置自動跟隨）
     QList<QTextCursor> m_extraCursors;
     bool handleMultiCursorKey(QKeyEvent* e);             // true = 已處理
+    bool multiCursorPaste();                             // Ctrl+V：行數=游標數時逐行分配
+    void mergeExtraCursors();                            // 移除位置重複/與主游標重合者
     // 矩形（欄位）選取
     bool m_boxSelecting = false;
     int m_boxAnchorLine = 0, m_boxAnchorCol = 0;

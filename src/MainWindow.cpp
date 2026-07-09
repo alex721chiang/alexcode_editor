@@ -748,6 +748,21 @@ void MainWindow::setupUI() {
     bookmarkBatchMenu->addSeparator();
     bookmarkBatchMenu->addAction(invertBookmarksAction);
 
+    // 多游標（快捷鍵由編輯器內部處理，這裡的選單項為可發現性入口）
+    searchMenu->addSeparator();
+    auto* addOccurrenceAction = new QAction(tr("加選下一個相同字串"), this);
+    addOccurrenceAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
+    connect(addOccurrenceAction, &QAction::triggered, this, [this]() {
+        if (auto* e = activeEditor()) e->addNextOccurrence();
+    });
+    searchMenu->addAction(addOccurrenceAction);
+    auto* selectAllOccAction = new QAction(tr("全選所有相同字串"), this);
+    selectAllOccAction->setShortcut(QKeySequence(Qt::ALT | Qt::Key_F3));
+    connect(selectAllOccAction, &QAction::triggered, this, [this]() {
+        if (auto* e = activeEditor()) e->selectAllOccurrences();
+    });
+    searchMenu->addAction(selectAllOccAction);
+
     // ---------- Tools 工具箱 ----------
     QMenu* toolsMenu = menuBar->addMenu(tr("Tools"));
     auto editorOp = [this](std::function<QString(const QString&)> fn, bool selectionOnly = false) {

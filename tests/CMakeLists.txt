@@ -6,8 +6,10 @@ target_link_libraries(AlexCodeTests PRIVATE gtest_main Qt6::Core)
 add_test(NAME AlexCodeUnitTests COMMAND AlexCodeTests)   # 讓 ctest 能跑（CI 用）
 
 # Widget 測試：連 alexcode_lib（含 CodeEditor 全依賴），自帶 QApplication(offscreen) main
+# Qt6::Test 提供 QTest::keyClick 等鍵盤模擬（多游標測試用）
+find_package(Qt6 COMPONENTS Test REQUIRED)
 add_executable(AlexCodeWidgetTests WidgetTestMain.cpp EditorOpsTest.cpp)
-target_link_libraries(AlexCodeWidgetTests PRIVATE gtest alexcode_lib)
+target_link_libraries(AlexCodeWidgetTests PRIVATE gtest alexcode_lib Qt6::Test)
 add_test(NAME AlexCodeWidgetTests COMMAND AlexCodeWidgetTests)
 # 無頭 LSP 整合煙霧測試（需系統已安裝 clangd；手動執行 ./tests/lsp_smoke）
 add_executable(lsp_smoke lsp_smoke.cpp ../src/LspProtocol.cpp ../src/LspClient.cpp)

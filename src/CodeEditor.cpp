@@ -14,6 +14,8 @@
 #include <QTimer>
 #include <QToolTip>
 #include <QHelpEvent>
+#include <QApplication>
+#include <QClipboard>
 #include <algorithm>
 #include <QFileInfo>
 #include <QTextOption>
@@ -583,11 +585,20 @@ void CodeEditor::keyPressEvent(QKeyEvent *e) {
         }
     }
 
-    // 多游標：Ctrl+Shift+D 加入下一個相同字串；有額外游標時輸入同步套用
+    // 多游標：Ctrl+Shift+D 加入下一個相同字串、Alt+F3 全選所有相同字串；
+    // 有額外游標時輸入/導覽/貼上同步套用
     if (e->key() == Qt::Key_D && e->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier)) {
         addNextOccurrence();
         e->accept();
         return;
+    }
+    if (e->key() == Qt::Key_F3 && e->modifiers() == Qt::AltModifier) {
+        selectAllOccurrences();
+        e->accept();
+        return;
+    }
+    if (!m_extraCursors.isEmpty() && e->matches(QKeySequence::Paste)) {
+        if (multiCursorPaste()) { e->accept(); return; }
     }
     if (handleMultiCursorKey(e)) {
         e->accept();
@@ -1033,11 +1044,71 @@ void CodeEditor::addNextOccurrence() {
     viewport()->update();
 }
 
+// Alt+F3：全選文件中所有相同字串（無選取時先取游標下字詞），第一個為主游標
+void CodeEditor::selectAllOccurrences() {
+    QTextCursor c = textCursor();
+    if (!c.hasSelection()) {
+        c.select(QTextCursor::WordUnderCursor);
+        if (!c.hasSelection()) return;
+    }
+    const QString target = c.selectedText();
+    if (target.isEmpty() || target.contains(QChar(0x2029))) return;   // 跨行選取不支援
+    m_extraCursors.clear();
+    QTextDocument* doc = document();
+    QTextCursor found = doc->find(target, 0);
+    bool first = true;
+    while (!found.isNull()) {
+        if (first) { setTextCursor(found); first = false; }
+        else m_extraCursors.append(found);
+        found = doc->find(target, found.selectionEnd());
+    }
+    updateExtraHighlights();
+    viewport()->update();
+}
+
 void CodeEditor::clearExtraCursors() {
     if (m_extraCursors.isEmpty()) return;
     m_extraCursors.clear();
     updateExtraHighlights();
     viewport()->update();
+}
+
+// 移除位置重複的額外游標（含與主游標重合者）；移動/編輯後游標可能疊在一起
+void CodeEditor::mergeExtraCursors() {
+    QSet<int> seen{ textCursor().position() };
+    for (int i = m_extraCursors.size() - 1; i >= 0; --i) {
+        const int pos = m_extraCursors[i].position();
+        if (seen.contains(pos)) m_extraCursors.removeAt(i);
+        else seen.insert(pos);
+    }
+}
+
+// Ctrl+V（多游標時）：剪貼簿行數與游標數相同→依文件順序一行貼一個游標
+//（Sublime/VSCode 的欄位貼上行為）；否則每個游標貼整段
+bool CodeEditor::multiCursorPaste() {
+    const QString clip = QApplication::clipboard()->text();
+    if (clip.isEmpty()) return true;                     // 空剪貼簿：吃掉事件即可
+    QStringList lines = clip.split(QChar('\n'));
+    if (!lines.isEmpty() && lines.constLast().isEmpty()) lines.removeLast();   // 尾端換行
+
+    QTextCursor main = textCursor();
+    QVector<QTextCursor*> ordered;
+    ordered.reserve(1 + m_extraCursors.size());
+    ordered.append(&main);
+    for (QTextCursor& c : m_extraCursors) ordered.append(&c);
+    std::sort(ordered.begin(), ordered.end(),
+              [](QTextCursor* a, QTextCursor* b) { return a->position() < b->position(); });
+
+    const bool distribute = (lines.size() == ordered.size() && lines.size() > 1);
+    main.beginEditBlock();
+    for (int i = 0; i < ordered.size(); ++i)
+        ordered[i]->insertText(distribute ? lines[i] : clip);
+    main.endEditBlock();
+    setTextCursor(main);
+    mergeExtraCursors();
+    updateExtraHighlights();
+    viewport()->update();
+    return true;
 }
 
 bool CodeEditor::handleMultiCursorKey(QKeyEvent* e) {
@@ -1046,11 +1117,38 @@ bool CodeEditor::handleMultiCursorKey(QKeyEvent* e) {
         clearExtraCursors();
         return true;
     }
+    // 導覽鍵：所有游標一起移動（Shift 保留選取、Ctrl 以字詞為單位），移動後合併重疊游標
+    {
+        QTextCursor::MoveOperation op = QTextCursor::NoMove;
+        const bool word = e->modifiers() & Qt::ControlModifier;
+        switch (e->key()) {
+        case Qt::Key_Left:  op = word ? QTextCursor::PreviousWord : QTextCursor::Left; break;
+        case Qt::Key_Right: op = word ? QTextCursor::NextWord     : QTextCursor::Right; break;
+        case Qt::Key_Up:    if (!word) op = QTextCursor::Up;   break;
+        case Qt::Key_Down:  if (!word) op = QTextCursor::Down; break;
+        case Qt::Key_Home:  op = QTextCursor::StartOfLine; break;
+        case Qt::Key_End:   op = QTextCursor::EndOfLine;   break;
+        default: break;
+        }
+        if (op != QTextCursor::NoMove) {
+            const auto mode = (e->modifiers() & Qt::ShiftModifier) ? QTextCursor::KeepAnchor
+                                                                   : QTextCursor::MoveAnchor;
+            QTextCursor main = textCursor();
+            main.movePosition(op, mode);
+            setTextCursor(main);
+            for (QTextCursor& c : m_extraCursors) c.movePosition(op, mode);
+            mergeExtraCursors();
+            updateExtraHighlights();
+            viewport()->update();
+            return true;
+        }
+    }
+
     const bool isText = !e->text().isEmpty() && e->text().at(0).isPrint();
     const bool isNewline = e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter;
     const bool isBackspace = e->key() == Qt::Key_Backspace;
     const bool isDelete = e->key() == Qt::Key_Delete;
-    if (!isText && !isNewline && !isBackspace && !isDelete) return false;   // 導覽鍵等交回預設
+    if (!isText && !isNewline && !isBackspace && !isDelete) return false;   // 其他鍵交回預設
 
     QTextCursor main = textCursor();
     main.beginEditBlock();
@@ -1065,6 +1163,7 @@ bool CodeEditor::handleMultiCursorKey(QKeyEvent* e) {
         applyOn(c);
     main.endEditBlock();
     setTextCursor(main);
+    mergeExtraCursors();          // 相鄰游標刪除後可能重合
     updateExtraHighlights();
     viewport()->update();
     return true;
@@ -1156,6 +1255,27 @@ void CodeEditor::mousePressEvent(QMouseEvent* event) {
             event->accept();
             return;
         }
+    }
+    // Ctrl + 左鍵：新增/移除額外游標（Sublime 風；[[wikilink]] 的 Ctrl+點擊導覽在上方優先處理）
+    if (!m_largeFile && event->button() == Qt::LeftButton
+        && event->modifiers() == Qt::ControlModifier) {
+        const QTextCursor clicked = cursorForPosition(event->pos());
+        for (int i = 0; i < m_extraCursors.size(); ++i) {
+            if (m_extraCursors[i].position() == clicked.position()) {   // 點在既有游標上 → 移除
+                m_extraCursors.removeAt(i);
+                updateExtraHighlights();
+                viewport()->update();
+                event->accept();
+                return;
+            }
+        }
+        if (clicked.position() != textCursor().position()) {
+            m_extraCursors.append(clicked);
+            updateExtraHighlights();
+            viewport()->update();
+        }
+        event->accept();
+        return;
     }
     // Alt + 左鍵：開始矩形（欄位）選取
     if (!m_largeFile && (event->modifiers() & Qt::AltModifier)

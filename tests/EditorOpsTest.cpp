@@ -3,6 +3,9 @@
 // 這些操作的游標數學有多個易錯邊界（最後一行、唯一一行、連續行），
 // 開發時就抓過「刪最後一行位置溢位」與「迭代器混用 segfault」兩個 bug，務必保留覆蓋。
 #include <gtest/gtest.h>
+#include <QTest>
+#include <QClipboard>
+#include <QApplication>
 #include "../src/CodeEditor.h"
 
 namespace {
@@ -124,6 +127,106 @@ TEST(EditorBookmarkOps, InvertBookmarks) {
     EXPECT_EQ(e->bookmarkedLines(), (QList<int>{0, 2}));
     e->invertBookmarks();
     EXPECT_EQ(e->bookmarkedLines(), (QList<int>{1}));
+}
+
+// ---- 多游標（Sublime 式核心）----
+
+TEST(MultiCursor, SelectAllOccurrences) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo bar foo baz foo"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);   // 選取第一個 foo
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    EXPECT_EQ(e->cursorCount(), 3);
+}
+
+TEST(MultiCursor, TypingReplacesAllSelections) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo bar foo baz foo"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    QTest::keyClicks(e.get(), "X");
+    EXPECT_EQ(e->toPlainText(), QString("X bar X baz X"));
+}
+
+TEST(MultiCursor, TypingIsSingleUndoStep) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo foo"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    QTest::keyClicks(e.get(), "Y");
+    EXPECT_EQ(e->toPlainText(), QString("Y Y"));
+    e->undo();
+    EXPECT_EQ(e->toPlainText(), QString("foo foo"));
+}
+
+TEST(MultiCursor, EscapeClearsExtraCursors) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo foo"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    ASSERT_EQ(e->cursorCount(), 2);
+    QTest::keyClick(e.get(), Qt::Key_Escape);
+    EXPECT_EQ(e->cursorCount(), 1);
+}
+
+TEST(MultiCursor, EndKeyMovesAllCursors) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo bar\nfoo baz"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    ASSERT_EQ(e->cursorCount(), 2);
+    QTest::keyClick(e.get(), Qt::Key_End);
+    QTest::keyClicks(e.get(), "!");
+    EXPECT_EQ(e->toPlainText(), QString("foo bar!\nfoo baz!"));
+}
+
+TEST(MultiCursor, PasteDistributesLinesWhenCountsMatch) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo A foo B foo"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    ASSERT_EQ(e->cursorCount(), 3);
+    QApplication::clipboard()->setText("1\n2\n3");
+    QTest::keyClick(e.get(), Qt::Key_V, Qt::ControlModifier);
+    EXPECT_EQ(e->toPlainText(), QString("1 A 2 B 3"));
+}
+
+TEST(MultiCursor, PasteInsertsWholeTextWhenCountsDiffer) {
+    std::unique_ptr<CodeEditor> e(makeEditor("foo foo"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(3, QTextCursor::KeepAnchor);
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    ASSERT_EQ(e->cursorCount(), 2);
+    QApplication::clipboard()->setText("Z");
+    QTest::keyClick(e.get(), Qt::Key_V, Qt::ControlModifier);
+    EXPECT_EQ(e->toPlainText(), QString("Z Z"));
+}
+
+TEST(MultiCursor, MergeAfterMovementRemovesDuplicates) {
+    // 同一行的兩個游標按 End 後重合，應自動合併為一個
+    std::unique_ptr<CodeEditor> e(makeEditor("x x"));
+    QTextCursor c = e->textCursor();
+    c.setPosition(0);
+    c.setPosition(1, QTextCursor::KeepAnchor);   // 選第一個 x
+    e->setTextCursor(c);
+    e->selectAllOccurrences();
+    ASSERT_EQ(e->cursorCount(), 2);
+    QTest::keyClick(e.get(), Qt::Key_End);
+    EXPECT_EQ(e->cursorCount(), 1);
 }
 
 // QTextDocument::find() 的 QRegularExpression 多載只看 FindCaseSensitively 旗標，
