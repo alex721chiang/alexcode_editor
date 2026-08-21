@@ -29,6 +29,14 @@ inline const QHash<QString, Palette>& palettes() {
             "#15233a", "#1a2c47", "#101a2e", "#234a7d",
             "#3a2a55", "#ffd166", "#1a3a4a", "#ffd166",
             "#00e5ff", "#ff79c6", "#5c6f8a", "#c3f73a", "#ffd166", "#ff9e64", "#bd93f9" } },
+        // Neon HUD：Neon Grid 的未來科技/HUD 變體 — 更深的底色、更強的強調色光暈
+        // （stylesheet() 對此主題加大 accentGlow alpha 並追加發光邊界），語法色票與 Neon Grid 一致。
+        { QStringLiteral("Neon HUD"), {
+            "#070b12", "#0b111c", "#1b2c47", "#00e5ff", "#00b8d4", "#ff2d95",
+            "#e2ecff", "#9db4d8", "#7d93b8", "#c3d6f5", "#3d5a80",
+            "#14243c", "#182f4d", "#0e1a2e", "#245089",
+            "#3a2a55", "#ffd166", "#16394a", "#ffd166",
+            "#00e5ff", "#ff79c6", "#5c6f8a", "#c3f73a", "#ffd166", "#ff9e64", "#bd93f9" } },
         { QStringLiteral("Paper Light"), {
             "#fafafa", "#f0f0f0", "#d0d0d0", "#0066cc", "#0052a3", "#d81b60",
             "#1a1a1a", "#444444", "#555555", "#333333", "#999999",
@@ -46,7 +54,8 @@ inline const QHash<QString, Palette>& palettes() {
 }
 
 inline QStringList themeNames() {
-    return { QStringLiteral("Neon Grid"), QStringLiteral("Paper Light"), QStringLiteral("Matrix") };
+    return { QStringLiteral("Neon Grid"), QStringLiteral("Neon HUD"),
+             QStringLiteral("Paper Light"), QStringLiteral("Matrix") };
 }
 
 // 編輯器配色（程式內使用；setTheme 時更新，預設 Neon Grid）
@@ -379,14 +388,29 @@ QToolTip {
     border-radius: 4px;
 }
 )QSS");
+    // Neon HUD：追加更強的發光邊界（可行於 QSS 的未來科技感；純加法，不影響其他主題）。
+    // 追加需在 @token@ 取代之前，才能一併被下方 replace 代入實際色值。
+    const bool hud = currentThemeName == QStringLiteral("Neon HUD");
+    if (hud) {
+        qss += QStringLiteral(R"QSS(
+/* ---------- Neon HUD 追加：HUD 發光邊界 ---------- */
+QMenuBar { border-bottom: 1px solid @accent@; }
+QToolBar { border-bottom: 1px solid @accentGlow@; }
+QStatusBar { border-top: 1px solid @accent@; }
+QTabBar::tab:selected { border-bottom: 2px solid @accent@; }
+QDockWidget::title { border-left: 3px solid @accent2@; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: @accent@; }
+)QSS");
+    }
+
     // rgba 光暈色（QSS 邊框/底色用半透明強調色，做出「發光」層次）
     const auto rgba = [](const QString& hex, int alpha) {
         const QColor c(hex);
         return QStringLiteral("rgba(%1,%2,%3,%4)")
             .arg(c.red()).arg(c.green()).arg(c.blue()).arg(alpha);
     };
-    qss.replace("@accentGlow@", rgba(pal.accent, 110));   // 較亮：邊框/hover 底線
-    qss.replace("@accentFaint@", rgba(pal.accent, 26));   // 極淡：選取底色/漸層尾
+    qss.replace("@accentGlow@", rgba(pal.accent, hud ? 150 : 110));   // 較亮：邊框/hover 底線（HUD 更強）
+    qss.replace("@accentFaint@", rgba(pal.accent, hud ? 42 : 26));    // 極淡：選取底色/漸層尾（HUD 更強）
     qss.replace("@bg@", pal.bg);
     qss.replace("@panel@", pal.panel);
     qss.replace("@border@", pal.border);
