@@ -44,6 +44,8 @@
 #include <QApplication>
 #include <QDateTime>
 #include <functional>
+#include <memory>
+#include <QVector>
 #include <algorithm>
 #include <QTextDocumentFragment>
 #include <QXmlStreamReader>
@@ -123,7 +125,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     AppSettings settings;
     if (settings.value("session/restore", true).toBool())
-        restoreSession();
+        // 先讓空的主視窗即時繪出，再於事件迴圈啟動後串流還原分頁；
+        // 避免 N 個分頁的 tree-sitter 解析 / clangd 啟動 / git 子行程全塞在首次繪製前。
+        QTimer::singleShot(0, this, &MainWindow::restoreSession);
 
     applyKeymap();                          // 6.2：套用使用者自訂快捷鍵（首次輸出模板）
 
@@ -415,6 +419,9 @@ void MainWindow::setupUI() {
     connect(tabWidget, &QTabWidget::currentChanged, this, [this](int) {
         if (resultsList) resultsList->clear();
         if (filterCountLabel) filterCountLabel->setText("");
+        // 分頁切到時才啟用其 LSP / Git gutter（延遲載入）；串流還原期間不啟用，
+        // 避免每個還原分頁在建立時因短暫成為當前分頁而被連帶啟用。
+        if (!restoringSession) ensureEditorActivated(activeEditor());
         updateStatusBar();
         updateBreadcrumb();
         if (functionListController->dock()->isVisible())
@@ -1748,17 +1755,30 @@ void MainWindow::openFileByPath(const QString& fileName) {
     updateTabTitle(newEditor);
 
     if (!highlightOff) applyHighlighterForPath(newEditor, fileName);
-    if (!assistOff && !lspController->lsp()->languageIdForFile(fileName).isEmpty()) {
-        newEditor->setLspEnabled(true);
-        lspController->lsp()->documentOpened(fileName, text);
-    }
-    if (!assistOff) {
-        gitGutterController->fetchHead(fileName);    // Git gutter
-        gitGutterController->fetchBlame(fileName);   // 狀態列行內 blame
-    }
+    // LSP didOpen 與 Git gutter 延到分頁實際成為作用中才做（見 ensureEditorActivated）。
+    // 前景開檔時該分頁已是當前分頁，立即啟用；串流還原期間則跳過，等切到才啟用。
+    if (!restoringSession && newEditor == tabWidget->currentWidget())
+        ensureEditorActivated(newEditor);
     recentFilesController->addFile(fileName);
     if (fileWatcher) fileWatcher->addPath(fileName);
     statusBar()->showMessage("Opened " + fileName, 3000);
+}
+
+// 分頁首次成為作用中時才啟用重量級服務：LSP didOpen（含首個 clangd 啟動）+ Git gutter
+// （每檔 2 個 git 子行程）。以 "activated" 屬性守衛，確保每分頁只做一次。
+void MainWindow::ensureEditorActivated(CodeEditor* editor) {
+    if (!editor) return;
+    if (editor->property("activated").toBool()) return;
+    const QString path = editor->property("filePath").toString();
+    if (path.isEmpty()) return;                      // Untitled / 僅備份的分頁：無事可做，且不標記已啟用
+    editor->setProperty("activated", true);
+    if (!editor->assistEnabled()) return;            // 大檔降級：維持停用 LSP / Git（與開檔時一致）
+    if (!lspController->lsp()->languageIdForFile(path).isEmpty()) {
+        editor->setLspEnabled(true);
+        lspController->lsp()->documentOpened(path, editor->toPlainText());
+    }
+    gitGutterController->fetchHead(path);             // Git gutter 行狀態
+    gitGutterController->fetchBlame(path);            // 狀態列行內 blame
 }
 
 void MainWindow::saveFileAs() {
@@ -2550,8 +2570,8 @@ void MainWindow::restoreSession() {
     const QString folder = root["projectFolder"].toString();
     if (!folder.isEmpty() && QFileInfo(folder).isDir()) setProjectFolder(folder);
 
-    for (const QJsonValue& v : tabs) {
-        const QJsonObject t = v.toObject();
+    // 逐分頁還原（單一分頁的完整狀態）；抽成 helper 讓串流與同步兩種路徑共用。
+    auto restoreOneTab = [this](const QJsonObject& t) {
         const QString filePath = t["filePath"].toString();
         const QString backup   = t["backup"].toString();
         CodeEditor* editor = nullptr;
@@ -2563,7 +2583,7 @@ void MainWindow::restoreSession() {
             QString title = t["baseTitle"].toString();
             editor = createEditorTab(title.isEmpty() ? "Untitled" : title);
         }
-        if (!editor) continue;
+        if (!editor) return;
 
         // 還原未儲存內容
         if (!backup.isEmpty() && QFileInfo::exists(backup)) {
@@ -2586,15 +2606,37 @@ void MainWindow::restoreSession() {
         QList<int> folds;
         for (const QJsonValue& fv : t["folds"].toArray()) folds << fv.toInt();
         if (!folds.isEmpty()) editor->applyFolds(folds);
-    }
-    const int idx = root["currentIndex"].toInt();
-    if (idx >= 0 && idx < tabWidget->count()) tabWidget->setCurrentIndex(idx);
-    // 還原終端機開啟狀態
-    if (root["terminalOpen"].toBool() && termDock) {
-        termDock->show();
-        terminal->startShell(projectFolder);
-    }
-    statusBar()->showMessage(tr("已還原上次工作階段（%1 個分頁）").arg(tabs.size()), 4000);
+    };
+
+    // 串流還原：分頁依原順序逐一於事件迴圈的空檔開啟，避免所有檔案的
+    // tree-sitter 解析 / clangd 啟動 / git 子行程一次塞爆首屏而卡住 UI。
+    auto specs = std::make_shared<QVector<QJsonObject>>();
+    for (const QJsonValue& v : tabs) specs->push_back(v.toObject());
+    const int curIdx = root["currentIndex"].toInt();
+    const bool termOpen = root["terminalOpen"].toBool();
+    const int tabCount = tabs.size();
+
+    restoringSession = true;   // 串流期間抑制逐分頁的即時 LSP / Git 啟用
+    auto step = std::make_shared<std::function<void(int)>>();
+    *step = [this, specs, curIdx, termOpen, tabCount, restoreOneTab, step](int i) {
+        if (i >= specs->size()) {
+            // 全部還原完成：解除抑制、定位作用中分頁（並確保其被啟用）、還原終端機、提示。
+            restoringSession = false;
+            if (curIdx >= 0 && curIdx < tabWidget->count())
+                tabWidget->setCurrentIndex(curIdx);
+            ensureEditorActivated(activeEditor());   // index 未變動時 currentChanged 不發，這裡補上
+            if (termOpen && termDock) {
+                termDock->show();
+                terminal->startShell(projectFolder);
+            }
+            statusBar()->showMessage(
+                tr("已還原上次工作階段（%1 個分頁）").arg(tabCount), 4000);
+            return;
+        }
+        restoreOneTab((*specs)[i]);
+        QTimer::singleShot(0, this, [step, i]() { (*step)(i + 1); });
+    };
+    (*step)(0);
 }
 
 // ----------------------------------------------------------------

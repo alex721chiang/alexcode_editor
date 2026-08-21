@@ -261,6 +261,10 @@ private:
     void setProjectFolder(const QString& folder);
     void saveSession();
     void restoreSession();
+    bool restoringSession = false;                    // 串流還原期間為 true：抑制逐分頁的即時啟用
+    // 分頁首次成為作用中時才做 LSP didOpen + Git gutter 抓取（每分頁僅一次，以 "activated" 屬性守衛）。
+    // 開檔當下不做，避免還原多分頁時 N 份 didOpen 與 2N 個 git 子行程一次湧入拖慢啟動。
+    void ensureEditorActivated(CodeEditor* editor);
     QString sessionDir() const;
 
     QFont defaultEditorFont;
