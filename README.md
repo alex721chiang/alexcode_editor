@@ -159,6 +159,11 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 
 翻譯來源為 `src/i18n/app_en.ts`、`app_zh_TW.ts`，以 `lupdate` 抽取、`lrelease` 編譯為 `.qm` 後經 `resources.qrc` 內嵌。
 
+### 快速啟動
+- **視窗即時顯示**：主視窗先繪出，上次工作階段的分頁再於背景**串流還原**（依原順序逐一載入），不再等所有檔案解析完才出現畫面。
+- **延遲啟用重量級服務**：LSP（`clangd` 等）的 `didOpen` 與 Git gutter／blame 改為「分頁實際切到時才啟用」，前景開檔立即生效、背景還原的分頁則於首次切換時載入 — 避免多分頁還原時大量語言伺服器同步與 Git 子行程一次湧入拖慢開啟（Windows 尤其明顯）。
+- 大檔仍沿用分級降級（`editor/highlightMaxMB`、`editor/assistMaxMB`）自動關閉高亮／LSP／即時 Git。
+
 ## 建置
 
 需求：Qt 6（含 `Qt5Compat` 模組）、CMake ≥ 3.16、C++17 編譯器、Ninja（建議）。
