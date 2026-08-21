@@ -42,6 +42,7 @@ set(LIB_SRCS
     VtParser.cpp
     PtySession.cpp
     TerminalWidget.cpp
+    HudOverlay.cpp
     TimelineBar.h
 )
 

@@ -88,6 +88,7 @@
 #endif
 #include "TimelineBar.h"
 #include "TerminalWidget.h"
+#include "HudOverlay.h"
 #include "TextTools.h"
 #include "SettingsDialog.h"
 #include "Theme.h"
@@ -436,13 +437,19 @@ void MainWindow::setupUI() {
     connect(breadcrumbLabel, &QLabel::linkActivated, this, [this](const QString& href) {
         if (CodeEditor* e = activeEditor()) e->gotoLine(href.toInt() + 1);   // href = 0-based line
     });
-    QWidget* centralWrap = new QWidget(this);
+    centralWrap = new QWidget(this);
     auto* wrapLay = new QVBoxLayout(centralWrap);
     wrapLay->setContentsMargins(0, 0, 0, 0);
     wrapLay->setSpacing(0);
     wrapLay->addWidget(breadcrumbLabel);
     wrapLay->addWidget(tabWidget);
     setCentralWidget(centralWrap);
+
+    // Neon HUD 四角角標覆蓋層：置於中央容器之上、滑鼠穿透；隨容器大小變化（eventFilter）。
+    hudOverlay = new HudOverlay(centralWrap);
+    hudOverlay->setGeometry(centralWrap->rect());
+    hudOverlay->raise();
+    centralWrap->installEventFilter(this);
 
     // ---------- File actions ----------
     newAction = new QAction(tr("New File"), this);
@@ -2703,6 +2710,11 @@ void MainWindow::navigateForward() {
 // 狀態列點擊：編碼 / 換行符選單
 // ----------------------------------------------------------------
 bool MainWindow::eventFilter(QObject* obj, QEvent* event) {
+    // HUD 覆蓋層跟隨中央容器大小；不消費事件。
+    if (obj == centralWrap && event->type() == QEvent::Resize && hudOverlay) {
+        hudOverlay->setGeometry(centralWrap->rect());
+        hudOverlay->raise();
+    }
     if (outputView && obj == outputView->viewport()
         && event->type() == QEvent::MouseButtonDblClick) {
         const QString line = outputView->textCursor().block().text();
@@ -2933,6 +2945,7 @@ void MainWindow::showPreferences() {
         qApp->setStyleSheet(Theme::stylesheet());
         applyActionIcons();                           // 圖示線色/點綴色跟隨主題
         applyTitleBarTheme();                         // 標題列底色跟隨主題
+        if (hudOverlay) hudOverlay->update();         // HUD 角標：切到/離開 Neon HUD 時重繪或隱藏
         for (int i = 0; i < tabWidget->count(); ++i)
             if (auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i))) {
                 e->refreshSyntaxTheme();              // 語法高亮色票跟隨主題

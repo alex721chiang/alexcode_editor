@@ -81,6 +81,8 @@ private slots:
 
 private:
     QTabWidget* tabWidget = nullptr;
+    class QWidget* centralWrap = nullptr;             // 中央容器（麵包屑 + 分頁）；HUD 覆蓋層跟隨其大小
+    class HudOverlay* hudOverlay = nullptr;           // Neon HUD 專屬的四角角標覆蓋層（非互動）
     class QLabel* breadcrumbLabel = nullptr;          // 編輯器頂部麵包屑（檔 > 類別 > 函式）
     class SymbolDialog* symbolDialog = nullptr;       // Ctrl+Shift+O 跳至符號
     class CommandPalette* commandPalette = nullptr;   // Ctrl+Shift+P 命令面板
