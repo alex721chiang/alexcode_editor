@@ -6,4 +6,7 @@
     <file alias="app_en.qm">i18n/app_en.qm</file>
     <file alias="app_zh_TW.qm">i18n/app_zh_TW.qm</file>
 </qresource>
+<qresource prefix="/fonts">
+    <file alias="Orbitron.ttf">fonts/Orbitron.ttf</file>
+</qresource>
 </RCC>

@@ -5,6 +5,7 @@
 #include <QLocale>
 #include <QTimer>
 #include <QPixmap>
+#include <QFontDatabase>
 #include "MainWindow.h"
 #include "Theme.h"
 #include "Portable.h"
@@ -13,6 +14,10 @@ int main(int argc, char *argv[]) {
     QApplication a(argc, argv);
     QApplication::setOrganizationName("AlexCode");
     QApplication::setApplicationName("AlexCodeEditor");
+
+    // 內嵌 Orbitron（OFL，src/fonts/）作為未來科技字標字型；用於「關於」等點綴處。
+    // 註冊失敗（極少見）時相關 UI 會自動退回一般 sans-serif。
+    QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Orbitron.ttf"));
 
     // UI 語言：ui/language = "system"（預設，跟隨系統地區）/ "en" / "zh_TW"。
     // 來源字串為英文與中文混合，因此一律安裝一個翻譯器以確保介面語言一致。

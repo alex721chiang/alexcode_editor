@@ -2829,13 +2829,17 @@ void MainWindow::openSettingsForShot(const QString& outPng) {
 }
 
 static QString aboutHtml() {
+    // 字標以內嵌的 Orbitron 呈現（未來科技感）；未註冊成功時退回一般字型。
     return QObject::tr(
-        "<h3>AlexCode v%1 — Neon Edition</h3>"
+        "<div style=\"font-family:'Orbitron','Segoe UI',sans-serif; font-size:20px;"
+        " font-weight:800; letter-spacing:3px; color:%3;\">ALEXCODE</div>"
+        "<p style=\"color:%4; letter-spacing:2px;\">v%1 &nbsp;·&nbsp; NEON EDITION</p>"
         "<p>輕量級 Qt 程式碼編輯器：LSP、Git、互動式終端機、多語言語法高亮、"
-        "log 分析、多套主題、繁中/英文介面。</p>"
+        "log 分析、多套主題（含 Neon HUD）、繁中/英文介面。</p>"
         "<p>以 Qt %2 建置。</p>"
         "<p><a href=\"https://github.com/alex721chiang/alexcode_editor\">GitHub 專案</a></p>")
-        .arg(QStringLiteral(ALEXCODE_VERSION), QStringLiteral(QT_VERSION_STR));
+        .arg(QStringLiteral(ALEXCODE_VERSION), QStringLiteral(QT_VERSION_STR),
+             Theme::ACCENT, Theme::ACCENT2);
 }
 
 void MainWindow::showAbout() {
