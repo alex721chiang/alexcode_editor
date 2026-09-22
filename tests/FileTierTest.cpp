@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/FileTier.h"
+#include "FileTier.h"
 
 using FileTier::Level;
 using FileTier::forSizeMB;

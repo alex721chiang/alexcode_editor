@@ -7,7 +7,7 @@
 #include <QFile>
 #include <QDir>
 #include <QDebug>
-#include "../src/LspClient.h"
+#include "LspClient.h"
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);

@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include <QJsonDocument>
 #include <QJsonArray>
-#include "../src/LspProtocol.h"
+#include "LspProtocol.h"
 
 using namespace LspProtocol;
 

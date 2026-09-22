@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/TerminalSelection.h"
+#include "TerminalSelection.h"
 
 using TermSelection::extractText;
 

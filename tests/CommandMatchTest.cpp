@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/CommandMatch.h"
+#include "CommandMatch.h"
 
 using CommandMatch::score;
 

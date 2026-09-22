@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/MdLink.h"
+#include "MdLink.h"
 
 static QStringList targets(const QString& text, bool wikiOnly = false) {
     QStringList out;

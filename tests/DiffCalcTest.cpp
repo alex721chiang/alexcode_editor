@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/DiffCalc.h"
+#include "DiffCalc.h"
 
 using DiffCalc::Row;
 using DiffCalc::align;

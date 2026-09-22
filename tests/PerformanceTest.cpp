@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <QStringList>
-#include "../src/FilterEngine.h"
-#include "../src/ProjectSymbolIndex.h"
+#include "FilterEngine.h"
+#include "ProjectSymbolIndex.h"
 
 TEST(PerformanceTest, MatchLine100kLines) {
     FilterEngine engine;

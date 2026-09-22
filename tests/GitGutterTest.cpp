@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/GitGutter.h"
+#include "GitGutter.h"
 
 using namespace GitGutter;
 

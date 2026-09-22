@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/VtParser.h"
+#include "VtParser.h"
 
 static QByteArray b(const char* s) { return QByteArray(s); }
 

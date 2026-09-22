@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/MarkdownLinkIndex.h"
+#include "MarkdownLinkIndex.h"
 #include <QHash>
 
 static MarkdownLinkIndex makeVault() {

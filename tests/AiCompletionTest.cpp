@@ -5,8 +5,8 @@
 #include <QTcpSocket>
 #include <QSignalSpy>
 #include <QTest>
-#include "../src/AICompletionProvider.h"
-#include "../src/CodeEditor.h"
+#include "AICompletionProvider.h"
+#include "CodeEditor.h"
 
 TEST(AIConfig, ParsesAllFields) {
     const auto c = AIConfig::fromJson(QByteArray(

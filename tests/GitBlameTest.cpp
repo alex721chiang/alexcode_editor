@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/GitBlame.h"
+#include "GitBlame.h"
 
 namespace {
 

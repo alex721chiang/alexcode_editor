@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/MarkdownRender.h"
+#include "MarkdownRender.h"
 
 using MarkdownRender::preprocessWikilinks;
 

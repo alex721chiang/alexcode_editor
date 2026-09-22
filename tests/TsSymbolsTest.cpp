@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/TsSymbols.h"
+#include "TsSymbols.h"
 
 using TsSymbols::symbolKind;
 using TsSymbols::isSymbolNode;

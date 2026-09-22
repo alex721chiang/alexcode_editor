@@ -7,6 +7,7 @@
 #include <QPixmap>
 #include <QFontDatabase>
 #include "MainWindow.h"
+#include "ScreenshotHelper.h"
 #include "Theme.h"
 #include "Portable.h"
 
@@ -74,44 +75,45 @@ int main(int argc, char *argv[]) {
         else if (QFileInfo(args[i]).isFile())
             QMetaObject::invokeMethod(&w, "openFileByPath", Q_ARG(QString, args[i]));
     }
-    if (gotoLineArg > 0) w.gotoLineForShot(gotoLineArg);
+    ScreenshotHelper shot(&w);
+    if (gotoLineArg > 0) shot.gotoLine(gotoLineArg);
     if (wantWhitespace) w.setShowWhitespaceAll(true);
-    if (wantPreview) w.showMarkdownPreviewForShot();
+    if (wantPreview) shot.showMarkdownPreview();
     if (!graphDir.isEmpty() && QFileInfo(graphDir).isDir())
-        w.openGraphForShot(graphDir);
+        shot.openGraph(graphDir);
     else if (!vaultDir.isEmpty() && QFileInfo(vaultDir).isDir())
-        w.openVaultForShot(vaultDir);
-    if (!refsName.isEmpty()) w.findRefsForShot(refsName);
+        shot.openVault(vaultDir);
+    if (!refsName.isEmpty()) shot.findRefs(refsName);
 
     if (!aboutShot.isEmpty()) {               // 截關於對話框
-        w.openAboutForShot(aboutShot);
+        shot.openAbout(aboutShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
     } else if (!paletteShot.isEmpty()) {      // 截命令面板
         w.resize(1200, 800);
-        w.openCommandPaletteForShot(paletteShot);
+        shot.openCommandPalette(paletteShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
     } else if (!projsymShot.isEmpty()) {      // 截專案符號搜尋
         w.resize(1200, 800);
-        w.openProjectSymbolForShot(projsymShot);
+        shot.openProjectSymbol(projsymShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
     } else if (!callgraphShot.isEmpty()) {    // 截 Call Graph（游標位置由 --goto 設定）
         w.resize(1200, 800);
-        w.openCallGraphForShot(callgraphShot);
+        shot.openCallGraph(callgraphShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
     } else if (!menuShot.isEmpty()) {         // 截「檢視」選單（index 4）以驗證 i18n
         w.resize(1200, 800);
-        w.openMenuForShot(4, menuShot);
+        shot.openMenu(4, menuShot);
         QTimer::singleShot(1400, &a, [&a]() { a.quit(); });
     } else if (!gitdiffShot.isEmpty()) {      // 截「目前檔 vs Git HEAD」並排 diff
-        w.openGitDiffForShot(gitdiffShot);
+        shot.openGitDiff(gitdiffShot);
         QTimer::singleShot(1600, &a, [&a]() { a.quit(); });
     } else if (!settingsShot.isEmpty()) {     // 截設定中心對話框
         w.resize(1200, 800);
-        w.openSettingsForShot(settingsShot);
+        shot.openSettings(settingsShot);
         QTimer::singleShot(1600, &a, [&a]() { a.quit(); });
     } else if (!shotPath.isEmpty()) {
         w.resize(1200, 800);
-        if (!termCmd.isEmpty()) w.openTerminalForShot(termCmd);
+        if (!termCmd.isEmpty()) shot.openTerminal(termCmd);
         const int delayMs = termCmd.isEmpty() ? 1500 : 3000;   // 終端機需等子行程輸出
         QTimer::singleShot(delayMs, &w, [&w, shotPath, &a]() {
             w.grab().save(shotPath);                            // Qt 自我渲染，與螢幕/鎖定無關

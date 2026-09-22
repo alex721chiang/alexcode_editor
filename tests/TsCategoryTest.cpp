@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/TsCategory.h"
+#include "TsCategory.h"
 
 using TsCategory::Category;
 using TsCategory::forNode;

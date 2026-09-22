@@ -6,7 +6,7 @@
 #include <QTest>
 #include <QClipboard>
 #include <QApplication>
-#include "../src/CodeEditor.h"
+#include "CodeEditor.h"
 
 namespace {
 

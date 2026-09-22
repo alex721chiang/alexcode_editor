@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/BoxSelect.h"
+#include "BoxSelect.h"
 
 using BoxSelect::Range;
 

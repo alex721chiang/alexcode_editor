@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/StickyScroll.h"
+#include "StickyScroll.h"
 
 using TsSymbols::Symbol;
 using StickyScroll::headers;

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/FilterEngine.h"
+#include "FilterEngine.h"
 
 TEST(FilterEngine, OrLogic) {
     FilterEngine e;

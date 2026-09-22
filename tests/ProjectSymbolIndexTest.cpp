@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/ProjectSymbolIndex.h"
+#include "ProjectSymbolIndex.h"
 
 static TsSymbols::Symbol sym(const QString& name, const QString& kind, int line) {
     TsSymbols::Symbol s; s.name = name; s.kind = kind; s.line = line; return s;

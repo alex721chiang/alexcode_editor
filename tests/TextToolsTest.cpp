@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/TextTools.h"
+#include "TextTools.h"
 
 using namespace TextTools;
 

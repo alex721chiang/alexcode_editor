@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/GraphLayout.h"
+#include "GraphLayout.h"
 #include <cmath>
 
 TEST(GraphLayout, EmptyGraph) {

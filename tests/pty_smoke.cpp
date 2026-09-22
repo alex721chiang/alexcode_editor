@@ -6,7 +6,7 @@
 #include <QTimer>
 #include <QByteArray>
 #include <QDebug>
-#include "../src/PtySession.h"
+#include "PtySession.h"
 
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);

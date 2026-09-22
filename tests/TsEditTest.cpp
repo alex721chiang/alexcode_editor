@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/TsEdit.h"
+#include "TsEdit.h"
 
 using TsEdit::compute;
 using TsEdit::ByteEdit;

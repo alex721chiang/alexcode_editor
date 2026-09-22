@@ -30,11 +30,9 @@ class QDockWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
+    friend class ScreenshotHelper;   // 文件截圖流程（原 *ForShot）：允許存取內部以執行截圖情境
 public:
     explicit MainWindow(QWidget *parent = nullptr);
-    void openTerminalForShot(const QString& cmd);   // 截圖模式：開終端機並（可選）執行指令
-    void openSettingsForShot(const QString& outPng); // 截圖模式：開設定中心並存圖
-    void openAboutForShot(const QString& outPng);    // 截圖模式：開關於對話框並存圖
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -219,17 +217,7 @@ private:
                                                        // 需要在計時器觸發當下取目前 projectFolder/作用中檔）
     QString currentFilePath();                        // activeEditor() 的檔案路徑(給 controller 呼叫用)
 public:
-    void openVaultForShot(const QString& folder);     // 截圖用：設資料夾並顯示 backlinks
-    void openGraphForShot(const QString& folder);     // 截圖用：設資料夾並顯示關係圖
-    void showMarkdownPreviewForShot();                // 截圖用：顯示 Markdown 預覽並刷新
-    void gotoLineForShot(int line);                   // 截圖/CLI：跳至指定行（1-based）
     void setShowWhitespaceAll(bool on);               // 截圖/CLI：所有分頁切換顯示空白
-    void openCommandPaletteForShot(const QString& outPng);   // 截圖：開命令面板並截圖
-    void openProjectSymbolForShot(const QString& outPng);    // 截圖：開專案符號搜尋並截圖
-    void findRefsForShot(const QString& name);               // 截圖/CLI：同步建索引並找引用
-    void openCallGraphForShot(const QString& outPng);        // 截圖：開目前游標所在函式的 Call Graph
-    void openMenuForShot(int index, const QString& outPng);  // 截圖：彈出某選單列選單以驗證 i18n
-    void openGitDiffForShot(const QString& outPng);          // 截圖：目前檔 vs HEAD 並排 diff
 private:
 
     // Snippet 樣板 — 拆到 SnippetsController

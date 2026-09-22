@@ -3,8 +3,8 @@
 #include <gtest/gtest.h>
 #include <QTemporaryDir>
 #include <QFile>
-#include "../src/PluginManager.h"
-#include "../src/CodeEditor.h"
+#include "PluginManager.h"
+#include "CodeEditor.h"
 
 namespace {
 

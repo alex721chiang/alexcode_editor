@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/LocalCompletion.h"
+#include "LocalCompletion.h"
 
 using LocalCompletion::suggest;
 

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/AutoPair.h"
+#include "AutoPair.h"
 
 using namespace AutoPair;
 static const QChar NUL = QChar();

@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "../src/TextRefs.h"
+#include "TextRefs.h"
 
 using TextRefs::findWholeWord;
 
