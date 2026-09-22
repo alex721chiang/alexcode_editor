@@ -30,6 +30,18 @@ bool waitCount(QSignalSpy& spy, int n, int timeoutMs = 3000) {
     }
     return spy.count() >= n;
 }
+// 等通知平息：連續 quietMs 沒有新訊號（一次寫入可能產生多個通知）
+void waitSettled(QSignalSpy& spy, int quietMs = 300, int timeoutMs = 5000) {
+    QElapsedTimer total, quiet;
+    total.start();
+    quiet.start();
+    int last = spy.count();
+    while (quiet.elapsed() < quietMs && total.elapsed() < timeoutMs) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QThread::msleep(5);
+        if (spy.count() != last) { last = spy.count(); quiet.restart(); }
+    }
+}
 void pump(int ms) {
     QElapsedTimer t;
     t.start();
@@ -76,12 +88,13 @@ TEST(BackgroundFileWatcherTest, NotifiesAndSurvivesReplace) {
     ASSERT_TRUE(waitCount(spy, 1));
     EXPECT_EQ(spy.last().at(0).toString(), p);
 
+    waitSettled(spy);
+    int before = spy.count();
     QFile::remove(p);                            // 刪除重建
     writeFile(p, "3\n");
-    ASSERT_TRUE(waitCount(spy, 2));
-    w.waitForIdle();                             // 背景已重新加回監看
-    pump(100);
-    const int before = spy.count();
+    ASSERT_TRUE(waitCount(spy, before + 1));
+    waitSettled(spy);                            // 刪除/重建的通知全部處理完（含背景重新監看）
+    before = spy.count();
     writeFile(p, "4\n");                          // 重建後的修改仍收得到
     ASSERT_TRUE(waitCount(spy, before + 1));
 

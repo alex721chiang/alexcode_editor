@@ -29,6 +29,13 @@ BackgroundFileWatcher::BackgroundFileWatcher(QObject* parent) : QObject(parent) 
                 st->pending.insert(p);
                 const QString dir = QFileInfo(p).absolutePath();
                 if (!w->directories().contains(dir) && w->addPath(dir)) st->tempDirs.insert(dir);
+                // 競態：檔案可能在「判斷不存在」與「目錄監看生效」之間就已重建——那次建立不會
+                // 產生目錄事件，於是永遠等不到。監看生效後再檢查一次。
+                if (QFileInfo::exists(p)) {
+                    w->addPath(p);
+                    st->pending.remove(p);
+                    if (st->tempDirs.contains(dir)) { w->removePath(dir); st->tempDirs.remove(dir); }
+                }
             }
         }
         emit fileChanged(p);                       // 跨執行緒 → 以 queued 送達擁有者
