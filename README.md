@@ -152,7 +152,7 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 - **Paper Light**：亮色護眼
 - **Matrix**：綠調終端風
 
-調色盤集中於 `src/Theme.h`，以單一 `Palette` 結構驅動全套 QSS 與編輯器色票。
+調色盤集中於 `src/core/Theme.h`，以單一 `Palette` 結構驅動全套 QSS 與編輯器色票。
 「關於」對話框以內嵌的 **Orbitron** 字型（OFL）呈現 ALEXCODE 未來科技字標。
 
 ### 自訂與可攜
@@ -160,7 +160,7 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 - **快捷鍵自訂**：Tools → 外部工具 →「編輯快捷鍵設定檔」（`alexcode-keys.json`，首次自動輸出現況模板），含衝突偵測，存檔即生效。
 - **可攜模式**：執行檔旁放 `portable.ini`，所有設定 / Session / 組態改存 `./data`，解壓即用、不碰系統登錄檔。一般模式則存於使用者 AppData（`settings.ini`）。
 
-翻譯來源為 `src/i18n/app_en.ts`、`app_zh_TW.ts`，以 `lupdate` 抽取、`lrelease` 編譯為 `.qm` 後經 `resources.qrc` 內嵌。
+翻譯來源為 `src/i18n/app_en.ts`、`app_zh_TW.ts`，以 `lupdate` 抽取；`.qm` 由 CMake `qt_add_translations` 於建置期自動編譯並內嵌至 `:/i18n`（不需手動 `lrelease`，`.qm` 不入版控）。
 
 ### 快速啟動
 - **視窗即時顯示**：主視窗先繪出，上次工作階段的分頁再於背景**串流還原**（依原順序逐一載入），不再等所有檔案解析完才出現畫面。

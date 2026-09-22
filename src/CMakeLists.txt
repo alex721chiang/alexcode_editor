@@ -15,6 +15,7 @@ set(LIB_SRCS
     editor/TextTools.cpp
     editor/FunctionListController.cpp
     editor/SnippetsController.cpp
+    editor/TimelineBar.h            # header-only 的 Q_OBJECT：須列入才會被 AUTOMOC 產生 moc（勿刪）
     # lsp：語言伺服器協定與控制器
     lsp/LspProtocol.cpp
     lsp/LspClient.cpp

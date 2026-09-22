@@ -8,6 +8,9 @@
 #include "SettingsDialog.h"
 #include "LspManager.h"
 #include "SnippetsController.h"
+#include "ProjectSymbolDialog.h"   // dialog()->grab() 需完整型別
+#include <QDockWidget>             // termDock/mdDock/backlinksDock/graphDock->show()
+#include <QMenuBar>                // menuBar()->actions()
 #include <QMessageBox>
 #include <QMenu>
 #include <QTimer>

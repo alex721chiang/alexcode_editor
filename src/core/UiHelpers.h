@@ -10,6 +10,7 @@
 #include <algorithm>
 #include "CommandPalette.h"
 #include "Theme.h"
+#include "Version.h"   // aboutHtml() 使用 ALEXCODE_VERSION；自足標頭，不依賴引入順序
 
 // 主視窗共用的純函式（原 MainWindow.cpp 的 file-static）：
 // 命令面板蒐集、快捷鍵蒐集、關於對話框 HTML。以 inline 集中於此，
