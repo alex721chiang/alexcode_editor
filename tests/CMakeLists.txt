@@ -17,15 +17,15 @@ set(ALEXCODE_SRC_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/plugins
 )
 
-add_executable(AlexCodeTests FilterEngineTest.cpp PerformanceTest.cpp LspProtocolTest.cpp GitGutterTest.cpp VtParserTest.cpp BoxSelectTest.cpp LocalCompletionTest.cpp TextToolsTest.cpp TerminalSelectionTest.cpp TsCategoryTest.cpp MdLinkTest.cpp MarkdownLinkIndexTest.cpp GraphLayoutTest.cpp MarkdownRenderTest.cpp AutoPairTest.cpp TsEditTest.cpp TsSymbolsTest.cpp FileTierTest.cpp StickyScrollTest.cpp CommandMatchTest.cpp ProjectSymbolIndexTest.cpp TextRefsTest.cpp DiffCalcTest.cpp GitBlameTest.cpp ../src/search/FilterEngine.cpp ../src/index/ProjectSymbolIndex.cpp ../src/lsp/LspProtocol.cpp ../src/git/GitGutter.cpp ../src/terminal/VtParser.cpp ../src/editor/TextTools.cpp ../src/index/MarkdownLinkIndex.cpp ../src/index/GraphLayout.cpp ../src/git/DiffCalc.cpp ../src/git/GitBlame.cpp)
+add_executable(AlexCodeTests FilterEngineTest.cpp PerformanceTest.cpp LspProtocolTest.cpp GitGutterTest.cpp VtParserTest.cpp BoxSelectTest.cpp LocalCompletionTest.cpp TextToolsTest.cpp TerminalSelectionTest.cpp TsCategoryTest.cpp MdLinkTest.cpp MarkdownLinkIndexTest.cpp GraphLayoutTest.cpp MarkdownRenderTest.cpp AutoPairTest.cpp TsEditTest.cpp TsSymbolsTest.cpp FileTierTest.cpp StickyScrollTest.cpp CommandMatchTest.cpp ProjectSymbolIndexTest.cpp TextRefsTest.cpp DiffCalcTest.cpp GitBlameTest.cpp FileLoadTest.cpp PathKindTest.cpp ../src/editor/FileLoad.cpp ../src/core/PathKind.cpp ../src/search/FilterEngine.cpp ../src/index/ProjectSymbolIndex.cpp ../src/lsp/LspProtocol.cpp ../src/git/GitGutter.cpp ../src/terminal/VtParser.cpp ../src/editor/TextTools.cpp ../src/index/MarkdownLinkIndex.cpp ../src/index/GraphLayout.cpp ../src/git/DiffCalc.cpp ../src/git/GitBlame.cpp)
 target_include_directories(AlexCodeTests PRIVATE ${ALEXCODE_SRC_DIRS})
-target_link_libraries(AlexCodeTests PRIVATE gtest_main Qt6::Core)
+target_link_libraries(AlexCodeTests PRIVATE gtest_main Qt6::Core Qt6::Core5Compat)   # Core5Compat：FileLoad 的 Big5（QTextCodec）
 add_test(NAME AlexCodeUnitTests COMMAND AlexCodeTests)   # 讓 ctest 能跑（CI 用）
 
 # Widget 測試：連 alexcode_lib（含 CodeEditor 全依賴），自帶 QApplication(offscreen) main
 # Qt6::Test 提供 QTest::keyClick 等鍵盤模擬（多游標測試用）
 find_package(Qt6 COMPONENTS Test REQUIRED)
-add_executable(AlexCodeWidgetTests WidgetTestMain.cpp EditorOpsTest.cpp PluginManagerTest.cpp AiCompletionTest.cpp)
+add_executable(AlexCodeWidgetTests WidgetTestMain.cpp EditorOpsTest.cpp PluginManagerTest.cpp AiCompletionTest.cpp MarkdownLinkControllerTest.cpp ProjectSymbolControllerTest.cpp SessionRestoreTest.cpp)
 target_link_libraries(AlexCodeWidgetTests PRIVATE gtest alexcode_lib Qt6::Test)
 add_test(NAME AlexCodeWidgetTests COMMAND AlexCodeWidgetTests)
 # 無頭 LSP 整合煙霧測試（需系統已安裝 clangd；手動執行 ./tests/lsp_smoke）

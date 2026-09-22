@@ -21,6 +21,8 @@
 #include "FindInFilesDialog.h"
 #include "SyntaxHighlighter.h"
 #include "QuickOpenDialog.h"
+#include "FileLoad.h"
+#include <QJsonObject>
 
 class QTreeView;
 class QFileSystemModel;
@@ -31,6 +33,7 @@ class QDockWidget;
 class MainWindow : public QMainWindow {
     Q_OBJECT
     friend class ScreenshotHelper;   // 文件截圖流程（原 *ForShot）：允許存取內部以執行截圖情境
+    friend class MainWindowSessionTest;   // tests/SessionRestoreTest.cpp：還原/開檔不卡主執行緒
 public:
     explicit MainWindow(QWidget *parent = nullptr);
 
@@ -255,6 +258,16 @@ private:
     // 分頁首次成為作用中時才做 LSP didOpen + Git gutter 抓取（每分頁僅一次，以 "activated" 屬性守衛）。
     // 開檔當下不做，避免還原多分頁時 N 份 didOpen 與 2N 個 git 子行程一次湧入拖慢啟動。
     void ensureEditorActivated(CodeEditor* editor);
+
+    // 延遲載入（網路分享友善）：還原時分頁只建「佔位」（pendingLoad 屬性，唯讀、不讀檔），
+    // 首次切到時才於背景執行緒讀檔；讀取失敗保留分頁與提示，下次切回再重試。
+    CodeEditor* createPendingTab(const QString& filePath, const QJsonObject& state);
+    void startPendingLoad(CodeEditor* editor);
+    void finishPendingLoad(CodeEditor* editor, const FileLoad::Result& r);
+    void applyLoadedFile(CodeEditor* editor, const QString& fileName, const FileLoad::Result& r);
+    void applyTabState(CodeEditor* editor, const QJsonObject& t);   // 游標/捲動/書籤/摺疊
+    bool projectIsNetwork = false;                    // 專案資料夾在網路分享上（git 降頻/可停用）
+    bool gitAllowedFor(const QString& path) const;    // network/disableGit=true 時網路路徑不跑 git
     QString sessionDir() const;
 
     QFont defaultEditorFont;

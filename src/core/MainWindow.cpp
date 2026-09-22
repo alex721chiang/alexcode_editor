@@ -33,6 +33,8 @@
 #include <QFileSystemModel>
 #include <QFileSystemWatcher>
 #include <QtConcurrent>
+#include <QFutureWatcher>
+#include "PathKind.h"
 #include <QStandardPaths>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -1689,46 +1691,48 @@ void MainWindow::openFile() {
 }
 
 void MainWindow::openFileByPath(const QString& fileName) {
-    QFile file(fileName);
-    if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, "Error", "Cannot open file:\n" + file.errorString());
-        return;
-    }
-    const QByteArray raw = file.readAll();
-    file.close();
-
-    // 換行符偵測
-    const QString eol = raw.contains("\r\n") ? QStringLiteral("CRLF") : QStringLiteral("LF");
-    // 編碼偵測：UTF-8 驗證失敗 → 嘗試 Big5
-    QString encName = QStringLiteral("UTF-8");
-    auto utf8 = QStringDecoder(QStringDecoder::Utf8);
-    QString text = utf8.decode(raw);
-    if (utf8.hasError()) {
-        QTextCodec* big5 = QTextCodec::codecForName("Big5");
-        if (big5) {
-            QTextCodec::ConverterState st;
-            const QString t2 = big5->toUnicode(raw.constData(), raw.size(), &st);
-            if (st.invalidChars == 0) { text = t2; encName = QStringLiteral("Big5"); }
-        }
-    }
-    text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-
+    // 已開啟 → 直接切換，不重讀（網路檔可省一次完整讀取）
     for (int i = 0; i < tabWidget->count(); ++i) {
         CodeEditor* editor = qobject_cast<CodeEditor*>(tabWidget->widget(i));
         if (editor && editor->property("filePath").toString() == fileName) {
+            // 還原的佔位分頁：前景開檔（常接著 gotoLine 跳行）須在返回前載好內容，同一般開檔
+            if (editor->property("pendingLoad").toBool() && !editor->property("loading").toBool()) {
+                const FileLoad::Result r = FileLoad::load(fileName);
+                if (r.ok) finishPendingLoad(editor, r);
+                else QMessageBox::warning(this, "Error", "Cannot open file:\n" + r.error);
+            }
             tabWidget->setCurrentIndex(i);
             return;
         }
     }
 
+    const FileLoad::Result r = FileLoad::load(fileName);
+    if (!r.ok) {
+        QMessageBox::warning(this, "Error", "Cannot open file:\n" + r.error);
+        return;
+    }
+
     QFileInfo fileInfo(fileName);
     CodeEditor* newEditor = createEditorTab(fileInfo.fileName());
+    applyLoadedFile(newEditor, fileName, r);
+
+    // LSP didOpen 與 Git gutter 延到分頁實際成為作用中才做（見 ensureEditorActivated）。
+    // 前景開檔時該分頁已是當前分頁，立即啟用；串流還原期間則跳過，等切到才啟用。
+    if (!restoringSession && newEditor == tabWidget->currentWidget())
+        ensureEditorActivated(newEditor);
+    recentFilesController->addFile(fileName);
+    statusBar()->showMessage("Opened " + fileName, 3000);
+}
+
+// 把已讀入/解碼的內容套進分頁：大檔分級、屬性、高亮。前景開檔與背景延遲載入共用。
+void MainWindow::applyLoadedFile(CodeEditor* newEditor, const QString& fileName, const FileLoad::Result& r) {
+    QFileInfo fileInfo(fileName);
 
     // 大檔分級降級（閾值可在偏好設定調整，取代過去單一 50MB 門檻）：
     //   > highlightMaxMB（預設 10）→ 連語法高亮一併關閉（完整大檔模式）
     //   > assistMaxMB   （預設 2） → 關閉自動補全 / LSP / 即時 Git gutter，但保留高亮
     AppSettings sizeSettings;
-    const double mb = raw.size() / (1024.0 * 1024.0);
+    const double mb = r.bytes / (1024.0 * 1024.0);
     const int hiMaxMB = sizeSettings.value("editor/highlightMaxMB", 10).toInt();
     const int asMaxMB = sizeSettings.value("editor/assistMaxMB", 2).toInt();
     const FileTier::Level tier = FileTier::forSizeMB(mb, asMaxMB, hiMaxMB);
@@ -1746,42 +1750,95 @@ void MainWindow::openFileByPath(const QString& fileName) {
     }
     newEditor->setAssistEnabled(!assistOff);
     newEditor->setProperty("bigFile", highlightOff);
-    newEditor->setPlainText(text);
+    newEditor->setPlainText(r.text);
     newEditor->document()->setModified(false);
 
     newEditor->setProperty("filePath", fileName);
     newEditor->setProperty("baseTitle", fileInfo.fileName());
-    newEditor->setProperty("encoding", encName);
-    newEditor->setProperty("eol", eol);
+    newEditor->setProperty("encoding", r.encoding);
+    newEditor->setProperty("eol", r.eol);
     newEditor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
     tabWidget->setTabToolTip(tabWidget->indexOf(newEditor), fileName);
     updateTabTitle(newEditor);
 
     if (!highlightOff) applyHighlighterForPath(newEditor, fileName);
-    // LSP didOpen 與 Git gutter 延到分頁實際成為作用中才做（見 ensureEditorActivated）。
-    // 前景開檔時該分頁已是當前分頁，立即啟用；串流還原期間則跳過，等切到才啟用。
-    if (!restoringSession && newEditor == tabWidget->currentWidget())
-        ensureEditorActivated(newEditor);
-    recentFilesController->addFile(fileName);
-    if (fileWatcher) fileWatcher->addPath(fileName);
-    statusBar()->showMessage("Opened " + fileName, 3000);
 }
 
 // 分頁首次成為作用中時才啟用重量級服務：LSP didOpen（含首個 clangd 啟動）+ Git gutter
-// （每檔 2 個 git 子行程）。以 "activated" 屬性守衛，確保每分頁只做一次。
+// （每檔 2 個 git 子行程）+ 外部變更監看。以 "activated" 屬性守衛，確保每分頁只做一次。
+// 仍是佔位（尚未讀檔）的分頁：先背景載入，載入完成後再回到這裡啟用。
 void MainWindow::ensureEditorActivated(CodeEditor* editor) {
     if (!editor) return;
+    if (editor->property("pendingLoad").toBool()) { startPendingLoad(editor); return; }
     if (editor->property("activated").toBool()) return;
     const QString path = editor->property("filePath").toString();
     if (path.isEmpty()) return;                      // Untitled / 僅備份的分頁：無事可做，且不標記已啟用
     editor->setProperty("activated", true);
+    if (fileWatcher && !fileWatcher->files().contains(path)) fileWatcher->addPath(path);
     if (!editor->assistEnabled()) return;            // 大檔降級：維持停用 LSP / Git（與開檔時一致）
     if (!lspController->lsp()->languageIdForFile(path).isEmpty()) {
         editor->setLspEnabled(true);
         lspController->lsp()->documentOpened(path, editor->toPlainText());
     }
+    if (!gitAllowedFor(path)) return;
     gitGutterController->fetchHead(path);             // Git gutter 行狀態
     gitGutterController->fetchBlame(path);            // 狀態列行內 blame
+}
+
+bool MainWindow::gitAllowedFor(const QString& path) const {
+    if (!AppSettings().value("network/disableGit", false).toBool()) return true;
+    return !PathKind::isNetworkPath(path);
+}
+
+CodeEditor* MainWindow::createPendingTab(const QString& filePath, const QJsonObject& state) {
+    const QString name = QFileInfo(filePath).fileName();
+    CodeEditor* e = createEditorTab(name);
+    e->setProperty("filePath", filePath);
+    e->setProperty("baseTitle", state["baseTitle"].toString(name));
+    e->setProperty("pendingLoad", true);
+    e->setProperty("pendingState", QVariant(state));
+    e->setReadOnly(true);                            // 載入前不可編輯（載入完成會覆寫內容）
+    e->setPlaceholderText(QStringLiteral("\n") + tr("（切換到此分頁時載入）"));   // 首行會被目前行高亮蓋住，從第 2 行起顯示
+    tabWidget->setTabToolTip(tabWidget->indexOf(e), filePath);
+    updateTabTitle(e);
+    return e;
+}
+
+void MainWindow::startPendingLoad(CodeEditor* editor) {
+    if (!editor || editor->property("loading").toBool()) return;
+    editor->setProperty("loading", true);
+    const QString path = editor->property("filePath").toString();
+    editor->setPlaceholderText(QStringLiteral("\n") + tr("正在載入 %1 …").arg(QFileInfo(path).fileName()));
+    statusBar()->showMessage(tr("正在載入 %1 …").arg(path));
+    auto* w = new QFutureWatcher<FileLoad::Result>(this);
+    QPointer<CodeEditor> guard(editor);
+    connect(w, &QFutureWatcher<FileLoad::Result>::finished, this, [this, w, guard]() {
+        const FileLoad::Result r = w->result();
+        w->deleteLater();
+        if (guard) finishPendingLoad(guard, r);       // 分頁在載入期間被關閉：丟棄結果
+    });
+    w->setFuture(QtConcurrent::run(&FileLoad::load, path));   // 網路檔在背景執行緒讀，不卡 UI
+}
+
+void MainWindow::finishPendingLoad(CodeEditor* editor, const FileLoad::Result& r) {
+    editor->setProperty("loading", false);
+    const QString path = editor->property("filePath").toString();
+    if (!r.ok) {
+        // 保留分頁（伺服器可能只是暫時離線），切回此分頁即重試
+        editor->setPlaceholderText(QStringLiteral("\n") + tr("無法讀取 %1\n%2\n（切換回此分頁可重試）")
+                                      .arg(QFileInfo(path).fileName(), r.error));   // 完整路徑見分頁提示/狀態列
+        statusBar()->showMessage(tr("無法讀取 %1：%2").arg(path, r.error), 6000);
+        return;
+    }
+    const QJsonObject state = editor->property("pendingState").toJsonObject();
+    editor->setProperty("pendingLoad", false);
+    editor->setProperty("pendingState", QVariant());
+    editor->setPlaceholderText(QString());
+    editor->setReadOnly(false);
+    applyLoadedFile(editor, path, r);
+    applyTabState(editor, state);
+    statusBar()->showMessage("Opened " + path, 3000);
+    if (editor == activeEditor()) ensureEditorActivated(editor);
 }
 
 void MainWindow::saveFileAs() {
@@ -1806,6 +1863,7 @@ void MainWindow::saveAllFiles() {
 void MainWindow::saveFile() {
     CodeEditor* currentEditor = activeEditor();
     if (!currentEditor) return;
+    if (currentEditor->property("pendingLoad").toBool()) return;   // 尚未載入：內容為空，存檔會清空原檔
 
     QString fileName = currentEditor->property("filePath").toString();
     if (fileName.isEmpty()) {
@@ -2291,6 +2349,9 @@ void MainWindow::setProjectFolder(const QString& folder) {
     projectDock->setWindowTitle("EXPLORER — " + QFileInfo(folder).fileName().toUpper());
     projectDock->show();
     quickOpen->setRootFolder(folder);
+    // 網路分享上 git 很慢：狀態輪詢由 30s 放寬為 120s；network/disableGit=true 則完全不跑
+    projectIsNetwork = PathKind::isNetworkPath(folder);
+    if (gitTimer) gitTimer->setInterval(projectIsNetwork ? 120000 : 30000);
     updateGitStatus();
     if (gitTimer) gitTimer->start();
 
@@ -2454,8 +2515,19 @@ void MainWindow::saveSession() {
     for (int i = 0; i < tabWidget->count(); ++i) {
         auto editor = qobject_cast<CodeEditor*>(tabWidget->widget(i));
         if (!editor) continue;
+        if (editor->property("pendingLoad").toBool()) {
+            // 尚未載入的佔位分頁：原樣保留還原時的狀態（內容是空的，不可當快照寫出）
+            QJsonObject t = editor->property("pendingState").toJsonObject();
+            t["filePath"] = editor->property("filePath").toString();
+            t.remove("backup");
+            t["modified"] = false;
+            tabs.append(t);
+            continue;
+        }
         QJsonObject t;
         t["filePath"]  = editor->property("filePath").toString();
+        t["encoding"]  = editor->property("encoding").toString();   // 快照還原時沿用原編碼/換行，不必再讀原檔
+        t["eol"]       = editor->property("eol").toString();
         t["baseTitle"] = editor->property("baseTitle").toString();
         t["cursor"]    = editor->textCursor().position();
         t["scroll"]    = editor->verticalScrollBar()->value();
@@ -2487,6 +2559,20 @@ void MainWindow::saveSession() {
     if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(root).toJson());
 }
 
+// 游標 / 捲動 / 書籤 / 摺疊（內容已載入後套用）
+void MainWindow::applyTabState(CodeEditor* editor, const QJsonObject& t) {
+    QTextCursor c = editor->textCursor();
+    c.setPosition(qMin(t["cursor"].toInt(), editor->document()->characterCount() - 1));
+    editor->setTextCursor(c);
+    editor->verticalScrollBar()->setValue(t["scroll"].toInt());
+    QList<int> bms;
+    for (const QJsonValue& b : t["bookmarks"].toArray()) bms << b.toInt();
+    editor->setBookmarkedLines(bms);
+    QList<int> folds;
+    for (const QJsonValue& fv : t["folds"].toArray()) folds << fv.toInt();
+    if (!folds.isEmpty()) editor->applyFolds(folds);
+}
+
 void MainWindow::restoreSession() {
     QFile f(sessionDir() + "/session.json");
     if (!f.open(QIODevice::ReadOnly)) return;
@@ -2503,45 +2589,46 @@ void MainWindow::restoreSession() {
         }
     }
 
+    // 專案資料夾：isDir 可能是網路存取（伺服器離線時會卡住），移到背景檢查
     const QString folder = root["projectFolder"].toString();
-    if (!folder.isEmpty() && QFileInfo(folder).isDir()) setProjectFolder(folder);
+    if (!folder.isEmpty()) {
+        auto* w = new QFutureWatcher<bool>(this);
+        connect(w, &QFutureWatcher<bool>::finished, this, [this, w, folder]() {
+            const bool ok = w->result();
+            w->deleteLater();
+            if (ok && projectFolder.isEmpty()) setProjectFolder(folder);   // 期間使用者已自行開資料夾則不覆蓋
+        });
+        w->setFuture(QtConcurrent::run([folder]() { return QFileInfo(folder).isDir(); }));
+    }
 
-    // 逐分頁還原（單一分頁的完整狀態）；抽成 helper 讓串流與同步兩種路徑共用。
+    // 逐分頁還原：一律不在主執行緒碰原檔（可能在網路分享上）。
+    //  - 有未存檔快照：從本機快照還原內容，編碼/換行沿用 session 記錄
+    //  - 其餘有路徑的分頁：只建佔位，切到時才背景讀檔（見 ensureEditorActivated）
     auto restoreOneTab = [this](const QJsonObject& t) {
         const QString filePath = t["filePath"].toString();
         const QString backup   = t["backup"].toString();
-        CodeEditor* editor = nullptr;
 
-        if (!filePath.isEmpty() && QFileInfo::exists(filePath)) {
-            openFileByPath(filePath);
-            editor = activeEditor();
-        } else if (!backup.isEmpty()) {
-            QString title = t["baseTitle"].toString();
-            editor = createEditorTab(title.isEmpty() ? "Untitled" : title);
+        if (backup.isEmpty()) {
+            if (!filePath.isEmpty()) createPendingTab(filePath, t);
+            return;
         }
-        if (!editor) return;
-
-        // 還原未儲存內容
-        if (!backup.isEmpty() && QFileInfo::exists(backup)) {
-            QFile bf(backup);
-            if (bf.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                editor->setPlainText(QTextStream(&bf).readAll());
-                editor->document()->setModified(t["modified"].toBool(true));
-                updateTabTitle(editor);
-            }
+        FileLoad::Result r = FileLoad::load(backup);     // 快照在本機資料夾
+        if (!r.ok) {
+            if (!filePath.isEmpty()) createPendingTab(filePath, t);   // 快照遺失：退回原檔
+            return;
         }
-        // 游標 / 捲動 / 書籤
-        QTextCursor c = editor->textCursor();
-        c.setPosition(qMin(t["cursor"].toInt(), editor->document()->characterCount() - 1));
-        editor->setTextCursor(c);
-        editor->verticalScrollBar()->setValue(t["scroll"].toInt());
-        QList<int> bms;
-        for (const QJsonValue& b : t["bookmarks"].toArray()) bms << b.toInt();
-        editor->setBookmarkedLines(bms);
-        // 還原摺疊區域（內容已載入）
-        QList<int> folds;
-        for (const QJsonValue& fv : t["folds"].toArray()) folds << fv.toInt();
-        if (!folds.isEmpty()) editor->applyFolds(folds);
+        const QString title = t["baseTitle"].toString();
+        CodeEditor* editor = createEditorTab(title.isEmpty() ? "Untitled" : title);
+        if (!filePath.isEmpty()) {
+            r.encoding = t["encoding"].toString(QStringLiteral("UTF-8"));
+            r.eol = t["eol"].toString(QStringLiteral("LF"));
+            applyLoadedFile(editor, filePath, r);
+        } else {
+            editor->setPlainText(r.text);
+        }
+        editor->document()->setModified(t["modified"].toBool(true));
+        updateTabTitle(editor);
+        applyTabState(editor, t);
     };
 
     // 串流還原：分頁依原順序逐一於事件迴圈的空檔開啟，避免所有檔案的
@@ -2707,6 +2794,7 @@ void MainWindow::setEditorEncoding(CodeEditor* e, const QString& enc) {
 void MainWindow::reloadWithEncoding(const QString& enc) {
     CodeEditor* editor = activeEditor();
     if (!editor) return;
+    if (editor->property("pendingLoad").toBool()) return;   // 尚未載入完成
     const QString path = editor->property("filePath").toString();
     if (path.isEmpty()) { setEditorEncoding(editor, enc); return; }
 
@@ -3043,9 +3131,12 @@ void MainWindow::updateGitStatus() {
     // Git gutter：順帶刷新當前分頁的 HEAD 快取（commit 後標示自動消除）
     if (CodeEditor* e = activeEditor()) {
         const QString p = e->property("filePath").toString();
-        if (!p.isEmpty() && !e->property("bigFile").toBool()) gitGutterController->fetchHead(p);
+        if (!p.isEmpty() && !e->property("bigFile").toBool() && !e->property("pendingLoad").toBool()
+            && gitAllowedFor(p))
+            gitGutterController->fetchHead(p);
     }
     if (projectFolder.isEmpty() || !statusGit) return;
+    if (projectIsNetwork && !gitAllowedFor(projectFolder)) return;
     auto* p = new QProcess(this);
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, p](int code, QProcess::ExitStatus) {

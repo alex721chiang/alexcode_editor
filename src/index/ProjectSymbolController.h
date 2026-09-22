@@ -35,15 +35,22 @@ public:
     void findReferences(const QString& name);                      // 文字版找引用 → 填 REFERENCES dock
 
     ProjectSymbolIndex& index() { return m_index; }
+    QStringList watchedDirs() const;
+
+    // 網路資料夾預設不掛目錄監看；設定 index/watchNetworkFolders=true 可強制開啟
+    static bool shouldWatch(const QString& folder);
+    // BFS 收集要監看的目錄（剪掉 skipDirs、上限 maxDirs）；純檔案系統巡訪，於背景執行緒呼叫
+    static QStringList collectWatchDirs(const QString& root, int maxDirs);
     ProjectSymbolDialog* dialog() const { return m_dialog; }       // 給截圖流程直接操作/截圖用
 
 signals:
     void statusMessage(const QString& text, int timeoutMs);        // 取代原本直接呼叫 statusBar()
     void symbolChosen(const QString& file, int line);               // 使用者在對話框選了符號
+    void watchDirsUpdated();                                        // 背景掃描完成、監看清單已換上
 
 private:
     void ensureDialog();
-    void rescanWatchedDirs();                      // 重掃子目錄清單（剪掉 skipDirs、上限保護）
+    void rescanWatchedDirs();                      // 背景重掃子目錄清單（剪掉 skipDirs、上限保護）
 
     ProjectSymbolIndex m_index;
     QPointer<ProjectSymbolDialog> m_dialog;
@@ -56,4 +63,6 @@ private:
     QFileSystemWatcher* m_fsWatcher = nullptr;
     QTimer* m_fsDebounce = nullptr;
     QString m_folder;
+    bool m_watchEnabled = false;                   // 目前資料夾是否要監看（網路資料夾預設否）
+    int m_scanGeneration = 0;                      // 丟棄過時（已換資料夾）的背景掃描結果
 };

@@ -1354,6 +1354,26 @@ UTF-8 bytes: %5</translation>
 Discard your changes and reload?</translation>
     </message>
     <message>
+        <source>（切換到此分頁時載入）</source>
+        <translation>(Loads when you switch to this tab)</translation>
+    </message>
+    <message>
+        <source>正在載入 %1 …</source>
+        <translation>Loading %1 …</translation>
+    </message>
+    <message>
+        <source>無法讀取 %1
+%2
+（切換回此分頁可重試）</source>
+        <translation>Cannot read %1
+%2
+(Switch back to this tab to retry)</translation>
+    </message>
+    <message>
+        <source>無法讀取 %1：%2</source>
+        <translation>Cannot read %1: %2</translation>
+    </message>
+    <message>
         <location filename="../MainWindow.cpp" line="2574" />
         <source>已還原上次工作階段（%1 個分頁）</source>
         <translation>Restored previous session (%1 tabs)</translation>

@@ -166,6 +166,8 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 - **視窗即時顯示**：主視窗先繪出，上次工作階段的分頁再於背景**串流還原**（依原順序逐一載入），不再等所有檔案解析完才出現畫面。
 - **延遲啟用重量級服務**：LSP（`clangd` 等）的 `didOpen` 與 Git gutter／blame 改為「分頁實際切到時才啟用」，前景開檔立即生效、背景還原的分頁則於首次切換時載入 — 避免多分頁還原時大量語言伺服器同步與 Git 子行程一次湧入拖慢開啟（Windows 尤其明顯）。
 - 大檔仍沿用分級降級（`editor/highlightMaxMB`、`editor/assistMaxMB`）自動關閉高亮／LSP／即時 Git。
+- **網路分享（SMB/NFS）友善**：還原工作階段時不在主執行緒碰原檔——非作用中分頁只建佔位，切到才於背景讀檔（讀不到時保留分頁，切回即重試）；未存檔分頁由本機快照還原並沿用原編碼／換行；專案資料夾存在檢查、Markdown 連結索引（僅在 Backlinks／Graph 開啟時建立）、資料夾監看清單皆改為背景執行。
+- 網路路徑相關設定（`settings.ini`）：`index/watchNetworkFolders`（預設 `false`，網路資料夾不掛目錄監看）、`network/disableGit`（預設 `false`；設為 `true` 則網路路徑不跑 git gutter／blame／狀態）。網路專案的 git 狀態輪詢自動由 30 秒放寬為 120 秒。
 
 ## 建置
 

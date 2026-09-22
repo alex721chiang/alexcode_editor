@@ -11,6 +11,8 @@
 #include <QFileSystemWatcher>
 #include <QTimer>
 #include <QDir>
+#include "PathKind.h"
+#include "Portable.h"
 
 ProjectSymbolController::ProjectSymbolController(QWidget* dialogParent, QListWidget* refsList,
                                                  QDockWidget* refsDock, QObject* parent)
@@ -45,6 +47,7 @@ void ProjectSymbolController::rebuild(const QString& projectFolder) {
 // rebuild() 走 mtime 增量，未變更的檔不重解析，代價很低。
 void ProjectSymbolController::enableAutoRefresh(const QString& projectFolder) {
     m_folder = projectFolder;
+    m_watchEnabled = shouldWatch(projectFolder);
     if (!m_fsWatcher) {
         m_fsWatcher = new QFileSystemWatcher(this);
         m_fsDebounce = new QTimer(this);
@@ -57,30 +60,59 @@ void ProjectSymbolController::enableAutoRefresh(const QString& projectFolder) {
             rebuild(m_folder);
         });
     }
+    if (!m_watchEnabled) {                               // 網路資料夾：清掉舊監看，不再掛新的
+        ++m_scanGeneration;
+        const QStringList old = m_fsWatcher->directories();
+        if (!old.isEmpty()) m_fsWatcher->removePaths(old);
+        return;
+    }
     rescanWatchedDirs();
 }
 
-void ProjectSymbolController::rescanWatchedDirs() {
-    if (!m_fsWatcher || m_folder.isEmpty()) return;
-    const QStringList old = m_fsWatcher->directories();
-    if (!old.isEmpty()) m_fsWatcher->removePaths(old);
+bool ProjectSymbolController::shouldWatch(const QString& folder) {
+    if (!PathKind::isNetworkPath(folder)) return true;
+    return AppSettings().value("index/watchNetworkFolders", false).toBool();
+}
 
-    // BFS + 剪枝（不進 skipDirs），並設監看上限：Windows 每個目錄佔一個
-    // ReadDirectoryChangesW 資源，超大型專案全掛監看反而拖累系統。
-    constexpr int kMaxWatchedDirs = 512;
-    QStringList dirs{m_folder};
-    QStringList queue{m_folder};
-    while (!queue.isEmpty() && dirs.size() < kMaxWatchedDirs) {
+QStringList ProjectSymbolController::watchedDirs() const {
+    return m_fsWatcher ? m_fsWatcher->directories() : QStringList();
+}
+
+QStringList ProjectSymbolController::collectWatchDirs(const QString& root, int maxDirs) {
+    QStringList dirs{root};
+    QStringList queue{root};
+    while (!queue.isEmpty() && dirs.size() < maxDirs) {
         const QString cur = queue.takeFirst();
         const QFileInfoList subs = QDir(cur).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
         for (const QFileInfo& fi : subs) {
             if (ProjectSymbolIndex::skipDirs().contains(fi.fileName())) continue;   // 剪枝
-            if (dirs.size() >= kMaxWatchedDirs) break;
+            if (dirs.size() >= maxDirs) break;
             dirs.append(fi.absoluteFilePath());
             queue.append(fi.absoluteFilePath());
         }
     }
-    m_fsWatcher->addPaths(dirs);
+    return dirs;
+}
+
+// BFS 巡訪移到背景執行緒（每層 entryInfoList 在網路分享上都是一次來回）；
+// 掛監看（addPaths）仍在主執行緒，因 QFileSystemWatcher 屬於主執行緒物件。
+void ProjectSymbolController::rescanWatchedDirs() {
+    if (!m_fsWatcher || m_folder.isEmpty() || !m_watchEnabled) return;
+    // Windows 每個目錄佔一個 ReadDirectoryChangesW 資源，超大型專案全掛監看反而拖累系統
+    constexpr int kMaxWatchedDirs = 512;
+    const int gen = ++m_scanGeneration;
+    const QString folder = m_folder;
+    auto* w = new QFutureWatcher<QStringList>(this);
+    connect(w, &QFutureWatcher<QStringList>::finished, this, [this, w, gen]() {
+        const QStringList dirs = w->result();
+        w->deleteLater();
+        if (gen != m_scanGeneration) return;            // 期間已換資料夾或再次重掃：丟棄
+        const QStringList old = m_fsWatcher->directories();
+        if (!old.isEmpty()) m_fsWatcher->removePaths(old);
+        if (!dirs.isEmpty()) m_fsWatcher->addPaths(dirs);
+        emit watchDirsUpdated();
+    });
+    w->setFuture(QtConcurrent::run(&ProjectSymbolController::collectWatchDirs, folder, kMaxWatchedDirs));
 }
 
 void ProjectSymbolController::buildSync(const QString& projectFolder) {
