@@ -12,6 +12,13 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
+# macOS 26 SDK 已移除 AGL.framework，但 Qt 6.8.3 的 FindWrapOpenGL 仍以 "-framework AGL" 連結
+# →「ld: framework 'AGL' not found」（Qt 後續版本已修正）。預先指定 WrapOpenGL_AGL 讓 find_library
+# 跳過搜尋，改連結必定存在的 OpenGL.framework（原本就會連結，重複無害）。
+if(APPLE)
+    set(WrapOpenGL_AGL "-framework OpenGL" CACHE STRING "macOS 26+ 無 AGL.framework 的替代" FORCE)
+endif()
+
 find_package(Qt6 COMPONENTS Core Gui Widgets Network Concurrent Core5Compat Qml LinguistTools REQUIRED)   # Qml：QJSEngine（腳本外掛）；LinguistTools：建置期編譯 .ts → .qm
 
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/TreeSitter.cmake)   # 語法樹高亮（tree-sitter + 文法）
