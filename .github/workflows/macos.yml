@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main ]
 
+# 暫時的診斷：失敗時把紀錄推到 ci-logs-macos 分支（修好 macOS 後移除）
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-latest
@@ -26,10 +30,33 @@ jobs:
         modules: 'qt5compat'      # 提供 Core5Compat
 
     - name: Configure CMake
-      run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+      run: |
+        set -o pipefail
+        mkdir -p ci-logs
+        cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release 2>&1 | tee ci-logs/configure.log
 
     - name: Build
-      run: cmake --build build
+      run: |
+        set -o pipefail
+        cmake --build build 2>&1 | tee ci-logs/build.log
 
     - name: Run unit tests
-      run: ctest --test-dir build --output-on-failure
+      run: |
+        set -o pipefail
+        ctest --test-dir build --output-on-failure --timeout 300 2>&1 | tee ci-logs/ctest.log
+
+    # 暫時的診斷：任何步驟失敗時，將紀錄推到 ci-logs-macos 分支
+    - name: Publish failure logs
+      if: failure()
+      run: |
+        mkdir -p ci-logs
+        { sw_vers; uname -a; sysctl -n hw.ncpu; cmake --version; } > ci-logs/env.txt 2>&1 || true
+        cp build/Testing/Temporary/LastTest.log ci-logs/ 2>/dev/null || true
+        cd ci-logs
+        git init -q
+        git config user.name "ci-logs"
+        git config user.email "ci-logs@users.noreply.github.com"
+        git checkout -q -b ci-logs-macos
+        git add -A
+        git commit -qm "macOS CI logs for ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-logs-macos
