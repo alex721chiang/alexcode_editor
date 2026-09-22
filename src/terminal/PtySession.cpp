@@ -126,7 +126,8 @@ void PtySession::stop() {
 #include <unistd.h>
 #include <sys/wait.h>
 #include <sys/ioctl.h>
-#include <poll.h>
+#include <sys/select.h>
+#include <algorithm>
 #include <csignal>
 #include <cerrno>
 
@@ -162,26 +163,29 @@ bool PtySession::start(const QString& program, const QString& workingDir, int co
     return true;
 }
 
+// 等待用 select() 而非 poll()：macOS 的 poll() 不支援裝置檔（man poll: "does not support
+// devices"），pty master 會回 POLLNVAL——舊寫法因此在 macOS 空轉、永遠讀不到輸出
+//（pty_smoke 逾時、終端機無輸出且吃滿 CPU）。select() 在 Linux/macOS 皆正確支援 pty。
 void PtySession::readerLoop() {
     std::vector<char> buf(4096);
+    const int maxFd = std::max(m_masterFd, m_wakePipe[0]);
     while (m_running && !m_stopping) {
-        pollfd fds[2];
-        fds[0] = { m_masterFd, POLLIN, 0 };
-        fds[1] = { m_wakePipe[0], POLLIN, 0 };
-        if (poll(fds, 2, -1) < 0) {
+        if (maxFd >= FD_SETSIZE) break;                  // fd_set 容量外（實務上不會發生）
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(m_masterFd, &rfds);
+        FD_SET(m_wakePipe[0], &rfds);
+        if (select(maxFd + 1, &rfds, nullptr, nullptr, nullptr) < 0) {
             if (errno == EINTR) continue;
             break;
         }
-        if (fds[1].revents) break;                       // stop() 要求退出
-        // 先讀 POLLIN 再理會 POLLHUP：Linux 上子行程結束時兩者常同時回報，
-        // 先 break 會漏掉 pty 緩衝區裡最後一批輸出（read 讀到 0/EIO 才是真結束）
-        if (fds[0].revents & POLLIN) {
+        if (FD_ISSET(m_wakePipe[0], &rfds)) break;       // stop() 要求退出
+        if (FD_ISSET(m_masterFd, &rfds)) {
+            // 子行程結束時 master 仍先可讀出緩衝區裡最後一批輸出；讀到 0/EIO 才是真結束
             const ssize_t n = read(m_masterFd, buf.data(), buf.size());
             if (n <= 0) break;
             emit dataReceived(QByteArray(buf.data(), static_cast<int>(n)));
-            continue;
         }
-        if (fds[0].revents & (POLLHUP | POLLERR)) break; // 子行程結束、slave 端全關
     }
     m_running = false;
     if (!m_stopping) emit exited();      // 由 stop() 主動關閉時不再發訊號

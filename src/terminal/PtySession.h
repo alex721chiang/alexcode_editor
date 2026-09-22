@@ -51,6 +51,6 @@ private:
 #else
     int   m_masterFd    = -1;      // pty master 端（讀寫子行程）
     pid_t m_childPid    = -1;
-    int   m_wakePipe[2] = {-1, -1};   // stop() 喚醒 poll() 用（避免 close-while-read 競態）
+    int   m_wakePipe[2] = {-1, -1};   // stop() 喚醒 select() 用（避免 close-while-read 競態）
 #endif
 };
