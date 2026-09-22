@@ -1,0 +1,34 @@
+name: Static Analysis
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  clang-tidy:
+    runs-on: ubuntu-latest
+    # 資訊性檢查：先收集既有問題，不擋合併；清理完畢後可拿掉 continue-on-error 升級為門檻
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install build dependencies
+      run: sudo apt-get update && sudo apt-get install -y ninja-build clang-tidy libgl1-mesa-dev libxkbcommon-dev
+
+    - name: Install Qt
+      uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.8.3'
+        host: 'linux'
+        target: 'desktop'
+        arch: 'linux_gcc_64'
+        modules: 'qt5compat'      # 提供 Core5Compat
+
+    - name: Configure CMake (with clang-tidy)
+      run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release -DALEXCODE_CLANG_TIDY=ON
+
+    - name: Build with clang-tidy checks
+      run: cmake --build build
