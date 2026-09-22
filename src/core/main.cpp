@@ -1,4 +1,7 @@
 #include <QApplication>
+#include <QThread>
+#include <QHash>
+#include <QWidget>
 #include <QIcon>
 #include <QFileInfo>
 #include <QTranslator>
@@ -10,9 +13,44 @@
 #include "ScreenshotHelper.h"
 #include "Theme.h"
 #include "Portable.h"
+#include "StallMonitor.h"
+
+// 事件層級的卡頓歸因：每個事件以「接收者類別」標記區段，未手動標記的耗時也能在 perf.log
+// 看出是哪類物件（例如 CodeEditor 繪製、QFutureWatcherBase 背景結果回呼）。
+class AlexApplication : public QApplication {
+public:
+    using QApplication::QApplication;
+    bool notify(QObject* receiver, QEvent* e) override {
+        StallMonitor::Scope scope(label(receiver, e));
+        return QApplication::notify(receiver, e);
+    }
+private:
+    // 「類別:事件型別」字串駐留（Scope 保存指標，需穩定位址）；以 (metaObject, 型別, 父 metaObject)
+    // 查表，熱路徑不配置記憶體。僅主執行緒標記。
+    struct Key {
+        const QMetaObject* mo; int type; const QMetaObject* parentMo;
+        bool operator==(const Key& o) const { return mo == o.mo && type == o.type && parentMo == o.parentMo; }
+    };
+    friend size_t qHash(const Key& k, size_t seed = 0) { return qHashMulti(seed, k.mo, k.type, k.parentMo); }
+    const char* label(QObject* r, QEvent* e) {
+        if (!StallMonitor::isRunning() || !r || QThread::currentThread() != thread()) return "event";
+        const QMetaObject* mo = r->metaObject();
+        // 泛用 QWidget（如 viewport）附上父物件類別，才看得出是誰的繪製
+        const QMetaObject* pmo = (mo == &QWidget::staticMetaObject && r->parent()) ? r->parent()->metaObject() : nullptr;
+        const Key k{mo, int(e->type()), pmo};
+        auto it = m_labels.constFind(k);
+        if (it == m_labels.constEnd()) {
+            QByteArray s = QByteArray(mo->className()) + ':' + QByteArray::number(k.type);
+            if (pmo) s += QByteArray("(in ") + pmo->className() + ')';
+            it = m_labels.insert(k, s);
+        }
+        return it->constData();
+    }
+    QHash<Key, QByteArray> m_labels;
+};
 
 int main(int argc, char *argv[]) {
-    QApplication a(argc, argv);
+    AlexApplication a(argc, argv);
     QApplication::setOrganizationName("AlexCode");
     QApplication::setApplicationName("AlexCodeEditor");
 
@@ -45,6 +83,10 @@ int main(int argc, char *argv[]) {
     Theme::setTheme(AppSettings().value("ui/theme", "Neon Grid").toString());
     a.setStyleSheet(Theme::stylesheet());    // 套用使用者選擇的主題（預設 Neon Grid）
     a.setWindowIcon(QIcon(":/icon.png"));
+    // UI 卡頓偵測：主執行緒卡住超過門檻時，記錄卡在哪個區段到 <dataDir>/perf.log
+    if (AppSettings().value("debug/stallLog", true).toBool())
+        StallMonitor::start(Portable::dataDir() + QStringLiteral("/perf.log"),
+                            AppSettings().value("debug/stallThresholdMs", 400).toInt());
     MainWindow w;
     w.show();
 
@@ -120,5 +162,7 @@ int main(int argc, char *argv[]) {
             a.quit();
         });
     }
-    return a.exec();
+    const int rc = a.exec();
+    StallMonitor::stop();
+    return rc;
 }

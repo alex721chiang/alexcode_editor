@@ -27,7 +27,9 @@
 class QTreeView;
 class QFileSystemModel;
 class GitFileSystemModel;
-class QFileSystemWatcher;
+class BackgroundFileWatcher;
+class QFileIconProvider;
+class QAbstractFileIconProvider;
 class QDockWidget;
 
 class MainWindow : public QMainWindow {
@@ -249,7 +251,10 @@ private:
     QTreeView* fsTree = nullptr;
     GitFileSystemModel* fsModel = nullptr;            // 2.3c：含 git 狀態染色
     QuickOpenDialog* quickOpen = nullptr;
-    QFileSystemWatcher* fileWatcher = nullptr;
+    BackgroundFileWatcher* fileWatcher = nullptr;     // 外部變更監看（背景執行緒；addPath 不卡 UI）
+    QAbstractFileIconProvider* defaultIconProvider = nullptr;   // 檔案樹原生圖示（本機資料夾用）
+    QFileIconProvider* plainIconProvider = nullptr;   // 網路資料夾用：不碰磁碟的通用圖示
+    void reloadChangedFile(CodeEditor* editor, const QString& path);   // 背景讀取後套用（合併連續變更）
     QString projectFolder;
     void setProjectFolder(const QString& folder);
     void saveSession();

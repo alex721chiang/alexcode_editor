@@ -9,6 +9,8 @@ set(LIB_SRCS
     core/RecentFilesController.cpp
     core/ScreenshotHelper.cpp
     core/PathKind.cpp
+    core/StallMonitor.cpp
+    core/BackgroundFileWatcher.cpp
     # editor：編輯器本體與周邊（高亮、配對、選取、工具）
     editor/CodeEditor.cpp
     editor/SyntaxHighlighter.cpp

@@ -1,4 +1,5 @@
 #include "ProjectSymbolController.h"
+#include "IoPool.h"
 #include "ProjectSymbolDialog.h"
 #include "TextRefs.h"
 #include <QtConcurrent>
@@ -8,11 +9,12 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QCoreApplication>
-#include <QFileSystemWatcher>
+#include "BackgroundFileWatcher.h"
 #include <QTimer>
 #include <QDir>
 #include "PathKind.h"
 #include "Portable.h"
+#include "StallMonitor.h"
 
 ProjectSymbolController::ProjectSymbolController(QWidget* dialogParent, QListWidget* refsList,
                                                  QDockWidget* refsDock, QObject* parent)
@@ -34,7 +36,7 @@ void ProjectSymbolController::rebuild(const QString& projectFolder) {
     }
     emit statusMessage(tr("正在背景索引專案符號…"), 0);
     const QString folder = projectFolder;
-    m_watcher->setFuture(QtConcurrent::run([folder]() {       // 背景掃描+解析，不卡 UI
+    m_watcher->setFuture(QtConcurrent::run(IoPool::instance(), [folder]() {       // 背景掃描+解析，不卡 UI
         ProjectSymbolIndex idx;
         idx.build(folder);
         return idx;
@@ -49,11 +51,11 @@ void ProjectSymbolController::enableAutoRefresh(const QString& projectFolder) {
     m_folder = projectFolder;
     m_watchEnabled = shouldWatch(projectFolder);
     if (!m_fsWatcher) {
-        m_fsWatcher = new QFileSystemWatcher(this);
+        m_fsWatcher = new BackgroundFileWatcher(this);
         m_fsDebounce = new QTimer(this);
         m_fsDebounce->setSingleShot(true);
         m_fsDebounce->setInterval(1500);
-        connect(m_fsWatcher, &QFileSystemWatcher::directoryChanged, this,
+        connect(m_fsWatcher, &BackgroundFileWatcher::directoryChanged, this,
                 [this](const QString&) { m_fsDebounce->start(); });
         connect(m_fsDebounce, &QTimer::timeout, this, [this]() {
             if (m_watcher && m_watcher->isRunning()) { m_fsDebounce->start(); return; }   // 建置中，稍後再試
@@ -62,8 +64,7 @@ void ProjectSymbolController::enableAutoRefresh(const QString& projectFolder) {
     }
     if (!m_watchEnabled) {                               // 網路資料夾：清掉舊監看，不再掛新的
         ++m_scanGeneration;
-        const QStringList old = m_fsWatcher->directories();
-        if (!old.isEmpty()) m_fsWatcher->removePaths(old);
+        m_fsWatcher->clear();
         return;
     }
     rescanWatchedDirs();
@@ -75,7 +76,7 @@ bool ProjectSymbolController::shouldWatch(const QString& folder) {
 }
 
 QStringList ProjectSymbolController::watchedDirs() const {
-    return m_fsWatcher ? m_fsWatcher->directories() : QStringList();
+    return m_fsWatcher ? m_fsWatcher->paths() : QStringList();
 }
 
 QStringList ProjectSymbolController::collectWatchDirs(const QString& root, int maxDirs) {
@@ -94,8 +95,7 @@ QStringList ProjectSymbolController::collectWatchDirs(const QString& root, int m
     return dirs;
 }
 
-// BFS 巡訪移到背景執行緒（每層 entryInfoList 在網路分享上都是一次來回）；
-// 掛監看（addPaths）仍在主執行緒，因 QFileSystemWatcher 屬於主執行緒物件。
+// BFS 巡訪與掛監看都在背景執行緒（每層 entryInfoList、每個 addPath 在網路分享上都是網路來回）。
 void ProjectSymbolController::rescanWatchedDirs() {
     if (!m_fsWatcher || m_folder.isEmpty() || !m_watchEnabled) return;
     // Windows 每個目錄佔一個 ReadDirectoryChangesW 資源，超大型專案全掛監看反而拖累系統
@@ -107,12 +107,12 @@ void ProjectSymbolController::rescanWatchedDirs() {
         const QStringList dirs = w->result();
         w->deleteLater();
         if (gen != m_scanGeneration) return;            // 期間已換資料夾或再次重掃：丟棄
-        const QStringList old = m_fsWatcher->directories();
-        if (!old.isEmpty()) m_fsWatcher->removePaths(old);
-        if (!dirs.isEmpty()) m_fsWatcher->addPaths(dirs);
+        STALL_SCOPE("symbol.watcher.addPaths");
+        m_fsWatcher->clear();
+        m_fsWatcher->addPaths(dirs);
         emit watchDirsUpdated();
     });
-    w->setFuture(QtConcurrent::run(&ProjectSymbolController::collectWatchDirs, folder, kMaxWatchedDirs));
+    w->setFuture(QtConcurrent::run(IoPool::instance(), &ProjectSymbolController::collectWatchDirs, folder, kMaxWatchedDirs));
 }
 
 void ProjectSymbolController::buildSync(const QString& projectFolder) {

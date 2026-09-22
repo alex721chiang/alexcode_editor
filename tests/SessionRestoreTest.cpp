@@ -16,6 +16,9 @@
 #include <QDir>
 #include <QTabWidget>
 #include <QCoreApplication>
+#include <QThreadPool>
+#include <QtConcurrent>
+#include <atomic>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -109,6 +112,8 @@ protected:
         return qobject_cast<CodeEditor*>(w.tabWidget->widget(i));
     }
     static bool pending(CodeEditor* e) { return e && e->property("pendingLoad").toBool(); }
+    static void startLoad(MainWindow& w, CodeEditor* e) { w.startPendingLoad(e); }
+    static void externalChange(MainWindow& w, const QString& p) { w.onFileChangedExternally(p); }
 };
 
 // 非作用中分頁只建佔位、完全不讀檔；作用中分頁於背景載入
@@ -225,5 +230,45 @@ TEST_F(MainWindowSessionTest, ReopeningOpenFileDoesNotReadAgain) {
     fifos << a;
     open(w, a);                                                       // 舊版會在此卡死
     EXPECT_EQ(tabs(w)->count(), before);
+}
+// 卡在網路 I/O 的背景讀檔不可佔用 Qt 全域執行緒池（Qt 繪圖會用它；被佔滿時 UI 卡死）
+TEST_F(MainWindowSessionTest, BlockedLoadsDoNotStarveGlobalThreadPool) {
+    const int n = QThreadPool::globalInstance()->maxThreadCount() + 1;
+    QJsonArray tabsJson;
+    for (int i = 0; i < n; ++i) tabsJson.append(tab(makeFifo(QString("hung%1.log").arg(i))));
+    writeSession(tabsJson, 0);
+    MainWindow w;
+    restore(w);
+    ASSERT_TRUE(spinUntil([&] { return !restoring(w); }));
+    for (int i = 0; i < n; ++i) startLoad(w, editorAt(w, i));   // n 個讀檔全部卡住
+    QThread::msleep(100);
+
+    std::atomic<bool> ran{false};
+    auto f = QtConcurrent::run([&ran] { ran = true; });         // 全域池仍有空位
+    EXPECT_TRUE(spinUntil([&] { return ran.load(); }, 2000));
+    f.waitForFinished();
+}
+
+// 外部變更（如 tail 模式的 log 追加）於背景重讀：檔案卡住時主執行緒仍即時返回
+TEST_F(MainWindowSessionTest, ExternalChangeReloadsInBackground) {
+    const QString p = makeFile("live.log", "one\n");
+    MainWindow w;
+    open(w, p);
+    CodeEditor* e = editorAt(w, tabs(w)->count() - 1);
+    ASSERT_EQ(e->toPlainText(), "one\n");
+
+    QFile::remove(p);
+    ASSERT_EQ(::mkfifo(QFile::encodeName(p).constData(), 0600), 0);   // 下次讀取會卡住
+    fifos << p;
+    QElapsedTimer t;
+    t.start();
+    externalChange(w, p);                                             // 舊版在此同步讀檔而卡死
+    EXPECT_LT(t.elapsed(), 1000);
+    // 移除檔案/建 FIFO 本身也會觸發監看而排入重讀；連續變更會合併為「讀完再讀最新一次」，
+    // 所以持續供應內容直到套用
+    EXPECT_TRUE(spinUntil([&] {
+        unblockFifo(p, "one\ntwo\n", 20);
+        return e->toPlainText() == "one\ntwo\n";
+    }));
 }
 #endif

@@ -1,4 +1,5 @@
 #include "MarkdownLinkController.h"
+#include "IoPool.h"
 #include "GraphView.h"
 #include <QMainWindow>
 #include <QDockWidget>
@@ -57,7 +58,7 @@ void MarkdownLinkController::startBuild() {
     if (m_buildWatcher->isRunning()) { m_rerun = true; return; }
     m_stale = false;
     const QString folder = m_folder;
-    m_buildWatcher->setFuture(QtConcurrent::run([folder]() {
+    m_buildWatcher->setFuture(QtConcurrent::run(IoPool::instance(), [folder]() {
         MarkdownLinkIndex idx;
         idx.build(folder);
         return idx;

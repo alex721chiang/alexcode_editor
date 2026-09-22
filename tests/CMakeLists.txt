@@ -25,11 +25,11 @@ add_test(NAME AlexCodeUnitTests COMMAND AlexCodeTests)   # 讓 ctest 能跑（CI
 # Widget 測試：連 alexcode_lib（含 CodeEditor 全依賴），自帶 QApplication(offscreen) main
 # Qt6::Test 提供 QTest::keyClick 等鍵盤模擬（多游標測試用）
 find_package(Qt6 COMPONENTS Test REQUIRED)
-add_executable(AlexCodeWidgetTests WidgetTestMain.cpp EditorOpsTest.cpp PluginManagerTest.cpp AiCompletionTest.cpp MarkdownLinkControllerTest.cpp ProjectSymbolControllerTest.cpp SessionRestoreTest.cpp)
-target_link_libraries(AlexCodeWidgetTests PRIVATE gtest alexcode_lib Qt6::Test)
+add_executable(AlexCodeWidgetTests WidgetTestMain.cpp EditorOpsTest.cpp PluginManagerTest.cpp AiCompletionTest.cpp MarkdownLinkControllerTest.cpp ProjectSymbolControllerTest.cpp SessionRestoreTest.cpp ResponsivenessTest.cpp)
+target_link_libraries(AlexCodeWidgetTests PRIVATE gtest alexcode_lib Qt6::Test Qt6::Concurrent)
 add_test(NAME AlexCodeWidgetTests COMMAND AlexCodeWidgetTests)
 # 無頭 LSP 整合煙霧測試（需系統已安裝 clangd；手動執行 ./tests/lsp_smoke）
-add_executable(lsp_smoke lsp_smoke.cpp ../src/lsp/LspProtocol.cpp ../src/lsp/LspClient.cpp)
+add_executable(lsp_smoke lsp_smoke.cpp ../src/lsp/LspProtocol.cpp ../src/lsp/LspClient.cpp ../src/core/PathKind.cpp)
 set_target_properties(lsp_smoke PROPERTIES AUTOMOC ON)
 target_include_directories(lsp_smoke PRIVATE ${ALEXCODE_SRC_DIRS})
 target_link_libraries(lsp_smoke PRIVATE Qt6::Core)

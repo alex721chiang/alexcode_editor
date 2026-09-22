@@ -59,6 +59,14 @@ static QString unescapeMountField(const QByteArray& f) {
 bool isNetworkPath(const QString& path) {
     if (path.isEmpty()) return false;
     if (isUncPath(path)) return true;
+    // 自動偵測不到的網路路徑（DFS、特殊 FUSE…）可用環境變數指定前綴，以 ';' 分隔
+    const QString extra = qEnvironmentVariable("ALEXCODE_NETWORK_PREFIXES");
+    const QString clean = QDir::cleanPath(path);
+    for (const QString& pre : extra.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
+        const QString root = QDir::cleanPath(pre.trimmed());
+        if (clean.compare(root, Qt::CaseInsensitive) == 0
+            || clean.startsWith(root + QLatin1Char('/'), Qt::CaseInsensitive)) return true;
+    }
 #if defined(Q_OS_WIN)
     // 對應磁碟機（Z: → \\server\share）：GetDriveTypeW 只查本機對應表，不連線
     if (path.size() >= 2 && path[1] == QLatin1Char(':')) {

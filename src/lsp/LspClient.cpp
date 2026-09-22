@@ -1,4 +1,5 @@
 #include "LspClient.h"
+#include "PathKind.h"
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QCoreApplication>
@@ -17,7 +18,9 @@ LspClient::LspClient(const QString& command, const QStringList& args,
 
 void LspClient::start() {
     if (m_proc.state() != QProcess::NotRunning) return;
-    m_proc.setWorkingDirectory(m_rootPath);
+    // 網路分享上的根目錄不設為工作目錄：QProcess 啟動時由主執行緒切換/驗證目錄會卡住 UI。
+    // 語言伺服器以 initialize 的 rootUri 得知專案根目錄，不依賴工作目錄。
+    if (!PathKind::isNetworkPath(m_rootPath)) m_proc.setWorkingDirectory(m_rootPath);
 
     // initialize 握手須等行程進入 Running（QProcess::started），否則 write 會被丟棄
     connect(&m_proc, &QProcess::started, this, [this]() {

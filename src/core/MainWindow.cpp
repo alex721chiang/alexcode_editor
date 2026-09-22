@@ -31,10 +31,13 @@
 #include <QShortcut>
 #include <QTreeView>
 #include <QFileSystemModel>
-#include <QFileSystemWatcher>
+#include "BackgroundFileWatcher.h"
+#include <QFileIconProvider>
 #include <QtConcurrent>
 #include <QFutureWatcher>
 #include "PathKind.h"
+#include "IoPool.h"
+#include "StallMonitor.h"
 #include <QStandardPaths>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -110,6 +113,20 @@ public:
                 return QColor(*it == QLatin1Char('?') ? Theme::GIT_ADDED : Theme::GIT_MODIFIED);
         }
         return QFileSystemModel::data(idx, role);
+    }
+};
+
+// 網路資料夾用的檔案樹圖示：只依（已快取的）是否為目錄給通用圖示，不查 MIME / 殼層圖示。
+// 預設 provider 會對每個檔做 MIME 偵測（讀檔頭）與 Windows SHGetFileInfo，部分在主執行緒
+// 執行；在網路分享上每個檔都是網路來回，是 QFileSystemModel 在網路磁碟上卡頓的主因。
+class PlainFileIconProvider : public QFileIconProvider {
+public:
+    QIcon icon(IconType t) const override { return QFileIconProvider::icon(t); }
+    QIcon icon(const QFileInfo& info) const override {
+        return QFileIconProvider::icon(info.isDir() ? QFileIconProvider::Folder : QFileIconProvider::File);
+    }
+    QString type(const QFileInfo& info) const override {
+        return info.isDir() ? QStringLiteral("Folder") : QStringLiteral("File");
     }
 };
 
@@ -292,6 +309,7 @@ void MainWindow::applyFontToAllTabs(const QFont& font) {
 }
 
 void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& filePath) {
+    STALL_SCOPE("applyHighlighter");
     if (!editor) return;
     const SyntaxHighlighter::Language lang = SyntaxHighlighter::detectLanguage(filePath);
 
@@ -315,6 +333,7 @@ void MainWindow::applyHighlighterForPath(CodeEditor* editor, const QString& file
 // 建立編輯器分頁（統一入口，集中接線）
 // ----------------------------------------------------------------
 CodeEditor* MainWindow::createEditorTab(const QString& title) {
+    STALL_SCOPE("createEditorTab");
     CodeEditor* editor = new CodeEditor(this);
     editor->setFont(defaultEditorFont);
     editor->setAIProvider(aiProvider);
@@ -1282,6 +1301,8 @@ void MainWindow::setupUI() {
     projectDock = new QDockWidget("EXPLORER", this);
     projectDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
     fsModel = new GitFileSystemModel(this);
+    defaultIconProvider = fsModel->iconProvider();
+    plainIconProvider = new PlainFileIconProvider;   // 生命週期同程式（QFileSystemModel 不擁有 provider）
     fsModel->setFilter(QDir::AllDirs | QDir::Files | QDir::NoDotAndDotDot);
     fsTree = new QTreeView(this);
     fsTree->setModel(fsModel);
@@ -1297,8 +1318,8 @@ void MainWindow::setupUI() {
     quickOpen = new QuickOpenDialog(this);
     connect(quickOpen, &QuickOpenDialog::fileChosen, this, &MainWindow::openFileByPath);
 
-    fileWatcher = new QFileSystemWatcher(this);
-    connect(fileWatcher, &QFileSystemWatcher::fileChanged,
+    fileWatcher = new BackgroundFileWatcher(this);
+    connect(fileWatcher, &BackgroundFileWatcher::fileChanged,
             this, &MainWindow::onFileChangedExternally);
 
     // ---------- Markdown 預覽 ----------
@@ -1562,6 +1583,7 @@ void MainWindow::setupStatusBar() {
 }
 
 void MainWindow::updateStatusBar() {
+    STALL_SCOPE("updateStatusBar");
     CodeEditor* editor = activeEditor();
     if (!editor || !statusLineCol) return;
     QTextCursor c = editor->textCursor();
@@ -1618,6 +1640,7 @@ void MainWindow::newFile() {
 
 
 void MainWindow::syncSplitView() {
+    STALL_SCOPE("syncSplitView");
     if (!splitDock || !splitDock->isVisible()) return;
     CodeEditor* e = activeEditor();
     splitEditor->setDocument(e ? e->document() : splitOwnDoc);
@@ -1625,6 +1648,7 @@ void MainWindow::syncSplitView() {
 }
 
 void MainWindow::refreshMarkdownPreview() {
+    STALL_SCOPE("refreshMarkdownPreview");
     if (!mdDock || !mdDock->isVisible()) return;
     CodeEditor* e = activeEditor();
     const QString raw = e ? e->toPlainText() : QString();
@@ -1691,6 +1715,7 @@ void MainWindow::openFile() {
 }
 
 void MainWindow::openFileByPath(const QString& fileName) {
+    STALL_SCOPE("openFileByPath");
     // 已開啟 → 直接切換，不重讀（網路檔可省一次完整讀取）
     for (int i = 0; i < tabWidget->count(); ++i) {
         CodeEditor* editor = qobject_cast<CodeEditor*>(tabWidget->widget(i));
@@ -1726,6 +1751,7 @@ void MainWindow::openFileByPath(const QString& fileName) {
 
 // 把已讀入/解碼的內容套進分頁：大檔分級、屬性、高亮。前景開檔與背景延遲載入共用。
 void MainWindow::applyLoadedFile(CodeEditor* newEditor, const QString& fileName, const FileLoad::Result& r) {
+    STALL_SCOPE("applyLoadedFile");
     QFileInfo fileInfo(fileName);
 
     // 大檔分級降級（閾值可在偏好設定調整，取代過去單一 50MB 門檻）：
@@ -1750,7 +1776,7 @@ void MainWindow::applyLoadedFile(CodeEditor* newEditor, const QString& fileName,
     }
     newEditor->setAssistEnabled(!assistOff);
     newEditor->setProperty("bigFile", highlightOff);
-    newEditor->setPlainText(r.text);
+    { STALL_SCOPE("editor.setPlainText"); newEditor->setPlainText(r.text); }
     newEditor->document()->setModified(false);
 
     newEditor->setProperty("filePath", fileName);
@@ -1768,19 +1794,22 @@ void MainWindow::applyLoadedFile(CodeEditor* newEditor, const QString& fileName,
 // （每檔 2 個 git 子行程）+ 外部變更監看。以 "activated" 屬性守衛，確保每分頁只做一次。
 // 仍是佔位（尚未讀檔）的分頁：先背景載入，載入完成後再回到這裡啟用。
 void MainWindow::ensureEditorActivated(CodeEditor* editor) {
+    STALL_SCOPE("ensureEditorActivated");
     if (!editor) return;
     if (editor->property("pendingLoad").toBool()) { startPendingLoad(editor); return; }
     if (editor->property("activated").toBool()) return;
     const QString path = editor->property("filePath").toString();
     if (path.isEmpty()) return;                      // Untitled / 僅備份的分頁：無事可做，且不標記已啟用
     editor->setProperty("activated", true);
-    if (fileWatcher && !fileWatcher->files().contains(path)) fileWatcher->addPath(path);
+    if (fileWatcher) fileWatcher->addPath(path);   // 背景執行緒註冊，不在主執行緒碰網路
     if (!editor->assistEnabled()) return;            // 大檔降級：維持停用 LSP / Git（與開檔時一致）
     if (!lspController->lsp()->languageIdForFile(path).isEmpty()) {
         editor->setLspEnabled(true);
+        STALL_SCOPE("lsp.documentOpened");
         lspController->lsp()->documentOpened(path, editor->toPlainText());
     }
     if (!gitAllowedFor(path)) return;
+    STALL_SCOPE("git.fetchHead+Blame");
     gitGutterController->fetchHead(path);             // Git gutter 行狀態
     gitGutterController->fetchBlame(path);            // 狀態列行內 blame
 }
@@ -1817,10 +1846,11 @@ void MainWindow::startPendingLoad(CodeEditor* editor) {
         w->deleteLater();
         if (guard) finishPendingLoad(guard, r);       // 分頁在載入期間被關閉：丟棄結果
     });
-    w->setFuture(QtConcurrent::run(&FileLoad::load, path));   // 網路檔在背景執行緒讀，不卡 UI
+    w->setFuture(QtConcurrent::run(IoPool::instance(), &FileLoad::load, path));   // 網路檔在背景執行緒讀，不卡 UI
 }
 
 void MainWindow::finishPendingLoad(CodeEditor* editor, const FileLoad::Result& r) {
+    STALL_SCOPE("finishPendingLoad");
     editor->setProperty("loading", false);
     const QString path = editor->property("filePath").toString();
     if (!r.ok) {
@@ -1836,7 +1866,7 @@ void MainWindow::finishPendingLoad(CodeEditor* editor, const FileLoad::Result& r
     editor->setPlaceholderText(QString());
     editor->setReadOnly(false);
     applyLoadedFile(editor, path, r);
-    applyTabState(editor, state);
+    { STALL_SCOPE("applyTabState"); applyTabState(editor, state); }
     statusBar()->showMessage("Opened " + path, 3000);
     if (editor == activeEditor()) ensureEditorActivated(editor);
 }
@@ -2343,20 +2373,27 @@ void MainWindow::openFolder() {
 }
 
 void MainWindow::setProjectFolder(const QString& folder) {
+    STALL_SCOPE("setProjectFolder");
     projectFolder = folder;
-    fsModel->setRootPath(folder);
-    fsTree->setRootIndex(fsModel->index(folder));
+    projectIsNetwork = PathKind::isNetworkPath(folder);
+    // 網路資料夾：檔案樹不查 MIME/殼層圖示、不解析捷徑/符號連結、不讀 desktop.ini、
+    // 不自行監看目錄變更（QFileSystemModel 的監看在主執行緒註冊，每個展開的目錄都是網路來回）
+    fsModel->setIconProvider(projectIsNetwork ? plainIconProvider : defaultIconProvider);
+    fsModel->setOption(QFileSystemModel::DontWatchForChanges, projectIsNetwork);
+    fsModel->setOption(QFileSystemModel::DontResolveSymlinks, projectIsNetwork);
+    fsModel->setOption(QFileSystemModel::DontUseCustomDirectoryIcons, projectIsNetwork);
+    { STALL_SCOPE("fsModel.setRootPath"); fsModel->setRootPath(folder); }
+    { STALL_SCOPE("fsTree.setRootIndex"); fsTree->setRootIndex(fsModel->index(folder)); }
     projectDock->setWindowTitle("EXPLORER — " + QFileInfo(folder).fileName().toUpper());
     projectDock->show();
-    quickOpen->setRootFolder(folder);
+    { STALL_SCOPE("quickOpen.setRootFolder"); quickOpen->setRootFolder(folder); }
     // 網路分享上 git 很慢：狀態輪詢由 30s 放寬為 120s；network/disableGit=true 則完全不跑
-    projectIsNetwork = PathKind::isNetworkPath(folder);
     if (gitTimer) gitTimer->setInterval(projectIsNetwork ? 120000 : 30000);
     updateGitStatus();
     if (gitTimer) gitTimer->start();
 
     // LSP：根目錄改變 → 伺服器重啟，已開啟的文件重新 didOpen
-    lspController->lsp()->setRootPath(folder);
+    { STALL_SCOPE("lsp.setRootPath"); lspController->lsp()->setRootPath(folder); }
     for (int i = 0; i < tabWidget->count(); ++i) {
         auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i));
         if (!e || !e->lspEnabled()) continue;
@@ -2365,9 +2402,9 @@ void MainWindow::setProjectFolder(const QString& folder) {
     }
     lspStatusController->update(activeEditor());
 
-    mdLinkController->rebuildIndex(projectFolder, currentFilePath());   // 重建 Markdown 連結關係圖
-    symbolController->rebuild(projectFolder);            // 建立專案符號索引（Source Insight 風）
-    symbolController->enableAutoRefresh(projectFolder);  // 外部變更（git pull 等）自動增量更新索引
+    { STALL_SCOPE("mdLink.rebuildIndex"); mdLinkController->rebuildIndex(projectFolder, currentFilePath()); }  // 重建 Markdown 連結關係圖
+    { STALL_SCOPE("symbol.rebuild"); symbolController->rebuild(projectFolder); }  // 建立專案符號索引（Source Insight 風）
+    { STALL_SCOPE("symbol.enableAutoRefresh"); symbolController->enableAutoRefresh(projectFolder); }  // 外部變更（git pull 等）自動增量更新索引
     statusBar()->showMessage("Folder: " + folder, 3000);
 }
 
@@ -2420,6 +2457,7 @@ void MainWindow::showGoToSymbol() {
 
 // 麵包屑：檔 > 包含游標所在行的（巢狀）類別/函式，可點擊跳轉。
 void MainWindow::updateBreadcrumb() {
+    STALL_SCOPE("updateBreadcrumb");
     if (!breadcrumbLabel) return;
     CodeEditor* e = activeEditor();
     if (!e) { breadcrumbLabel->clear(); return; }
@@ -2447,17 +2485,16 @@ void MainWindow::updateBreadcrumb() {
 // 外部變更偵測 + tail 模式
 // ----------------------------------------------------------------
 void MainWindow::onFileChangedExternally(const QString& path) {
+    STALL_SCOPE("onFileChangedExternally");
     // 找到對應分頁
     CodeEditor* editor = nullptr;
     for (int i = 0; i < tabWidget->count(); ++i) {
         auto e = qobject_cast<CodeEditor*>(tabWidget->widget(i));
         if (e && e->property("filePath").toString() == path) { editor = e; break; }
     }
-    // 檔案可能被覆寫重建，重新加回監看
-    if (QFileInfo::exists(path) && !fileWatcher->files().contains(path))
-        fileWatcher->addPath(path);
+    // 被覆寫重建的檔案由 BackgroundFileWatcher 在背景自動重新加回監看
     symbolController->updateFile(projectFolder, path);   // 外部變更 → 增量更新符號索引
-    if (!editor || !QFileInfo::exists(path)) return;
+    if (!editor) return;
 
     const bool tail = tailAction && tailAction->isChecked();
     if (editor->document()->isModified() && !tail) {
@@ -2466,34 +2503,62 @@ void MainWindow::onFileChangedExternally(const QString& path) {
                 .arg(QFileInfo(path).fileName()),
             QMessageBox::Yes | QMessageBox::No);
         if (ret != QMessageBox::Yes) return;
+        editor->setProperty("reloadApproved", true);         // 使用者同意放棄變更
     }
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
-    const QString text = QTextStream(&file).readAll();
-    file.close();
+    reloadChangedFile(editor, path);
+}
 
-    // 保留游標與捲動位置（tail 模式則捲到底）
-    const int cursorPos = editor->textCursor().position();
-    const int scrollVal = editor->verticalScrollBar()->value();
-    editor->setPlainText(text);
-    editor->document()->setModified(false);
-    updateTabTitle(editor);
-    if (tail) {
-        QTextCursor c = editor->textCursor();
-        c.movePosition(QTextCursor::End);
-        editor->setTextCursor(c);
-        editor->verticalScrollBar()->setValue(editor->verticalScrollBar()->maximum());
-        // 5.5 即時篩選聯動：tail 重載後，若篩選條件存在則重套（新進行立即反映於結果與密度條）
-        if (editor == activeEditor() && !filterInput->text().trimmed().isEmpty())
-            runFilter();
-    } else {
-        QTextCursor c = editor->textCursor();
-        c.setPosition(qMin(cursorPos, editor->document()->characterCount() - 1));
-        editor->setTextCursor(c);
-        editor->verticalScrollBar()->setValue(scrollVal);
-    }
-    statusBar()->showMessage("Reloaded " + QFileInfo(path).fileName(), 2000);
+// 外部變更的重新載入：於背景執行緒讀檔（網路上的 log 在 tail 模式會頻繁變更，
+// 原本每次都在主執行緒整檔重讀）。讀取中又有變更時只標記，完成後再讀一次最新內容。
+void MainWindow::reloadChangedFile(CodeEditor* editor, const QString& path) {
+    if (editor->property("reloading").toBool()) { editor->setProperty("reloadAgain", true); return; }
+    editor->setProperty("reloading", true);
+    auto* w = new QFutureWatcher<FileLoad::Result>(this);
+    QPointer<CodeEditor> guard(editor);
+    connect(w, &QFutureWatcher<FileLoad::Result>::finished, this, [this, w, guard, path]() {
+        const FileLoad::Result r = w->result();
+        w->deleteLater();
+        if (!guard) return;
+        CodeEditor* editor = guard;
+        editor->setProperty("reloading", false);
+        if (editor->property("reloadAgain").toBool()) {       // 期間又變更：直接讀最新的
+            editor->setProperty("reloadAgain", false);
+            reloadChangedFile(editor, path);
+            return;
+        }
+        const bool approved = editor->property("reloadApproved").toBool();
+        editor->setProperty("reloadApproved", false);
+        if (!r.ok) return;                                    // 已刪除/暫時讀不到
+        const bool tail = tailAction && tailAction->isChecked();
+        // 讀檔期間使用者開始編輯：未經同意不覆寫（下次外部變更會再詢問）
+        if (!tail && !approved && editor->document()->isModified()) return;
+        STALL_SCOPE("reloadChangedFile.apply");
+        const QString text = r.text;
+
+        // 保留游標與捲動位置（tail 模式則捲到底）
+        const int cursorPos = editor->textCursor().position();
+        const int scrollVal = editor->verticalScrollBar()->value();
+        editor->setPlainText(text);
+        editor->document()->setModified(false);
+        updateTabTitle(editor);
+        if (tail) {
+            QTextCursor c = editor->textCursor();
+            c.movePosition(QTextCursor::End);
+            editor->setTextCursor(c);
+            editor->verticalScrollBar()->setValue(editor->verticalScrollBar()->maximum());
+            // 5.5 即時篩選聯動：tail 重載後，若篩選條件存在則重套（新進行立即反映於結果與密度條）
+            if (editor == activeEditor() && !filterInput->text().trimmed().isEmpty())
+                runFilter();
+        } else {
+            QTextCursor c = editor->textCursor();
+            c.setPosition(qMin(cursorPos, editor->document()->characterCount() - 1));
+            editor->setTextCursor(c);
+            editor->verticalScrollBar()->setValue(scrollVal);
+        }
+        statusBar()->showMessage("Reloaded " + QFileInfo(path).fileName(), 2000);
+    });
+    w->setFuture(QtConcurrent::run(IoPool::instance(), &FileLoad::load, path));
 }
 
 // ----------------------------------------------------------------
@@ -2506,6 +2571,7 @@ QString MainWindow::sessionDir() const {
 }
 
 void MainWindow::saveSession() {
+    STALL_SCOPE("saveSession");
     QJsonArray tabs;
     const QString backupDir = sessionDir() + "/backup";
     // 清舊備份
@@ -2598,7 +2664,7 @@ void MainWindow::restoreSession() {
             w->deleteLater();
             if (ok && projectFolder.isEmpty()) setProjectFolder(folder);   // 期間使用者已自行開資料夾則不覆蓋
         });
-        w->setFuture(QtConcurrent::run([folder]() { return QFileInfo(folder).isDir(); }));
+        w->setFuture(QtConcurrent::run(IoPool::instance(), [folder]() { return QFileInfo(folder).isDir(); }));
     }
 
     // 逐分頁還原：一律不在主執行緒碰原檔（可能在網路分享上）。
@@ -3128,6 +3194,7 @@ void MainWindow::runBuildTask() {
 }
 
 void MainWindow::updateGitStatus() {
+    STALL_SCOPE("updateGitStatus");
     // Git gutter：順帶刷新當前分頁的 HEAD 快取（commit 後標示自動消除）
     if (CodeEditor* e = activeEditor()) {
         const QString p = e->property("filePath").toString();

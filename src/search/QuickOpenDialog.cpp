@@ -1,4 +1,5 @@
 #include "QuickOpenDialog.h"
+#include "IoPool.h"
 #include "FilterEngine.h"
 #include "Theme.h"
 #include <QVBoxLayout>
@@ -40,7 +41,7 @@ void QuickOpenDialog::setRootFolder(const QString& folder) {
     rootFolder = folder;
     fileIndex.clear();
     if (folder.isEmpty()) return;
-    indexWatcher->setFuture(QtConcurrent::run(&QuickOpenDialog::buildIndex, folder));
+    indexWatcher->setFuture(QtConcurrent::run(IoPool::instance(), &QuickOpenDialog::buildIndex, folder));
 }
 
 QStringList QuickOpenDialog::buildIndex(const QString& folder) {

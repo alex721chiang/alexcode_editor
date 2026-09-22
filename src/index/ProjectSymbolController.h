@@ -8,7 +8,7 @@ class QListWidget;
 class QDockWidget;
 class QWidget;
 class ProjectSymbolDialog;
-class QFileSystemWatcher;
+class BackgroundFileWatcher;
 class QTimer;
 
 // 從 MainWindow 拆出的「專案符號索引」子系統：背景/同步建索引、Ctrl+T 符號搜尋、
@@ -60,7 +60,7 @@ private:
     QDockWidget* m_refsDock = nullptr;
 
     // 資料夾監看（Phase 3）：目錄內新增/刪除/更名 → debounce → 增量 rebuild
-    QFileSystemWatcher* m_fsWatcher = nullptr;
+    BackgroundFileWatcher* m_fsWatcher = nullptr;   // 背景執行緒監看（addPaths 不在主執行緒做網路 I/O）
     QTimer* m_fsDebounce = nullptr;
     QString m_folder;
     bool m_watchEnabled = false;                   // 目前資料夾是否要監看（網路資料夾預設否）

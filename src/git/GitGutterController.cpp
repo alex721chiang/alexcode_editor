@@ -10,7 +10,6 @@ void GitGutterController::fetchHead(const QString& path) {
     if (path.isEmpty() || m_untracked.contains(path)) return;
     const QFileInfo fi(path);
     auto* p = new QProcess(this);
-    p->setWorkingDirectory(fi.absolutePath());
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, p, path](int code, QProcess::ExitStatus) {
         if (code == 0) {
@@ -24,16 +23,17 @@ void GitGutterController::fetchHead(const QString& path) {
         }
         p->deleteLater();
     });
-    // "HEAD:./檔名" 相對於工作目錄解析，免去計算 repo 內相對路徑
-    p->start("git", {"show", "HEAD:./" + fi.fileName()});
+    // "HEAD:./檔名" 相對於（-C 指定的）目錄解析，免去計算 repo 內相對路徑。
+    // 用 -C 而非 setWorkingDirectory：後者在啟動子行程時由主執行緒切換/驗證目錄，
+    // 網路分享上會卡住 UI；-C 讓 git 子行程自己切換。
+    p->start("git", {"-C", fi.absolutePath(), "show", "HEAD:./" + fi.fileName()});
 }
 
 void GitGutterController::fetchBlame(const QString& path) {
     if (path.isEmpty() || m_untracked.contains(path) || m_blameInFlight.contains(path)) return;
     m_blameInFlight.insert(path);
     const QFileInfo fi(path);
-    auto* p = new QProcess(this);
-    p->setWorkingDirectory(fi.absolutePath());
+    auto* p = new QProcess(this);                    // 不設 working directory（見 fetchHead 的 -C 說明）
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, p, path](int code, QProcess::ExitStatus) {
         m_blameInFlight.remove(path);
@@ -43,7 +43,7 @@ void GitGutterController::fetchBlame(const QString& path) {
         }
         p->deleteLater();
     });
-    p->start("git", {"blame", "--line-porcelain", "--", fi.fileName()});
+    p->start("git", {"-C", fi.absolutePath(), "blame", "--line-porcelain", "--", fi.fileName()});
 }
 
 void GitGutterController::recompute(CodeEditor* editor) const {

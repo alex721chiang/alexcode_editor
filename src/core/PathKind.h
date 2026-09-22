@@ -12,6 +12,7 @@ bool isNetworkFsType(const QString& fsType);     // cifs / smbfs / nfs / sshfs �
 // 掛載表（掛載點, 檔案系統類型）中，取最長前綴符合者的類型；找不到回空字串
 QString fsTypeForPath(const QString& absPath, const QList<QPair<QString, QString>>& mounts);
 
-bool isNetworkPath(const QString& path);         // 平台實作（Windows / Linux / macOS）
+bool isNetworkPath(const QString& path);         // 平台實作（Windows / Linux / macOS）；
+                                                 // 另可用環境變數 ALEXCODE_NETWORK_PREFIXES 指定前綴
 
 } // namespace PathKind

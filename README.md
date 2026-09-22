@@ -168,6 +168,8 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 - 大檔仍沿用分級降級（`editor/highlightMaxMB`、`editor/assistMaxMB`）自動關閉高亮／LSP／即時 Git。
 - **網路分享（SMB/NFS）友善**：還原工作階段時不在主執行緒碰原檔——非作用中分頁只建佔位，切到才於背景讀檔（讀不到時保留分頁，切回即重試）；未存檔分頁由本機快照還原並沿用原編碼／換行；專案資料夾存在檢查、Markdown 連結索引（僅在 Backlinks／Graph 開啟時建立）、資料夾監看清單皆改為背景執行。
 - 網路路徑相關設定（`settings.ini`）：`index/watchNetworkFolders`（預設 `false`，網路資料夾不掛目錄監看）、`network/disableGit`（預設 `false`；設為 `true` 則網路路徑不跑 git gutter／blame／狀態）。網路專案的 git 狀態輪詢自動由 30 秒放寬為 120 秒。
+- **開啟後不再 Not Responding**：檔案監看（外部變更、符號索引的資料夾監看）移至專屬背景執行緒註冊；背景讀檔/掃描改用專屬 I/O 執行緒池，不再佔用 Qt 繪圖也會用到的全域執行緒池（被佔滿時 UI 會卡在繪圖）；git / 語言伺服器不再以網路資料夾當子行程工作目錄；外部變更（含 tail 模式）改背景重讀並合併連續變更；網路資料夾的檔案樹改用不碰磁碟的通用圖示並停用其自身監看。
+- **卡頓診斷**：主執行緒卡住超過 400ms 時，於資料目錄的 `perf.log` 記錄卡頓時間與卡在哪個區段（例：`stall 812 ms @ setProjectFolder > fsModel.setRootPath (71%)`）。設定 `debug/stallLog=false` 關閉、`debug/stallThresholdMs` 調整門檻。自動偵測不到的網路路徑可用環境變數 `ALEXCODE_NETWORK_PREFIXES`（以 `;` 分隔的路徑前綴）指定。
 
 ## 建置
 
