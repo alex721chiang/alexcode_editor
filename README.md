@@ -1,4 +1,4 @@
-# AlexCode — Neon Edition (v5.0)
+# AlexCode — Neon Edition (v5.1)
 
 Qt 6 程式碼編輯器，目標是接近 Notepad++ 的日常編輯體驗，並整合 LSP 語言伺服器、Git、
 強大的 log 行篩選與多套未來感主題。
