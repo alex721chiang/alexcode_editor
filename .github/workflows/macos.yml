@@ -3,9 +3,9 @@ name: macOS Build
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]            # 推 v* 標籤時把 DMG 上傳到 Release
   pull_request:
     branches: [ main ]
+  workflow_call:              # 由 release.yml 在推 v* 標籤時呼叫
 
 permissions:
   contents: write            # 建立/更新 Release 需要
@@ -72,8 +72,10 @@ jobs:
         path: dist/*.dmg
         retention-days: 5
 
-    - name: Create GitHub Release
+    - name: Upload to draft release
       if: startsWith(github.ref, 'refs/tags/')
-      uses: softprops/action-gh-release@v2
-      with:
-        files: dist/*.dmg
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      # 草稿由 release.yml 建立；Release 為不可變（immutable），發佈後無法再上傳，故全平台上傳完才發佈
+      run: gh release upload "$GITHUB_REF_NAME" dist/*.dmg --clobber -R "$GITHUB_REPOSITORY"
