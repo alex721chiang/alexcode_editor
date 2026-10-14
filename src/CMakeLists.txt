@@ -12,6 +12,7 @@ set(LIB_SRCS
     core/StallMonitor.cpp
     core/BackgroundFileWatcher.cpp
     core/SingleInstance.cpp
+    core/FileOpenRouter.cpp
     # editor：編輯器本體與周邊（高亮、配對、選取、工具）
     editor/CodeEditor.cpp
     editor/SyntaxHighlighter.cpp
@@ -87,8 +88,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(alexcode_lib PUBLIC util)   # forkpty（舊 glibc 在 libutil；2.34 起為空 stub）
 endif()
 
-add_executable(AlexCode WIN32 core/main.cpp resources.qrc $<$<BOOL:${WIN32}>:alexcode.rc>)
+# macOS 建成 .app（MACOSX_BUNDLE）：Finder 檔案關聯、Dock、DMG 打包都需要 bundle 與 Info.plist
+add_executable(AlexCode WIN32 MACOSX_BUNDLE core/main.cpp resources.qrc $<$<BOOL:${WIN32}>:alexcode.rc>)
 target_link_libraries(AlexCode PRIVATE alexcode_lib)
+if(APPLE)
+    target_sources(AlexCode PRIVATE alexcode.icns)
+    set_source_files_properties(alexcode.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    set_target_properties(AlexCode PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${PROJECT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in
+        MACOSX_BUNDLE_GUI_IDENTIFIER io.github.alex721chiang.alexcode
+        MACOSX_BUNDLE_BUNDLE_NAME AlexCode
+        MACOSX_BUNDLE_ICON_FILE alexcode.icns
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
+endif()
 
 # i18n：.ts 在版控，.qm 由建置期自動產生並嵌入 :/i18n（main.cpp 以 :/i18n/app_<lang>.qm 載入）
 qt_add_translations(alexcode_lib

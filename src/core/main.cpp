@@ -15,6 +15,7 @@
 #include "Portable.h"
 #include "StallMonitor.h"
 #include "SingleInstance.h"
+#include "FileOpenRouter.h"
 #include <algorithm>
 #include <memory>
 
@@ -56,6 +57,8 @@ int main(int argc, char *argv[]) {
     AlexApplication a(argc, argv);
     QApplication::setOrganizationName("AlexCode");
     QApplication::setApplicationName("AlexCodeEditor");
+    // macOS：Finder 開檔以 QFileOpenEvent 送達（不經 argv）；越早安裝越好，冷啟動的事件先暫存
+    FileOpenRouter fileOpenRouter;
 
     // 單一實例：雙擊關聯檔案時作業系統會再啟動一個行程。已有視窗在執行時，把檔案交給它
     // 開成新分頁後即結束（不載入字型/主題、不建視窗，次實例幾乎立即退出）。
@@ -115,6 +118,9 @@ int main(int argc, char *argv[]) {
     if (instance)
         QObject::connect(instance.get(), &SingleInstance::filesReceived,
                          &w, &MainWindow::openFilesFromOtherInstance);
+    QObject::connect(&fileOpenRouter, &FileOpenRouter::filesRequested,
+                     &w, &MainWindow::openFilesFromOtherInstance);
+    fileOpenRouter.setReady();
 
     // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。
