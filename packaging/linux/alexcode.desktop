@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=AlexCode
+GenericName=Code Editor
+GenericName[zh_TW]=程式碼編輯器
+Comment=Qt code editor with LSP, Git, terminal and log analysis
+Comment[zh_TW]=Qt 程式碼編輯器：LSP、Git、終端機、log 分析
+Exec=AlexCode %F
+Icon=alexcode
+Terminal=false
+Categories=Development;TextEditor;IDE;
+MimeType=text/plain;text/x-c;text/x-c++src;text/x-chdr;text/x-c++hdr;text/x-python;text/javascript;application/json;text/markdown;text/x-log;application/xml;text/x-cmake;text/x-shellscript;
+StartupWMClass=AlexCode

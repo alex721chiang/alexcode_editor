@@ -3,8 +3,12 @@ name: Linux Build
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]            # 推 v* 標籤時把 AppImage 上傳到 Release
   pull_request:
     branches: [ main ]
+
+permissions:
+  contents: write            # 建立/更新 Release 需要
 
 jobs:
   build:
@@ -14,7 +18,11 @@ jobs:
     - uses: actions/checkout@v7
 
     - name: Install build dependencies
-      run: sudo apt-get update && sudo apt-get install -y ninja-build libgl1-mesa-dev libxkbcommon-dev
+      # libxcb-*：Qt xcb 平台外掛的相依，AppImage 打包時必須存在才能一併收進去
+      run: >
+        sudo apt-get update && sudo apt-get install -y ninja-build libgl1-mesa-dev libxkbcommon-dev
+        libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0
+        libxcb-xkb1 libxkbcommon-x11-0 libxcb-shape0 libxcb-randr0 libxcb-sync1 libxcb-xfixes0 libxcb-shm0
 
     - name: Install Qt
       uses: jurplel/install-qt-action@v4
@@ -32,4 +40,53 @@ jobs:
       run: cmake --build build
 
     - name: Run unit tests
-      run: ctest --test-dir build --output-on-failure
+      id: tests
+      run: |
+        mkdir -p ci-logs; exec > >(tee -a ci-logs/tests.log) 2>&1
+        ctest --test-dir build --output-on-failure
+
+    # 每次都打包並做煙霧測試；只有推 v* 標籤才上傳到 Release
+    - name: Package AppImage
+      id: package
+      run: |
+        mkdir -p ci-logs; exec > >(tee -a ci-logs/package.log) 2>&1
+        VER="${GITHUB_REF_NAME}"
+        [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
+        QMAKE="$QT_ROOT_DIR/bin/qmake" scripts/package-linux.sh build "$VER" dist
+
+    - name: Smoke test AppImage (without the build Qt)
+      id: smoke
+      run: |
+        mkdir -p ci-logs; exec > >(tee -a ci-logs/smoke.log) 2>&1
+        set -x
+        IMG=$(ls dist/*.AppImage)
+        mv "$QT_ROOT_DIR" "$QT_ROOT_DIR.hidden"            # 確認 AppImage 完全自帶 Qt
+        QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 "$IMG" --about-shot "$RUNNER_TEMP/about.png"
+        RC=$?
+        mv "$QT_ROOT_DIR.hidden" "$QT_ROOT_DIR"
+        test $RC -eq 0 && test -s "$RUNNER_TEMP/about.png"
+
+    - name: Upload AppImage artifact
+      uses: actions/upload-artifact@v7
+      continue-on-error: true
+      with:
+        name: AlexCode-Linux
+        path: dist/*.AppImage
+        retention-days: 5
+
+    - name: Create GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*.AppImage
+
+    # 暫時的診斷（驗證打包後移除）
+    - name: Publish diag logs
+      if: always()
+      run: |
+        mkdir -p ci-logs && echo "${{ job.status }}" > ci-logs/RESULT.txt
+        echo '${{ toJSON(steps) }}' > ci-logs/steps.json
+        ls -la dist >> ci-logs/RESULT.txt 2>&1 || true
+        cd ci-logs && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
+        git checkout -q -b ci-diag-linux && git add -A && git commit -qm "diag for ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-diag-linux
