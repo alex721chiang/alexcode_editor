@@ -1,0 +1,50 @@
+# 暫時的診斷工作（驗證 .app bundle 與 Finder 開檔後即移除）
+name: Diag macOS bundle
+on:
+  push:
+    branches: [ main ]
+permissions:
+  contents: write
+jobs:
+  diag:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v7
+    - run: brew install ninja
+    - uses: jurplel/install-qt-action@v4
+      with:
+        version: '6.8.3'
+        host: 'mac'
+        target: 'desktop'
+        arch: 'clang_64'
+        modules: 'qt5compat'
+    - name: Build and probe
+      run: |
+        set -x
+        mkdir -p ci-logs
+        exec > >(tee ci-logs/diag.log) 2>&1
+        cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --target AlexCode
+        APP="$PWD/build/src/AlexCode.app"
+        echo "== bundle"; find "$APP" -maxdepth 3 | sort
+        echo "== plutil"; plutil -lint "$APP/Contents/Info.plist"; plutil -p "$APP/Contents/Info.plist" | head -60
+        SET="$HOME/Library/Application Support/AlexCode/AlexCodeEditor"
+        mkdir -p /tmp/af && printf 'one\n' > /tmp/af/first.txt && printf 'two\n' > "/tmp/af/second 中文.log"
+        echo "== cold start via LaunchServices (open -a)"
+        open -a "$APP" /tmp/af/first.txt
+        sleep 12
+        echo "procs after cold start: $(pgrep -x AlexCode | wc -l)"
+        echo "== open while running"
+        open -a "$APP" "/tmp/af/second 中文.log"
+        sleep 6
+        echo "procs after second open: $(pgrep -x AlexCode | wc -l)"
+        echo "== settings recent"; grep -i recent "$SET/settings.ini" || echo "(no recent entry)"
+        echo "== perf.log"; cat "$SET/perf.log" 2>/dev/null || echo "(none)"
+        osascript -e 'quit app "AlexCode"' || pkill -x AlexCode || true
+    - name: Publish logs
+      if: always()
+      run: |
+        mkdir -p ci-logs && echo "${{ job.status }}" > ci-logs/RESULT.txt
+        cd ci-logs && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
+        git checkout -q -b ci-diag-macos && git add -A && git commit -qm "diag for ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-diag-macos
