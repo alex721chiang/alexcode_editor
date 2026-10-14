@@ -1,0 +1,24 @@
+# 暫時：把最近的 workflow 執行狀態與失敗日誌寫到 ci-diag-status 分支（查完即移除）
+name: Diag run status
+on:
+  push:
+    branches: [ main ]
+permissions:
+  contents: write
+  actions: read
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Collect
+      env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}", R: "${{ github.repository }}" }
+      run: |
+        mkdir out
+        gh run list -R $R -L 30 --json databaseId,workflowName,headBranch,headSha,status,conclusion,event,createdAt > out/runs.json || true
+        for id in $(jq -r '.[]|select(.headBranch=="v5.3.1" or .headBranch=="v5.3.0")|.databaseId' out/runs.json); do
+          gh run view $id -R $R --json jobs > out/jobs_$id.json || true
+          gh run view $id -R $R --log-failed > out/failed_$id.log 2>&1 || true
+        done
+        cd out && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
+        git checkout -q -b ci-diag-status && git add -A && git commit -qm "status ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${GH_TOKEN}@github.com/${R}.git" ci-diag-status
