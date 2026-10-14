@@ -19,12 +19,14 @@ jobs:
         mkdir -p ci-logs
         cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo > ci-logs/configure.log 2>&1 || true
         cmake --build build --target AlexCodeWidgetTests > ci-logs/build.log 2>&1; echo "build=$?" >> ci-logs/RESULT.txt
+        set +e
         T=build/tests/AlexCodeWidgetTests.exe
-        for f in 'LargeDocumentTest.*' 'FindInFilesDialogTest.*' 'EditorWindowsTest.*:LargeDocumentTest.*'; do
-          timeout 600 $T --gtest_filter="$f" > "ci-logs/only_$(echo $f | tr -c 'A-Za-z' _).log" 2>&1; echo "only[$f]=$?" >> ci-logs/RESULT.txt
-        done
-        which gdb >> ci-logs/RESULT.txt 2>&1
-        timeout 900 gdb -batch -ex "set pagination off" -ex run -ex "bt 40" -ex "info threads" -ex "thread apply all bt 12" --args $T > ci-logs/gdb_full.log 2>&1; echo "gdb=$?" >> ci-logs/RESULT.txt
+        F='SingleInstanceTest.MainWindowOpensReceivedFilesAsTabs:FindInFilesDialogTest.SearchRunsInBackground'
+        timeout 600 $T --gtest_filter="$F" > ci-logs/pair.log 2>&1; echo "pair=$?" >> ci-logs/RESULT.txt
+        NOGIT=$(echo "$PATH" | tr ':' '\n' | grep -vi git | paste -sd:)
+        PATH="$NOGIT" timeout 600 $T --gtest_filter="$F" > ci-logs/pair_nogit.log 2>&1; echo "pair_nogit=$?" >> ci-logs/RESULT.txt
+        PATH="$NOGIT" which git >> ci-logs/RESULT.txt 2>&1 || echo "git hidden" >> ci-logs/RESULT.txt
+        timeout 900 gdb -batch -ex "set pagination off" -ex run -ex "bt 40" -ex "info threads" -ex "thread apply all bt 15" --args $T --gtest_filter="$F" > ci-logs/gdb_pair.log 2>&1; echo "gdb=$?" >> ci-logs/RESULT.txt
     - name: Publish
       if: always()
       shell: bash
@@ -44,14 +46,16 @@ jobs:
         mkdir -p ci-logs
         cmake -B build -S . > ci-logs/configure.log 2>&1 || true
         cmake --build build --config RelWithDebInfo --target AlexCodeWidgetTests > ci-logs/build.log 2>&1; echo "build=$?" >> ci-logs/RESULT.txt
+        set +e
         T=build/tests/RelWithDebInfo/AlexCodeWidgetTests.exe
         export PATH="$QT_ROOT_DIR/bin:$PATH"
-        for f in 'FindInFilesDialogTest.*' 'LargeDocumentTest.*' 'SingleInstanceTest.*:FindInFilesDialogTest.*'; do
-          timeout 600 $T --gtest_filter="$f" > "ci-logs/only_$(echo $f | tr -c 'A-Za-z' _).log" 2>&1; echo "only[$f]=$?" >> ci-logs/RESULT.txt
-        done
+        F='SingleInstanceTest.MainWindowOpensReceivedFilesAsTabs:FindInFilesDialogTest.SearchRunsInBackground'
+        timeout 600 $T --gtest_filter="$F" > ci-logs/pair.log 2>&1; echo "pair=$?" >> ci-logs/RESULT.txt
+        NOGIT=$(echo "$PATH" | tr ':' '\n' | grep -vi git | paste -sd:)
+        PATH="$NOGIT" timeout 600 $T --gtest_filter="$F" > ci-logs/pair_nogit.log 2>&1; echo "pair_nogit=$?" >> ci-logs/RESULT.txt
+        PATH="$NOGIT" which git >> ci-logs/RESULT.txt 2>&1 || echo "git hidden" >> ci-logs/RESULT.txt
         CDB="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
-        ls -la "$CDB" >> ci-logs/RESULT.txt 2>&1
-        timeout 900 "$CDB" -lines -c "sxe av; sxe c0000409; g; .ecxr; kp 40; ~*k 15; q" $T > ci-logs/cdb_full.log 2>&1; echo "cdb=$?" >> ci-logs/RESULT.txt
+        timeout 900 "$CDB" -lines -c "sxe av; g; .ecxr; kp 40; ~*k 20; q" $T --gtest_filter="$F" > ci-logs/cdb_pair.log 2>&1; echo "cdb=$?" >> ci-logs/RESULT.txt
     - name: Publish
       if: always()
       shell: bash
