@@ -1,0 +1,72 @@
+# 暫時的診斷工作：Windows（MSVC / MinGW）與 macOS 的建置 + 測試紀錄推到 ci-diag-* 分支（修正後移除）
+name: Diag Windows macOS
+on:
+  push:
+    branches: [ main ]
+permissions:
+  contents: write
+jobs:
+  msvc:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: jurplel/install-qt-action@v4
+      with: { version: '6.8.3', host: 'windows', target: 'desktop', arch: 'win64_msvc2022_64', modules: 'qt5compat' }
+    - name: Build and test
+      id: bt
+      shell: bash
+      run: |
+        mkdir -p ci-logs
+        cmake -B build -S . -DCMAKE_BUILD_TYPE=Release > ci-logs/configure.log 2>&1 || true
+        cmake --build build --config Release > ci-logs/build.log 2>&1; echo "build=$?" >> ci-logs/RESULT.txt
+        ctest --test-dir build -C Release --output-on-failure --timeout 600 > ci-logs/ctest.log 2>&1; echo "ctest=$?" >> ci-logs/RESULT.txt
+    - name: Publish
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p ci-logs && cd ci-logs && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
+        git checkout -q -b ci-diag-msvc && git add -A && git commit -qm "diag msvc ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-diag-msvc
+  mingw:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: jurplel/install-qt-action@v4
+      with: { version: '6.8.3', host: 'windows', target: 'desktop', arch: 'win64_mingw', modules: 'qt5compat', tools: 'tools_mingw1310 tools_ninja' }
+    - name: Build and test
+      shell: bash
+      run: |
+        export PATH="$IQTA_TOOLS/mingw1310_64/bin:$IQTA_TOOLS/Ninja:$PATH"
+        mkdir -p ci-logs
+        cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release > ci-logs/configure.log 2>&1 || true
+        cmake --build build > ci-logs/build.log 2>&1; echo "build=$?" >> ci-logs/RESULT.txt
+        ctest --test-dir build --output-on-failure --timeout 600 > ci-logs/ctest.log 2>&1; echo "ctest=$?" >> ci-logs/RESULT.txt
+    - name: Publish
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p ci-logs && cd ci-logs && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
+        git checkout -q -b ci-diag-mingw && git add -A && git commit -qm "diag mingw ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-diag-mingw
+  macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v7
+    - run: brew install ninja
+    - uses: jurplel/install-qt-action@v4
+      with: { version: '6.8.3', host: 'mac', target: 'desktop', arch: 'clang_64', modules: 'qt5compat' }
+    - name: Build test package
+      shell: bash
+      run: |
+        mkdir -p ci-logs
+        cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" > ci-logs/configure.log 2>&1 || true
+        cmake --build build > ci-logs/build.log 2>&1; echo "build=$?" >> ci-logs/RESULT.txt
+        ctest --test-dir build --output-on-failure --timeout 600 > ci-logs/ctest.log 2>&1; echo "ctest=$?" >> ci-logs/RESULT.txt
+        scripts/package-macos.sh build diag dist > ci-logs/package.log 2>&1; echo "package=$?" >> ci-logs/RESULT.txt
+    - name: Publish
+      if: always()
+      shell: bash
+      run: |
+        mkdir -p ci-logs && cd ci-logs && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
+        git checkout -q -b ci-diag-macos && git add -A && git commit -qm "diag macos ${GITHUB_SHA}"
+        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-diag-macos
