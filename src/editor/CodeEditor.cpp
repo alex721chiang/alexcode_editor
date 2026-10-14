@@ -37,11 +37,19 @@ CodeEditor::CodeEditor(QWidget *parent) : QPlainTextEdit(parent) {
     minimapArea = new MinimapArea(this);                   // 右側縮圖
     minimapArea->setCursor(Qt::PointingHandCursor);
     highlighter = new SyntaxHighlighter(document());
+    highlighter->setLongLineLimit(m_longLineChars);
     suggestionWidget = new SuggestionWidget(this);
 
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::updateExtraHighlights);
+    // 標示只涵蓋可見範圍 → 捲動後（防抖）重算，新的可見處也有標示
+    m_extraHlTimer = new QTimer(this);
+    m_extraHlTimer->setSingleShot(true);
+    m_extraHlTimer->setInterval(50);
+    connect(m_extraHlTimer, &QTimer::timeout, this, &CodeEditor::updateExtraHighlights);
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, m_extraHlTimer, [this]() { m_extraHlTimer->start(); });
+    connect(horizontalScrollBar(), &QScrollBar::valueChanged, m_extraHlTimer, [this]() { m_extraHlTimer->start(); });
     connect(this, &CodeEditor::cursorPositionChanged, this, [this]() {
         if (hasGhostText() && textCursor().position() != m_ghostPos) clearGhostText();
     });
@@ -68,7 +76,10 @@ void CodeEditor::setSyntaxLanguage(SyntaxHighlighter::Language lang, const QStri
     if (tsl != TreeSitterHighlighter::Lang::None) {
         // 支援語言 → 改用 tree-sitter，卸下 regex 高亮（同一文件只留一個高亮器）
         if (highlighter) highlighter->setDocument(nullptr);
-        if (!tsHighlighter) tsHighlighter = new TreeSitterHighlighter(this);
+        if (!tsHighlighter) {
+            tsHighlighter = new TreeSitterHighlighter(this);
+            tsHighlighter->setLongLineLimit(m_longLineChars);
+        }
         tsHighlighter->attach(document());
         tsHighlighter->setLanguage(tsl);
     } else {
@@ -78,6 +89,12 @@ void CodeEditor::setSyntaxLanguage(SyntaxHighlighter::Language lang, const QStri
             highlighter->setLanguage(lang);
         }
     }
+}
+
+void CodeEditor::setLongLineLimit(int chars) {
+    m_longLineChars = chars;
+    if (highlighter) highlighter->setLongLineLimit(chars);
+    if (tsHighlighter) tsHighlighter->setLongLineLimit(chars);
 }
 
 void CodeEditor::refreshSyntaxTheme() {
@@ -100,8 +117,21 @@ void CodeEditor::setStickyScrollEnabled(bool on) {
     updateSticky();
 }
 
+// updateRequest 在重新高亮/大量編輯時會逐行觸發（數萬次），而重算 sticky 要掃描整份符號表；
+// 改為只標記、於事件迴圈空檔合併重算一次（原本為 行數×符號數，40,000 行檔案開啟需 13 秒）。
+void CodeEditor::scheduleSticky() {
+    if (!m_stickyTimer) {
+        m_stickyTimer = new QTimer(this);
+        m_stickyTimer->setSingleShot(true);
+        m_stickyTimer->setInterval(0);
+        connect(m_stickyTimer, &QTimer::timeout, this, &CodeEditor::updateSticky);
+    }
+    if (!m_stickyTimer->isActive()) m_stickyTimer->start();
+}
+
 // 依目前捲動位置重算要固定的標頭，並排版 sticky 區。
 void CodeEditor::updateSticky() {
+    ++m_stickyUpdates;
     if (!stickyArea) return;
     if (!m_stickyEnabled || m_largeFile) { stickyArea->hide(); return; }
     const QVector<TsSymbols::Symbol> syms = documentSymbols();
@@ -248,7 +278,7 @@ void CodeEditor::updateLineNumberArea(const QRect &rect, int dy) {
     if (rect.contains(viewport()->rect()))
         updateLineNumberAreaWidth(0);
 
-    updateSticky();                                       // 捲動/重繪時更新 sticky 標頭
+    scheduleSticky();                                     // 捲動/重繪時更新 sticky 標頭（合併）
     if (minimapArea && minimapArea->isVisible()) minimapArea->update();
 }
 
@@ -267,8 +297,18 @@ void CodeEditor::resizeEvent(QResizeEvent *e) {
 // ----------------------------------------------------------------
 // 行高亮 + 括號配對 + 搜尋結果標示（合併為一組 ExtraSelections）
 // ----------------------------------------------------------------
+// 可見字元範圍（含前後緩衝），供標示類功能限制掃描範圍。以「字元」而非「行」計：
+// 壓縮檔整份只有一行時，「可見的 400 行」等於整份文件（上萬個標示，每次重繪都要重新排版）。
+QPair<int, int> CodeEditor::visibleCharRange() const {
+    constexpr int kPad = 4000;
+    const int start = cursorForPosition(QPoint(0, 0)).position();
+    const int end = cursorForPosition(QPoint(viewport()->width() - 1, viewport()->height() - 1)).position();
+    return {qMax(0, start - kPad), end + kPad};
+}
+
 void CodeEditor::updateExtraHighlights() {
     QList<QTextEdit::ExtraSelection> extraSelections;
+    const auto [visStart, visEnd] = visibleCharRange();
 
     if (!isReadOnly()) {
         QTextEdit::ExtraSelection selection;
@@ -289,11 +329,13 @@ void CodeEditor::updateExtraHighlights() {
         int painted = 0;
         const int maxBlocks = 400; // 可視區 + 緩衝
         for (int i = 0; block.isValid() && i < maxBlocks && painted < 2000; ++i, block = block.next()) {
+            const int bpos = block.position();
+            if (bpos > visEnd) break;
             const QString text = block.text();
-            auto it = m_searchPattern.globalMatch(text);
+            auto it = m_searchPattern.globalMatch(text, qMax(0, visStart - bpos));
             while (it.hasNext()) {
                 auto m = it.next();
-                if (m.capturedLength() == 0) break;
+                if (m.capturedLength() == 0 || bpos + m.capturedStart() > visEnd) break;
                 QTextEdit::ExtraSelection sel;
                 sel.format = fmt;
                 sel.cursor = QTextCursor(block);
@@ -317,11 +359,13 @@ void CodeEditor::updateExtraHighlights() {
             fmt.setBackground(QColor(Theme::OCCURRENCE_BG));
             QTextBlock block = firstVisibleBlock();
             for (int i = 0; block.isValid() && i < 400; ++i, block = block.next()) {
+                const int bpos = block.position();
+                if (bpos > visEnd) break;
                 const QString text = block.text();
-                int from = 0;
+                int from = qMax(0, visStart - bpos);
                 while (true) {
                     const int idx = text.indexOf(w, from);
-                    if (idx < 0) break;
+                    if (idx < 0 || bpos + idx > visEnd) break;
                     const bool leftOk  = idx == 0 || !isWordChar(text.at(idx - 1));
                     const bool rightOk = idx + w.size() >= text.size()
                                       || !isWordChar(text.at(idx + w.size()));
@@ -343,12 +387,14 @@ void CodeEditor::updateExtraHighlights() {
     if (!m_kwHighlights.isEmpty()) {
         QTextBlock block = firstVisibleBlock();
         for (int i = 0; block.isValid() && i < 400; ++i, block = block.next()) {
+            const int bpos = block.position();
+            if (bpos > visEnd) break;
             const QString text = block.text();
             for (const auto& kw : m_kwHighlights) {
-                int from = 0;
+                int from = qMax(0, visStart - bpos);
                 while (true) {
                     const int idx = text.indexOf(kw.first, from, Qt::CaseInsensitive);
-                    if (idx < 0) break;
+                    if (idx < 0 || bpos + idx > visEnd) break;
                     QTextEdit::ExtraSelection sel;
                     sel.format.setBackground(kw.second);
                     sel.format.setForeground(QColor("#0a0e17"));

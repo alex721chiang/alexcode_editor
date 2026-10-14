@@ -325,6 +325,8 @@ void SyntaxHighlighter::setupBashRules()
 
 void SyntaxHighlighter::highlightBlock(const QString &text)
 {
+    // 超長行不套格式（見 TreeSitterHighlighter::highlightBlock）；也避免對整段跑所有正規式
+    if (m_longLineChars > 0 && text.size() > m_longLineChars) { setCurrentBlockState(previousBlockState()); return; }
     for (const HighlightingRule &rule : highlightingRules) {
         QRegularExpressionMatchIterator it = rule.pattern.globalMatch(text);
         while (it.hasNext()) {

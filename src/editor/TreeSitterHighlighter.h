@@ -18,6 +18,7 @@ class QTimer;
 class TreeSitterHighlighter : public QSyntaxHighlighter {
     Q_OBJECT
 public:
+    void setLongLineLimit(int chars) { m_longLineChars = chars; }   // 超過此長度的行不高亮（<=0 停用）
     enum class Lang { None, Cpp, Python, JavaScript, Json };
 
     explicit TreeSitterHighlighter(QObject* parent = nullptr);
@@ -63,4 +64,5 @@ private:
     QHash<int, QVector<Span>> m_blockSpans;     // blockNumber → spans
 
     QTextCharFormat m_fKeyword, m_fType, m_fComment, m_fString, m_fPreproc, m_fNumber;
+    int m_longLineChars = 10000;
 };

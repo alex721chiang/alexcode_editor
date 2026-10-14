@@ -8,6 +8,7 @@ class SyntaxHighlighter : public QSyntaxHighlighter {
     Q_OBJECT
 
 public:
+    void setLongLineLimit(int chars) { m_longLineChars = chars; }   // 超過此長度的行不高亮（<=0 停用）
     enum class Language {
         Unknown,
         CPP,
@@ -64,4 +65,5 @@ private:
     QRegularExpression commentEndExpression;
 
     Language currentLanguage = Language::Unknown;
+    int m_longLineChars = 10000;
 };

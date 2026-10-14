@@ -283,7 +283,9 @@ TreeSitterHighlighter::CallInfo TreeSitterHighlighter::callInfoAt(int line) cons
     return info;
 }
 
-void TreeSitterHighlighter::highlightBlock(const QString&) {
+void TreeSitterHighlighter::highlightBlock(const QString& text) {
+    // 超長行（壓縮的 .min.js 等）不套格式：上萬個格式區段會讓 Qt 每次重繪都重新排版整段（數百 ms）
+    if (m_longLineChars > 0 && text.size() > m_longLineChars) return;
     const auto it = m_blockSpans.constFind(currentBlock().blockNumber());
     if (it == m_blockSpans.constEnd()) return;
     for (const Span& s : it.value())

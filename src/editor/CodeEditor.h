@@ -80,6 +80,8 @@ public:
 
     // 大檔案模式（停用高亮/補全/括號配對）
     void setLargeFileMode(bool on) { m_largeFile = on; }
+    void setLongLineLimit(int chars);                   // 超過此字元數的行不做語法高亮（<=0 停用）
+    int longLineLimit() const { return m_longLineChars; }
 
     // 輔助功能（自動補全等）：中型大檔停用以保流暢，但仍保留語法高亮
     void setAssistEnabled(bool on) { m_assist = on; }
@@ -97,6 +99,8 @@ public:
 
     // 文件符號（類別/函式）：tree-sitter 可用時回傳，否則空（Go to Symbol / 麵包屑）
     QVector<TsSymbols::Symbol> documentSymbols() const;
+    const QVector<TsSymbols::Symbol>& stickyHeaders() const { return m_stickyHeaders; }
+    int stickyUpdateCount() const { return m_stickyUpdates; }   // 診斷/測試：sticky 實際重算次數
 
     // Call Graph：建立並顯示「該行所在函式」的呼叫關係圖，回傳該對話框（截圖/右鍵共用）
     QWidget* showCallGraphAt(int line, const QString& fallbackWord = QString());
@@ -187,6 +191,12 @@ private:
     QWidget *minimapArea = nullptr;                         // 右側縮圖
     bool m_minimapEnabled = true;
     bool m_stickyEnabled = true;
+    QTimer* m_stickyTimer = nullptr;                        // 合併 updateRequest 風暴（見 scheduleSticky）
+    int m_stickyUpdates = 0;
+    int m_longLineChars = 10000;
+    QTimer* m_extraHlTimer = nullptr;                       // 捲動後重算可見範圍標示（防抖）
+    QPair<int, int> visibleCharRange() const;
+    void scheduleSticky();
     QVector<TsSymbols::Symbol> m_stickyHeaders;            // 目前要固定的標頭
     mutable QVector<TsSymbols::Symbol> m_symCache;        // documentSymbols 快取（依 revision）
     mutable int m_symCacheRev = -1;

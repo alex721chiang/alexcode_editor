@@ -14,6 +14,7 @@ struct Result {
     QString text;           // 已解碼、換行統一為 \n
     QString encoding;       // "UTF-8" / "Big5"
     QString eol;            // "CRLF" / "LF"
+    int maxLineLength = 0;  // 最長一行的字元數（超長行防護用）
 };
 
 Result decode(const QByteArray& raw);   // UTF-8 驗證失敗 → 嘗試 Big5

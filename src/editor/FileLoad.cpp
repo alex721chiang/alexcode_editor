@@ -22,6 +22,13 @@ Result decode(const QByteArray& raw) {
         }
     }
     r.text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    int start = 0;
+    for (int i = 0; i <= r.text.size(); ++i) {           // 一次線性掃描
+        if (i == r.text.size() || r.text.at(i) == QLatin1Char('\n')) {
+            r.maxLineLength = qMax(r.maxLineLength, i - start);
+            start = i + 1;
+        }
+    }
     return r;
 }
 

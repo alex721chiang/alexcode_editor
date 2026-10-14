@@ -42,3 +42,10 @@ TEST(FileLoadTest, MissingFileReportsError) {
     EXPECT_FALSE(r.ok);
     EXPECT_FALSE(r.error.isEmpty());
 }
+
+TEST(FileLoadTest, ReportsLongestLineLength) {
+    const auto r = FileLoad::decode(QByteArray("ab\r\n") + QByteArray(50, 'x') + "\nc");
+    EXPECT_EQ(r.maxLineLength, 50);
+    EXPECT_EQ(FileLoad::decode(QByteArray(7, 'y')).maxLineLength, 7);   // 無換行結尾
+    EXPECT_EQ(FileLoad::decode(QByteArray()).maxLineLength, 0);
+}

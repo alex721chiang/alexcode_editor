@@ -272,6 +272,10 @@ Proceed? (cannot be undone)</translation>
 <context>
     <name>MainWindow</name>
     <message>
+        <source>此檔含超長行（最長 %1 字元）：超長行不做語法高亮並維持自動換行</source>
+        <translation>Overlong lines (longest %1 chars): those lines are not syntax-highlighted and stay wrapped</translation>
+    </message>
+    <message>
         <source>LSP：</source>
         <translation type="vanished">LSP: </translation>
     </message>

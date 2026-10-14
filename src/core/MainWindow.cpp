@@ -344,6 +344,7 @@ CodeEditor* MainWindow::createEditorTab(const QString& title) {
     editor->setShowWhitespace(AppSettings().value("editor/showWhitespace", false).toBool());
     editor->setStickyScrollEnabled(AppSettings().value("editor/stickyScroll", true).toBool());
     editor->setMinimapEnabled(AppSettings().value("editor/minimap", true).toBool());
+    editor->setLongLineLimit(AppSettings().value("editor/longLineChars", 10000).toInt());   // 超長行不高亮
     snippetsController->applyTo(editor);            // 通用（language 為空）snippet
 
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, &MainWindow::updateStatusBar);
@@ -714,7 +715,9 @@ void MainWindow::setupUI() {
     wrapAction->setChecked(true);
     connect(wrapAction, &QAction::triggered, this, [this](bool checked) {
         for (int i = 0; i < tabWidget->count(); ++i) {
-            if (auto editor = qobject_cast<CodeEditor*>(tabWidget->widget(i)))
+            auto editor = qobject_cast<CodeEditor*>(tabWidget->widget(i));
+            if (editor && !checked && editor->property("overlongLines").toBool()) continue;   // 超長行維持換行
+            if (editor)
                 editor->setLineWrapMode(checked ? QPlainTextEdit::WidgetWidth
                                                 : QPlainTextEdit::NoWrap);
         }
@@ -1765,14 +1768,21 @@ void MainWindow::applyLoadedFile(CodeEditor* newEditor, const QString& fileName,
     const bool highlightOff = tier == FileTier::Level::HighlightOff;
     const bool assistOff = tier != FileTier::Level::Full;
 
+    // 超長行（壓縮檔等）：該行不做語法高亮，且不可改為不換行——Qt 會把整行當成單一行排版，
+    // 1MB 的單行實測重繪超過 10 分鐘。標記後「大檔模式」與「自動換行」切換都會略過此分頁。
+    const bool overlong = r.maxLineLength > newEditor->longLineLimit() && newEditor->longLineLimit() > 0;
+    newEditor->setProperty("overlongLines", overlong);
     if (highlightOff) {
         newEditor->setLargeFileMode(true);
-        newEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
+        if (!overlong) newEditor->setLineWrapMode(QPlainTextEdit::NoWrap);
         statusBar()->showMessage(
             tr("大檔（%1 MB）：已停用語法高亮與自動完成以確保流暢").arg(qRound(mb)), 5000);
     } else if (assistOff) {
         statusBar()->showMessage(
             tr("較大檔（%1 MB）：已停用自動完成 / LSP / 即時 Git 標示，保留語法高亮").arg(qRound(mb)), 5000);
+    } else if (overlong) {
+        statusBar()->showMessage(
+            tr("此檔含超長行（最長 %1 字元）：超長行不做語法高亮並維持自動換行").arg(r.maxLineLength), 5000);
     }
     newEditor->setAssistEnabled(!assistOff);
     newEditor->setProperty("bigFile", highlightOff);
