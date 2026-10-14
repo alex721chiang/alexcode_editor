@@ -41,6 +41,7 @@ set(LIB_SRCS
     # search：篩選引擎、檔案內搜尋、快速開啟
     search/FilterEngine.cpp
     search/FindInFilesDialog.cpp
+    search/FindInFilesEngine.cpp
     search/QuickOpenDialog.cpp
     search/FindController.cpp
     # index：符號/連結索引、關係圖、對話框

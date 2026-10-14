@@ -126,6 +126,46 @@
 <context>
     <name>FindInFilesDialog</name>
     <message>
+        <source>（已達上限，僅顯示前 %1 筆）</source>
+        <translation> (limit reached, showing first %1)</translation>
+    </message>
+    <message>
+        <source>已取消：掃描 %1 個檔案，找到 %2 筆</source>
+        <translation>Canceled: scanned %1 files, %2 matches</translation>
+    </message>
+    <message>
+        <source>完成：掃描 %1 個檔案，找到 %2 筆</source>
+        <translation>Done: scanned %1 files, %2 matches</translation>
+    </message>
+    <message>
+        <source>搜尋中… 已找到 %1 筆</source>
+        <translation>Searching… %1 found</translation>
+    </message>
+    <message>
+        <source>搜尋中…</source>
+        <translation>Searching…</translation>
+    </message>
+    <message>
+        <source>已取消：已完成 %1 個檔案、%2 處取代</source>
+        <translation>Canceled: %1 files, %2 replacements done</translation>
+    </message>
+    <message>
+        <source>取代中…</source>
+        <translation>Replacing…</translation>
+    </message>
+    <message>
+        <source>已取消</source>
+        <translation>Canceled</translation>
+    </message>
+    <message>
+        <source>統計中…</source>
+        <translation>Counting…</translation>
+    </message>
+    <message>
+        <source>Cancel</source>
+        <translation>Cancel</translation>
+    </message>
+    <message>
         <location filename="../FindInFilesDialog.cpp" line="35" />
         <source>可用 || 分隔多個關鍵字 (OR)</source>
         <translation>Use || to separate multiple keywords (OR)</translation>
