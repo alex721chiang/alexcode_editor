@@ -223,6 +223,8 @@ private:
     QString currentFilePath();                        // activeEditor() 的檔案路徑(給 controller 呼叫用)
 public:
     void setShowWhitespaceAll(bool on);               // 截圖/CLI：所有分頁切換顯示空白
+    // 單一實例：其他行程（雙擊檔案）交來的檔案開成新分頁，並把視窗帶到前景
+    void openFilesFromOtherInstance(const QStringList& files);
 private:
 
     // Snippet 樣板 — 拆到 SnippetsController

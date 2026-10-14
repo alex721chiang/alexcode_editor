@@ -14,6 +14,9 @@
 #include "Theme.h"
 #include "Portable.h"
 #include "StallMonitor.h"
+#include "SingleInstance.h"
+#include <algorithm>
+#include <memory>
 
 // 事件層級的卡頓歸因：每個事件以「接收者類別」標記區段，未手動標記的耗時也能在 perf.log
 // 看出是哪類物件（例如 CodeEditor 繪製、QFutureWatcherBase 背景結果回呼）。
@@ -54,6 +57,26 @@ int main(int argc, char *argv[]) {
     QApplication::setOrganizationName("AlexCode");
     QApplication::setApplicationName("AlexCodeEditor");
 
+    // 單一實例：雙擊關聯檔案時作業系統會再啟動一個行程。已有視窗在執行時，把檔案交給它
+    // 開成新分頁後即結束（不載入字型/主題、不建視窗，次實例幾乎立即退出）。
+    // 帶任何 "--" 參數（--screenshot、--folder、--new-window…）時維持獨立行程，不影響自動化流程。
+    const QStringList cliArgs = a.arguments().mid(1);
+    const bool standalone = std::any_of(cliArgs.cbegin(), cliArgs.cend(),
+                                        [](const QString& s) { return s.startsWith(QLatin1String("--")); });
+    std::unique_ptr<SingleInstance> instance;
+    if (!standalone) {
+        instance = std::make_unique<SingleInstance>(SingleInstance::defaultKey(), Portable::dataDir());
+        if (!instance->tryBecomePrimary()) {
+            QStringList files;
+            for (const QString& arg : cliArgs) {
+                const QFileInfo fi(arg);              // 以本行程的工作目錄解析相對路徑
+                if (fi.isFile()) files << fi.absoluteFilePath();
+            }
+            if (instance->sendToPrimary(files)) return 0;
+            instance.reset();                         // 主實例無回應：退回自行開窗，檔案不會遺失
+        }
+    }
+
     // 內嵌 Orbitron（OFL，src/fonts/）作為未來科技字標字型；用於「關於」等點綴處。
     // 註冊失敗（極少見）時相關 UI 會自動退回一般 sans-serif。
     QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/Orbitron.ttf"));
@@ -89,6 +112,9 @@ int main(int argc, char *argv[]) {
                             AppSettings().value("debug/stallThresholdMs", 400).toInt());
     MainWindow w;
     w.show();
+    if (instance)
+        QObject::connect(instance.get(), &SingleInstance::filesReceived,
+                         &w, &MainWindow::openFilesFromOtherInstance);
 
     // 命令列解析：一般開檔；--screenshot <out.png> 讓程式自我渲染存圖（不需螢幕、桌面鎖定也可用）；
     // --termcmd "<cmd>" 搭配 --screenshot 時，開終端機並執行該指令後再截圖。

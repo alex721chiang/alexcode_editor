@@ -162,6 +162,11 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 
 翻譯來源為 `src/i18n/app_en.ts`、`app_zh_TW.ts`，以 `lupdate` 抽取；`.qm` 由 CMake `qt_add_translations` 於建置期自動編譯並內嵌至 `:/i18n`（不需手動 `lrelease`，`.qm` 不入版控）。
 
+### 單一視窗（雙擊檔案開成新分頁）
+- 已有 AlexCode 視窗在執行時，於檔案總管/Finder 雙擊關聯檔案（或執行 `AlexCode 檔案…`）會把檔案交給既有視窗**開成新分頁**並帶到前景，不再開新視窗；同時開多個檔案（多選後 Enter）也只會有一個視窗。
+- 機制：`QLockFile` 選出主實例，`QLocalServer`／`QLocalSocket`（Windows named pipe／Unix domain socket，僅限同一使用者）傳遞檔案路徑；主實例當機後下次啟動自動接手。可攜版與安裝版各自獨立。
+- 需要額外視窗時用 `AlexCode --new-window`；任何 `--` 參數（如 `--screenshot`）都以獨立行程執行。
+
 ### 快速啟動
 - **視窗即時顯示**：主視窗先繪出，上次工作階段的分頁再於背景**串流還原**（依原順序逐一載入），不再等所有檔案解析完才出現畫面。
 - **延遲啟用重量級服務**：LSP（`clangd` 等）的 `didOpen` 與 Git gutter／blame 改為「分頁實際切到時才啟用」，前景開檔立即生效、背景還原的分頁則於首次切換時載入 — 避免多分頁還原時大量語言伺服器同步與 Git 子行程一次湧入拖慢開啟（Windows 尤其明顯）。

@@ -2420,6 +2420,14 @@ void MainWindow::showQuickOpen() {
 }
 
 
+void MainWindow::openFilesFromOtherInstance(const QStringList& files) {
+    for (const QString& f : files) openFileByPath(f);   // 已開啟的檔案只會切換到該分頁
+    if (isMinimized()) showNormal(); else show();
+    raise();
+    activateWindow();
+    QApplication::alert(this);                          // 系統拒絕搶前景時（如 Windows 前景鎖）至少閃爍提示
+}
+
 void MainWindow::setShowWhitespaceAll(bool on) {
     for (int i = 0; i < tabWidget->count(); ++i)
         if (auto* e = qobject_cast<CodeEditor*>(tabWidget->widget(i)))

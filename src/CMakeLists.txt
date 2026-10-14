@@ -11,6 +11,7 @@ set(LIB_SRCS
     core/PathKind.cpp
     core/StallMonitor.cpp
     core/BackgroundFileWatcher.cpp
+    core/SingleInstance.cpp
     # editor：編輯器本體與周邊（高亮、配對、選取、工具）
     editor/CodeEditor.cpp
     editor/SyntaxHighlighter.cpp
