@@ -37,24 +37,17 @@ jobs:
       run: cmake --build build
 
     - name: Run unit tests
-      id: tests
-      run: |
-        mkdir -p ci-logs; exec > >(tee -a ci-logs/tests.log) 2>&1
-        ctest --test-dir build --output-on-failure
+      run: ctest --test-dir build --output-on-failure
 
     # 每次都打包並做煙霧測試，確保打包流程不會壞掉；只有推 v* 標籤才上傳到 Release
     - name: Package DMG
-      id: package
       run: |
-        mkdir -p ci-logs; exec > >(tee -a ci-logs/package.log) 2>&1
         VER="${GITHUB_REF_NAME}"
         [[ "$GITHUB_REF" == refs/tags/* ]] || VER="dev-${GITHUB_SHA::7}"
         scripts/package-macos.sh build "$VER" dist
 
     - name: Smoke test DMG (without the build Qt)
-      id: smoke
       run: |
-        mkdir -p ci-logs; exec > >(tee -a ci-logs/smoke.log) 2>&1
         set -x
         DMG=$(ls dist/*.dmg)
         MNT=$(mktemp -d)
@@ -84,14 +77,3 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: dist/*.dmg
-
-    # 暫時的診斷（驗證打包後移除）
-    - name: Publish diag logs
-      if: always()
-      run: |
-        mkdir -p ci-logs && echo "${{ job.status }}" > ci-logs/RESULT.txt
-        echo '${{ toJSON(steps) }}' > ci-logs/steps.json
-        ls -la dist >> ci-logs/RESULT.txt 2>&1 || true
-        cd ci-logs && git init -q && git config user.name ci && git config user.email ci@users.noreply.github.com
-        git checkout -q -b ci-diag-macos && git add -A && git commit -qm "diag for ${GITHUB_SHA}"
-        git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" ci-diag-macos
