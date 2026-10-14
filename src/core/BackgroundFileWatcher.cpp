@@ -11,55 +11,60 @@ struct BackgroundFileWatcher::Rewatch {
 
 BackgroundFileWatcher::BackgroundFileWatcher(QObject* parent) : QObject(parent) {
     m_thread.setObjectName(QStringLiteral("BackgroundFileWatcher"));
-    m_watcher = new QFileSystemWatcher;
-    m_watcher->moveToThread(&m_thread);
-    connect(&m_thread, &QThread::finished, m_watcher, &QObject::deleteLater);
-
-    QFileSystemWatcher* w = m_watcher;
+    m_thread.start();
+    // QFileSystemWatcher 必須「在背景執行緒內」建立：Windows 引擎建立時會在「建立當下執行緒」的
+    // 事件分派器註冊原生事件過濾器（QWindowsRemovableDriveListener），解構時卻只從「解構當下執行緒」
+    // 的分派器移除。若在主執行緒建立再 moveToThread、於背景執行緒銷毀，主執行緒會留下指向已釋放
+    // 物件的過濾器 → 下一次處理 Windows 訊息即崩潰（QAbstractEventDispatcher::filterNativeEvent）。
+    auto* anchor = new QObject;                    // 住在背景執行緒的錨點：watcher 的父物件
+    anchor->moveToThread(&m_thread);
+    connect(&m_thread, &QThread::finished, anchor, &QObject::deleteLater);   // 在背景執行緒內刪除
     auto st = std::make_shared<Rewatch>();
     m_rewatch = st;
-
-    // 被刪除/覆寫重建的檔案會從監看清單掉出：存在就立刻加回；若刪除通知早於重建（非原子存檔），
-    // 暫時監看其所在目錄，檔案重新出現時加回並補發一次 fileChanged。
-    connect(m_watcher, &QFileSystemWatcher::fileChanged, m_watcher, [this, w, st](const QString& p) {
-        if (!w->files().contains(p)) {
-            if (QFileInfo::exists(p)) {
-                w->addPath(p);
-            } else {
-                st->pending.insert(p);
-                const QString dir = QFileInfo(p).absolutePath();
-                if (!w->directories().contains(dir) && w->addPath(dir)) st->tempDirs.insert(dir);
-                // 競態：檔案可能在「判斷不存在」與「目錄監看生效」之間就已重建——那次建立不會
-                // 產生目錄事件，於是永遠等不到。監看生效後再檢查一次。
+    QMetaObject::invokeMethod(anchor, [this, anchor, st]() {
+        m_watcher = new QFileSystemWatcher(anchor);
+        QFileSystemWatcher* w = m_watcher;
+        // 被刪除/覆寫重建的檔案會從監看清單掉出：存在就立刻加回；若刪除通知早於重建（非原子存檔），
+        // 暫時監看其所在目錄，檔案重新出現時加回並補發一次 fileChanged。
+        connect(m_watcher, &QFileSystemWatcher::fileChanged, m_watcher, [this, w, st](const QString& p) {
+            if (!w->files().contains(p)) {
                 if (QFileInfo::exists(p)) {
                     w->addPath(p);
-                    st->pending.remove(p);
-                    if (st->tempDirs.contains(dir)) { w->removePath(dir); st->tempDirs.remove(dir); }
+                } else {
+                    st->pending.insert(p);
+                    const QString dir = QFileInfo(p).absolutePath();
+                    if (!w->directories().contains(dir) && w->addPath(dir)) st->tempDirs.insert(dir);
+                    // 競態：檔案可能在「判斷不存在」與「目錄監看生效」之間就已重建——那次建立不會
+                    // 產生目錄事件，於是永遠等不到。監看生效後再檢查一次。
+                    if (QFileInfo::exists(p)) {
+                        w->addPath(p);
+                        st->pending.remove(p);
+                        if (st->tempDirs.contains(dir)) { w->removePath(dir); st->tempDirs.remove(dir); }
+                    }
                 }
             }
-        }
-        emit fileChanged(p);                       // 跨執行緒 → 以 queued 送達擁有者
-    });
-    connect(m_watcher, &QFileSystemWatcher::directoryChanged, m_watcher, [this, w, st](const QString& d) {
-        bool stillPending = false;
-        for (auto it = st->pending.begin(); it != st->pending.end();) {
-            if (QFileInfo(*it).absolutePath() != d) { ++it; continue; }
-            if (QFileInfo::exists(*it)) {
-                w->addPath(*it);
-                emit fileChanged(*it);             // 內容已被替換
-                it = st->pending.erase(it);
-            } else {
-                stillPending = true;
-                ++it;
+            emit fileChanged(p);                       // 跨執行緒 → 以 queued 送達擁有者
+        });
+        connect(m_watcher, &QFileSystemWatcher::directoryChanged, m_watcher, [this, w, st](const QString& d) {
+            bool stillPending = false;
+            for (auto it = st->pending.begin(); it != st->pending.end();) {
+                if (QFileInfo(*it).absolutePath() != d) { ++it; continue; }
+                if (QFileInfo::exists(*it)) {
+                    w->addPath(*it);
+                    emit fileChanged(*it);             // 內容已被替換
+                    it = st->pending.erase(it);
+                } else {
+                    stillPending = true;
+                    ++it;
+                }
             }
-        }
-        if (st->tempDirs.contains(d)) {            // 暫時監看的目錄：不轉發給擁有者
-            if (!stillPending) { w->removePath(d); st->tempDirs.remove(d); }
-            return;
-        }
-        emit directoryChanged(d);
-    });
-    m_thread.start();
+            if (st->tempDirs.contains(d)) {            // 暫時監看的目錄：不轉發給擁有者
+                if (!stillPending) { w->removePath(d); st->tempDirs.remove(d); }
+                return;
+            }
+            emit directoryChanged(d);
+        });
+    }, Qt::BlockingQueuedConnection);
 }
 
 BackgroundFileWatcher::~BackgroundFileWatcher() {

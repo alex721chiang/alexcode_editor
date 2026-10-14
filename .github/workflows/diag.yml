@@ -23,10 +23,7 @@ jobs:
         T=build/tests/AlexCodeWidgetTests.exe
         F='SingleInstanceTest.MainWindowOpensReceivedFilesAsTabs:FindInFilesDialogTest.SearchRunsInBackground'
         timeout 600 $T --gtest_filter="$F" > ci-logs/pair.log 2>&1; echo "pair=$?" >> ci-logs/RESULT.txt
-        NOGIT=$(echo "$PATH" | tr ':' '\n' | grep -vi git | paste -sd:)
-        PATH="$NOGIT" timeout 600 $T --gtest_filter="$F" > ci-logs/pair_nogit.log 2>&1; echo "pair_nogit=$?" >> ci-logs/RESULT.txt
-        PATH="$NOGIT" which git >> ci-logs/RESULT.txt 2>&1 || echo "git hidden" >> ci-logs/RESULT.txt
-        timeout 900 gdb -batch -ex "set pagination off" -ex run -ex "bt 40" -ex "info threads" -ex "thread apply all bt 15" --args $T --gtest_filter="$F" > ci-logs/gdb_pair.log 2>&1; echo "gdb=$?" >> ci-logs/RESULT.txt
+        timeout 900 $T > ci-logs/full.log 2>&1; echo "full=$?" >> ci-logs/RESULT.txt
     - name: Publish
       if: always()
       shell: bash
@@ -51,11 +48,7 @@ jobs:
         export PATH="$QT_ROOT_DIR/bin:$PATH"
         F='SingleInstanceTest.MainWindowOpensReceivedFilesAsTabs:FindInFilesDialogTest.SearchRunsInBackground'
         timeout 600 $T --gtest_filter="$F" > ci-logs/pair.log 2>&1; echo "pair=$?" >> ci-logs/RESULT.txt
-        NOGIT=$(echo "$PATH" | tr ':' '\n' | grep -vi git | paste -sd:)
-        PATH="$NOGIT" timeout 600 $T --gtest_filter="$F" > ci-logs/pair_nogit.log 2>&1; echo "pair_nogit=$?" >> ci-logs/RESULT.txt
-        PATH="$NOGIT" which git >> ci-logs/RESULT.txt 2>&1 || echo "git hidden" >> ci-logs/RESULT.txt
-        CDB="/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe"
-        timeout 900 "$CDB" -lines -c "sxe av; g; .ecxr; kp 40; ~*k 20; q" $T --gtest_filter="$F" > ci-logs/cdb_pair.log 2>&1; echo "cdb=$?" >> ci-logs/RESULT.txt
+        timeout 900 $T > ci-logs/full.log 2>&1; echo "full=$?" >> ci-logs/RESULT.txt
     - name: Publish
       if: always()
       shell: bash
