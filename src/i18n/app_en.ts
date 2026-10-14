@@ -272,6 +272,22 @@ Proceed? (cannot be undone)</translation>
 <context>
     <name>MainWindow</name>
     <message>
+        <source>（跟隨目前分頁）</source>
+        <translation>(Follow current tab)</translation>
+    </message>
+    <message>
+        <source>選擇分割檢視顯示的文件：跟隨目前分頁，或固定某個分頁以並排比對</source>
+        <translation>Choose what the split view shows: follow the current tab, or pin a tab to compare side by side</translation>
+    </message>
+    <message>
+        <source>目前分頁在新視窗開啟</source>
+        <translation>Open Current Tab in New Window</translation>
+    </message>
+    <message>
+        <source>分割檢視（並排顯示）</source>
+        <translation>Split View (side by side)</translation>
+    </message>
+    <message>
         <source>此檔含超長行（最長 %1 字元）：超長行不做語法高亮並維持自動換行</source>
         <translation>Overlong lines (longest %1 chars): those lines are not syntax-highlighted and stay wrapped</translation>
     </message>
@@ -1840,6 +1856,25 @@ Discard your changes and reload?</translation>
         <location filename="../TimelineBar.h" line="15" />
         <source>命中分布（點擊跳至該區段）</source>
         <translation>Hit distribution (click to jump to that region)</translation>
+    </message>
+</context>
+<context>
+    <name>EditorWindowsController</name>
+    <message>
+        <source>在分割檢視中並排顯示</source>
+        <translation>Show Side by Side in Split View</translation>
+    </message>
+    <message>
+        <source>在新視窗開啟（可拖到另一個螢幕）</source>
+        <translation>Open in New Window (can be moved to another screen)</translation>
+    </message>
+    <message>
+        <source>關閉此視窗並切到主視窗中的分頁（內容已即時同步）</source>
+        <translation>Close this window and switch to the tab in the main window (content is already in sync)</translation>
+    </message>
+    <message>
+        <source>回到主視窗</source>
+        <translation>Back to Main Window</translation>
     </message>
 </context>
 </TS>

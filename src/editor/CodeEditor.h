@@ -22,6 +22,9 @@ public:
 
     void lineNumberAreaPaintEvent(QPaintEvent *event);
     int lineNumberAreaWidth();
+    // 換成另一份文件（分割檢視 / 獨立視窗共用分頁文件）並依新文件重算行號區、sticky、標示。
+    // QPlainTextEdit::setDocument 不會觸發這些更新（行號區原本只在行數變動時重算）。
+    void setSharedDocument(QTextDocument* doc);
     void setAIProvider(AICompletionProvider* provider);
 
     // Sticky scroll：固定目前所在函式/類別標頭於頂端

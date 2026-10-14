@@ -252,6 +252,16 @@ int CodeEditor::lineNumberAreaWidth() {
     return space;
 }
 
+void CodeEditor::setSharedDocument(QTextDocument* doc) {
+    if (document() != doc) setDocument(doc);
+    updateLineNumberAreaWidth(0);
+    const QRect cr = contentsRect();
+    lineNumberArea->setGeometry(QRect(cr.left(), cr.top(), lineNumberAreaWidth(), cr.height()));
+    lineNumberArea->update();
+    scheduleSticky();
+    updateExtraHighlights();
+}
+
 void CodeEditor::updateLineNumberAreaWidth(int /* newBlockCount */) {
     setViewportMargins(lineNumberAreaWidth(), 0, minimapWidth(), 0);
 }

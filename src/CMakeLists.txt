@@ -13,6 +13,7 @@ set(LIB_SRCS
     core/BackgroundFileWatcher.cpp
     core/SingleInstance.cpp
     core/FileOpenRouter.cpp
+    core/EditorWindows.cpp
     # editor：編輯器本體與周邊（高亮、配對、選取、工具）
     editor/CodeEditor.cpp
     editor/SyntaxHighlighter.cpp

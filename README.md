@@ -167,6 +167,22 @@ UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）�
 - 機制：`QLockFile` 選出主實例，`QLocalServer`／`QLocalSocket`（Windows named pipe／Unix domain socket，僅限同一使用者）傳遞檔案路徑；主實例當機後下次啟動自動接手。可攜版與安裝版各自獨立。
 - 需要額外視窗時用 `AlexCode --new-window`；任何 `--` 參數（如 `--screenshot`）都以獨立行程執行。
 
+### 分割檢視、獨立視窗
+- **兩份文件並排**：檢視 → 分割檢視（`Ctrl+\`），上方選單可選「跟隨目前分頁」或固定某個分頁；分頁右鍵「在分割檢視中並排顯示」。
+- **分頁拖出成獨立視窗**：把分頁拖到分頁列外放開（或分頁右鍵「在新視窗開啟」、檢視 → 目前分頁在新視窗開啟），可移到另一個螢幕。獨立視窗與分頁共用同一份文件（編輯即時同步，`Ctrl+S` 存檔）；按「回到主視窗」關閉並切回分頁。原分頁保留在主視窗。
+
+### 大型檔案與超長行
+- Find in Files／Replace in Files 在背景執行（可取消、結果逐步出現），大專案或網路分享上不再讓視窗無回應。
+- 超長行（如壓縮的 `.min.js`，超過 `editor/longLineChars`，預設 10000 字元）不做語法高亮，且一律維持自動換行（不換行時 Qt 會把整行當成單一行排版，極慢）；游標字詞／搜尋結果標示只計算可見範圍。
+
+### macOS
+- 建置為 `AlexCode.app`；Finder 雙擊、「打開方式」、拖到 Dock 圖示皆可開檔（開到既有視窗的新分頁）。
+
+### 下載與發佈
+- 推 `v*` 標籤時 CI 自動建立 GitHub Release：Windows（zip + 安裝程式）、macOS（Universal DMG）、Linux（AppImage）。每次推送也會打包並做煙霧測試（移走建置用 Qt 後執行打包產物）。
+- macOS DMG 為 ad-hoc 簽章（未經 Apple 公證）：首次開啟請在 Finder 對 AlexCode 按右鍵 → 打開。
+- 本機打包：`scripts/package-macos.sh <build> <版本>`、`scripts/package-linux.sh <build> <版本>`。
+
 ### 快速啟動
 - **視窗即時顯示**：主視窗先繪出，上次工作階段的分頁再於背景**串流還原**（依原順序逐一載入），不再等所有檔案解析完才出現畫面。
 - **延遲啟用重量級服務**：LSP（`clangd` 等）的 `didOpen` 與 Git gutter／blame 改為「分頁實際切到時才啟用」，前景開檔立即生效、背景還原的分頁則於首次切換時載入 — 避免多分頁還原時大量語言伺服器同步與 Git 子行程一次湧入拖慢開啟（Windows 尤其明顯）。

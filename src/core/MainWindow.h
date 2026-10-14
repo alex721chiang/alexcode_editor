@@ -38,6 +38,7 @@ class MainWindow : public QMainWindow {
     friend class MainWindowSessionTest;   // tests/SessionRestoreTest.cpp：還原/開檔不卡主執行緒
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+    ~MainWindow() override;
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -205,6 +206,10 @@ private:
     QDockWidget* splitDock = nullptr;
     CodeEditor* splitEditor = nullptr;
     QTextDocument* splitOwnDoc = nullptr;             // 無分頁時的空白後備文件
+    class QComboBox* splitSourceCombo = nullptr;      // 分割檢視來源：跟隨目前分頁 / 固定某分頁（並排比對）
+    QPointer<CodeEditor> splitPinned;                 // 固定顯示的分頁（null = 跟隨目前分頁）
+    void rebuildSplitSourceCombo();
+    class EditorWindowsController* editorWindows = nullptr;   // 分頁拖出成獨立視窗
     QAction* splitAction = nullptr;
     void syncSplitView();                             // 讓分割視圖跟隨目前分頁的文件
 

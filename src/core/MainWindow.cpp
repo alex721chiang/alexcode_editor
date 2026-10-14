@@ -32,6 +32,9 @@
 #include <QTreeView>
 #include <QFileSystemModel>
 #include "BackgroundFileWatcher.h"
+#include "EditorWindows.h"
+#include <QComboBox>
+#include <QPlainTextDocumentLayout>
 #include <QFileIconProvider>
 #include <QtConcurrent>
 #include <QFutureWatcher>
@@ -1161,7 +1164,7 @@ void MainWindow::setupUI() {
     viewMenu->addAction(tailAction);
     viewMenu->addAction(fontAction);
     viewMenu->addSeparator();
-    splitAction = new QAction(tr("分割視窗（同文件雙視圖）"), this);
+    splitAction = new QAction(tr("分割檢視（並排顯示）"), this);
     splitAction->setCheckable(true);
     splitAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Backslash));
     connect(splitAction, &QAction::toggled, this, [this](bool on) {
@@ -1169,6 +1172,11 @@ void MainWindow::setupUI() {
         if (on) syncSplitView();
     });
     viewMenu->addAction(splitAction);
+    QAction* detachAction = new QAction(tr("目前分頁在新視窗開啟"), this);
+    connect(detachAction, &QAction::triggered, this, [this]() {
+        if (CodeEditor* e = activeEditor()) editorWindows->detach(e);
+    });
+    viewMenu->addAction(detachAction);
     QAction* mdAction = new QAction(tr("Markdown 預覽"), this);
     mdAction->setCheckable(true);
     connect(mdAction, &QAction::toggled, this, [this](bool on) {
@@ -1383,10 +1391,47 @@ void MainWindow::setupUI() {
 
     // ---------- 分割視窗（共用 QTextDocument 的第二視圖，編輯即時同步）----------
     splitDock = new QDockWidget("SPLIT VIEW", this);
+    splitDock->setObjectName("splitDock");
+    auto* splitWrap = new QWidget(this);
+    auto* splitLay = new QVBoxLayout(splitWrap);
+    splitLay->setContentsMargins(0, 0, 0, 0);
+    splitLay->setSpacing(2);
+    splitSourceCombo = new QComboBox(splitWrap);
+    splitSourceCombo->setObjectName("splitSourceCombo");
+    splitSourceCombo->setToolTip(tr("選擇分割檢視顯示的文件：跟隨目前分頁，或固定某個分頁以並排比對"));
+    splitLay->addWidget(splitSourceCombo);
     splitEditor = new CodeEditor(this);
+    splitEditor->setObjectName("splitEditor");
     splitEditor->setFont(defaultEditorFont);
-    splitOwnDoc = splitEditor->document();           // 後備空白文件（editor 自有）
-    splitDock->setWidget(splitEditor);
+    // 後備空白文件由主視窗持有：若是編輯器自己的子文件，QPlainTextEdit::setDocument 換成分頁文件時
+    // 會把它刪除，之後關閉分頁時切回它即存取已刪除物件（原本開著分割視窗關閉該分頁會崩潰）
+    splitOwnDoc = new QTextDocument(this);
+    splitOwnDoc->setDocumentLayout(new QPlainTextDocumentLayout(splitOwnDoc));
+    splitEditor->setSharedDocument(splitOwnDoc);
+    splitLay->addWidget(splitEditor);
+    splitDock->setWidget(splitWrap);
+    connect(splitSourceCombo, &QComboBox::currentIndexChanged, this, [this](int i) {
+        splitPinned = qobject_cast<CodeEditor*>(splitSourceCombo->itemData(i).value<QObject*>());
+        syncSplitView();
+    });
+
+    // 分頁拖出成獨立視窗（拖到分頁列外放開、或分頁右鍵選單）
+    editorWindows = new EditorWindowsController(tabWidget, this);
+    connect(editorWindows, &EditorWindowsController::activateTabRequested, this, [this](CodeEditor* e) {
+        tabWidget->setCurrentWidget(e);
+        if (isMinimized()) showNormal();
+        raise();
+        activateWindow();
+    });
+    connect(editorWindows, &EditorWindowsController::saveRequested, this, [this](CodeEditor* e) {
+        tabWidget->setCurrentWidget(e);               // saveFile 作用於目前分頁
+        saveFile();
+    });
+    connect(editorWindows, &EditorWindowsController::pinSplitRequested, this, [this](CodeEditor* e) {
+        splitPinned = e;
+        if (!splitAction->isChecked()) splitAction->setChecked(true);   // toggled → 顯示並同步
+        else syncSplitView();
+    });
     addDockWidget(Qt::RightDockWidgetArea, splitDock);
     splitDock->hide();
     connect(splitDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
@@ -1642,12 +1687,26 @@ void MainWindow::newFile() {
 }
 
 
+// 分割檢視來源清單：第一項「跟隨目前分頁」，其後為各分頁（data 為該分頁的編輯器）
+void MainWindow::rebuildSplitSourceCombo() {
+    const QSignalBlocker block(splitSourceCombo);
+    splitSourceCombo->clear();
+    splitSourceCombo->addItem(tr("（跟隨目前分頁）"), QVariant::fromValue<QObject*>(nullptr));
+    for (int i = 0; i < tabWidget->count(); ++i) {
+        auto* ed = qobject_cast<CodeEditor*>(tabWidget->widget(i));
+        if (!ed) continue;
+        splitSourceCombo->addItem(tabWidget->tabText(i), QVariant::fromValue<QObject*>(ed));
+        if (ed == splitPinned) splitSourceCombo->setCurrentIndex(splitSourceCombo->count() - 1);
+    }
+}
+
 void MainWindow::syncSplitView() {
     STALL_SCOPE("syncSplitView");
     if (!splitDock || !splitDock->isVisible()) return;
-    CodeEditor* e = activeEditor();
-    splitEditor->setDocument(e ? e->document() : splitOwnDoc);
+    rebuildSplitSourceCombo();
+    CodeEditor* e = splitPinned ? splitPinned.data() : activeEditor();   // 固定的分頁優先
     splitEditor->setFont(defaultEditorFont);
+    splitEditor->setSharedDocument(e ? e->document() : splitOwnDoc);
 }
 
 void MainWindow::refreshMarkdownPreview() {
@@ -2090,7 +2149,9 @@ bool MainWindow::closeTab(int index) {
         if (!path.isEmpty()) lspController->lsp()->documentClosed(path);
         lspSyncController->editorClosed(e);
         if (splitEditor && splitEditor->document() == e->document())
-            splitEditor->setDocument(splitOwnDoc);   // 文件即將隨分頁銷毀
+            splitEditor->setSharedDocument(splitOwnDoc);   // 文件即將隨分頁銷毀
+        if (splitPinned == e) splitPinned = nullptr; // 固定的分頁關閉 → 恢復跟隨目前分頁
+        editorWindows->editorClosing(e);             // 共用此文件的獨立視窗先關閉
     }
     tabWidget->removeTab(index);
     widget->deleteLater();
@@ -2108,7 +2169,13 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // Notepad++ 風格：關閉時不逐一詢問，整個工作階段（含未儲存內容）快照保存，
     // 下次啟動完整還原。個別關閉分頁 (Ctrl+W) 仍會提示儲存。
     saveSession();
+    editorWindows->closeAll();                       // 否則獨立視窗會讓程式繼續執行
     event->accept();
+}
+
+MainWindow::~MainWindow() {
+    // 子物件依建立順序銷毀，分頁（及其文件）可能先於 controller；獨立視窗須在此之前脫離共用文件
+    if (editorWindows) editorWindows->closeAll();
 }
 
 // ----------------------------------------------------------------
