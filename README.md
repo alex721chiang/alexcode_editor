@@ -1,11 +1,22 @@
-# AlexCode — Neon Edition (Rust Port v5.3)
+# AlexCode — Neon Edition (Rust Port v5.4)
 
 [![Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-neon.svg)](https://github.com/emilk/egui)
+[![Release](https://img.shields.io/badge/Release-v5.4.0--rust-00e5ff.svg)](https://github.com/alex721chiang/alexcode_editor/releases/tag/v5.4.0-rust)
 
 AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完全移植為高效、記憶體安全且跨平台的純 Rust 實現。
-保留了 Notepad++ 風格的日常編輯體驗、強大的 Log 行篩選引擎、LSP 語言伺服器協定支援、Git 行級差異與 Blame 追蹤、Obsidian 風格 Markdown 雙鏈筆記關聯圖、VT100 終端機，以及極具未來感的 **Neon Grid / Neon HUD** 霓虹調色盤主題。
+保留了 Notepad++ 風格的日常編輯體驗、強大的 Log 行篩選引擎、LSP 語言伺服器協定支援、Git 行級差異與 Blame 追蹤、**Typora 風格直觀 Markdown 即時預覽與原位編輯**、Obsidian 雙鏈筆記關聯圖、VT100 終端機，以及極具未來感的 **Neon Grid / Neon HUD** 霓虹調色盤主題。
+
+---
+
+## 📥 直接下載 Release 版 (Download)
+
+免安裝、單一執行檔內嵌圖示與 Orbitron 字型，下載後直接雙擊即可執行（Windows 10 / 11 x64）：
+
+- 🚀 **[點此直接下載 `alexcode.exe` (單一獨立執行檔)](https://github.com/alex721chiang/alexcode_editor/releases/download/v5.4.0-rust/alexcode.exe)**
+- 📦 **[點此下載 `AlexCode-Rust-v5.4.0-win64-portable.zip` (免安裝可攜完整包)](https://github.com/alex721chiang/alexcode_editor/releases/download/v5.4.0-rust/AlexCode-Rust-v5.4.0-win64-portable.zip)**
+- 🔗 **[前往 GitHub Releases 頁面查看版本說明](https://github.com/alex721chiang/alexcode_editor/releases/tag/v5.4.0-rust)**
 
 ---
 

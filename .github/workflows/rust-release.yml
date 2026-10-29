@@ -1,0 +1,58 @@
+name: Rust Edition Build & Release
+
+on:
+  push:
+    branches:
+      - rust-edition
+    tags:
+      - 'v*-rust*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows x64 Release
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Unit & Integration Tests
+        run: cargo test --quiet
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Package Portable Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/AlexCode-Rust
+          Copy-Item target/release/alexcode.exe dist/AlexCode-Rust/
+          Copy-Item README.md dist/AlexCode-Rust/
+          Copy-Item LICENSE dist/AlexCode-Rust/
+          Compress-Archive -Path dist/AlexCode-Rust/* -DestinationPath AlexCode-Rust-win64-portable.zip -Force
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AlexCode-Rust-win64-portable
+          path: |
+            target/release/alexcode.exe
+            AlexCode-Rust-win64-portable.zip
+
+      - name: Publish GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/alexcode.exe
+            AlexCode-Rust-win64-portable.zip
+          generate_release_notes: true
