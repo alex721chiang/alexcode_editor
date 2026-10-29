@@ -1,23 +1,5 @@
-# Build output
-build/
-/build*/
-
-# Logs / local tooling
-*.log
-aqtinstall.log
-
-# Portable-mode runtime data
-data/
-
-# 打包輸出
-dist/
-
-# Editor / OS cruft
+/target/
+**/*.rs.bk
+*.pdb
 .DS_Store
-*.user
-*.autosave
-
-# Qt / CMake intermediates
-CMakeCache.txt
-CMakeFiles/
-*_autogen/
+Thumbs.db

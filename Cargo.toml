@@ -1,0 +1,52 @@
+[package]
+name = "alexcode"
+version = "5.3.0"
+edition = "2021"
+authors = ["Alex Chiang <alex721chiang>", "AlexCode Rust Contributors"]
+description = "A fast, futuristic Notepad++ style code editor with LSP, Git, log filtering, markdown wiki, and neon HUD themes rewritten in Rust."
+license = "MIT"
+readme = "README.md"
+keywords = ["editor", "code-editor", "lsp", "git", "terminal"]
+categories = ["development-tools", "gui"]
+
+[dependencies]
+# UI Framework
+egui = "0.27"
+eframe = { version = "0.27", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+# 原版配圖（icon.png 龍形 Logo）解碼 + 原生檔案對話框
+image = { version = "0.24", default-features = false, features = ["png"] }
+rfd = "0.14"
+
+# Serialization and Data Interchange
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Regular Expressions and Parsing
+regex = "1.10"
+url = "2.5"
+
+# Date and Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Multi-threading & Async
+crossbeam-channel = "0.5"
+
+# Utilities
+unicode-segmentation = "1.11"
+unicode-width = "0.1"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[[bin]]
+name = "alexcode"
+path = "src/main.rs"
+
+[lib]
+name = "alexcode"
+path = "src/lib.rs"

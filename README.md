@@ -1,239 +1,140 @@
-# AlexCode — Neon Edition (v5.3)
+# AlexCode — Neon Edition (Rust Port v5.3)
 
-Qt 6 程式碼編輯器，目標是接近 Notepad++ 的日常編輯體驗，並整合 LSP 語言伺服器、Git、
-強大的 log 行篩選與多套未來感主題。
+[![Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-neon.svg)](https://github.com/emilk/egui)
 
-## ⬇️ 下載（Windows）
-到 [Releases](https://github.com/alex721chiang/alexcode_editor/releases) 下載：
-- **AlexCode-Setup-x.y.z.exe** — 一鍵安裝程式（含開始選單捷徑、解除安裝）
-- **AlexCode-Windows-vx.y.z.zip** — 免安裝可攜版（解壓即執行 `AlexCode.exe`）
+AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完全移植為高效、記憶體安全且跨平台的純 Rust 實現。
+保留了 Notepad++ 風格的日常編輯體驗、強大的 Log 行篩選引擎、LSP 語言伺服器協定支援、Git 行級差異與 Blame 追蹤、Obsidian 風格 Markdown 雙鏈筆記關聯圖、VT100 終端機，以及極具未來感的 **Neon Grid / Neon HUD** 霓虹調色盤主題。
 
-兩種都已用 windeployqt 內含 Qt 與 MSVC 執行期，免另外安裝。
-（未做程式碼簽章，首次執行 Windows SmartScreen 可能提示，點「其他資訊 → 仍要執行」即可。）
+---
 
-## ✨ 功能總覽
+## 🚀 核心特性 (Features)
 
-### Notepad++ 風格編輯
-| 功能 | 快捷鍵 |
-|---|---|
-| 新檔 / 開檔 / 儲存 / 另存 / 全部儲存 | Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S |
-| 關閉分頁 / 全部關閉（未儲存會提示） | Ctrl+W / Ctrl+Shift+W |
-| 複製當前行 / 刪除當前行 | Ctrl+D / Ctrl+Shift+L |
-| 上 / 下移動行 | Alt+↑ / Alt+↓ |
-| 切換註解（依語言 `//` 或 `#`） | Ctrl+/ |
-| 轉大寫 / 轉小寫 | Ctrl+Shift+U / Ctrl+U |
-| Find / Replace（大小寫、全字、Regex、即時全部標示） | Ctrl+F, F3 / Shift+F3 |
-| 跳至行 | Ctrl+G |
-| 快速開檔（模糊比對） | Ctrl+P |
-| Find / Replace in Files | Ctrl+Shift+F |
-| 文件符號清單 | Ctrl+Shift+M |
-| 縮放 | Ctrl+滾輪、Ctrl+= / Ctrl+- / Ctrl+0 |
+### 1. Notepad++ 風格高生產力編輯
+- **多游標編輯 (Multi-Cursor)**：Sublime 式多游標，支援多處同時輸入、選取與行操作。
+- **欄位 / 矩形選取 (Box / Column Selection)**：`Alt + 拖曳` 矩形區塊選取，跨行同欄批次輸入與刪除。
+- **括號與引號智慧自動配對 (Auto-Pair)**：自動補閉合、選取包圍 (Surround)、輸入閉合跳過 (SkipOver)、退格成對刪除。
+- **行操作捷徑**：
+  - 複製當前行 (`Ctrl+D`)
+  - 刪除當前行 (`Ctrl+Shift+L`)
+  - 上下移動行 (`Alt+↑` / `Alt+↓`)
+  - 智慧切換註解 (`Ctrl+/`)
+  - 轉大寫 / 小寫 (`Ctrl+Shift+U` / `Ctrl+U`)
+- **文字工具箱 (Text Tools)**：行排序、去重、反轉、全形半形互轉、Unicode Escape/Unescape、數字底數解析。
+- **大檔自動分級降級 (File Tiering)**：
+  - `< 2MB`：Full 全功能模式（自動補全、LSP、即時 Git、語法高亮）
+  - `> 2MB`：AssistOff 模式（停用 LSP / 即時背景掃描，保留高亮）
+  - `> 10MB`：HighlightOff 模式（極速純文字流暢滾動）
 
-其他：自動縮排、Tab/Shift+Tab 多行縮排、括號配對高亮、分頁未儲存 ● 標記、拖放開檔、
-可拖曳排序分頁、書籤（Ctrl+F2 / F2 / Shift+F2）、巨集錄製重播、導覽歷史（Alt+←/→）、
-Session 工作階段還原、自動快照當機復原、Big5↔UTF-8 / CRLF↔LF 偵測切換。
-**多游標**（Sublime 式）：Ctrl+Shift+D 加選下一個相同字串、Alt+F3 全選所有相同字串、
-Ctrl+點擊新增/移除游標、Alt+拖曳欄選；輸入/刪除/導覽/貼上同步套用（行數=游標數時逐行分配貼上）。
-**大檔分級降級**：>2MB 關自動完成/LSP/即時 Git 標示（保留高亮）、>10MB 連語法高亮一併關閉；閾值可在偏好設定調整。
-顯示空白字元/行尾符號可由「檢視」選單切換。
+### 2. 強大 Log 行篩選引擎 (FilterEngine)
+- 支援以 `||`（或相容舊式 `|`）分割 OR 關鍵字條件。
+- 支援進階語法：`error && !heartbeat || timeout`（`&&` 群組內 AND，`!` 前綴排除）。
+- 支援 `re:` 正規表示式前綴（不分大小寫），如 `re:err(or)?s? && !debug`。無效 Regex 自動降級為字面比對不崩潰。
+- 子序列模糊比對（如 `mwin` 符合 `MainWindow`）。
+- 自動提取正向關鍵字供多色霓虹標籤即時染色。
 
-### 語法高亮
-**tree-sitter 語法樹高亮**（C/C++、Python、JavaScript/TypeScript、JSON）：解析整份文件的語法樹，
-依節點型別精準上色（理解巢狀結構、字串/註解邊界、模板/泛型），比正規表示式更準確；
-編輯時採**增量解析**（保留語法樹、只重解析變更處）+ 120ms 防抖，並只重畫受影響的行，大檔輸入不卡；
-其餘語言（XML/HTML、Markdown、CMake、Shell…）沿用內建 regex 高亮器。
-色票跟隨目前主題（Neon Grid / Paper Light / Matrix），切換主題即時重繪。
+### 3. Git 版本控制整合
+- **行標示 (Gutter Diff)**：基於 Myers / LCS 動態規劃演算法，即時計算行級變更 — 新增行（青色條）、修改行（黃色條）、刪除位置（洋紅三角）。支援共同前綴/後綴修剪與大檔保護。
+- **並排 Diff 對齊檢視器 (Side-by-side Diff)**：左右雙欄對照與差異行配對。
+- **行內 Git Blame**：解析 `git blame --line-porcelain`，狀態列即時顯示 commit SHA、作者、日期、摘要及未提交變更標示。
 
-### 進階編輯
-| 功能 | 操作 |
-|---|---|
-| 命令面板 | Ctrl+Shift+P：模糊搜尋並執行所有指令，顯示對應快捷鍵 |
-| 專案符號搜尋 | Ctrl+T：開資料夾時於背景用 tree-sitter 索引整個專案的類別/函式（不卡 UI、狀態列顯示進度），跨檔模糊搜尋並跳轉；存檔/外部變更增量更新；索引快取於 `.alexcode/symbols.json`（依 mtime，再開秒載）（Source Insight 風） |
-| 專案找引用 | 右鍵「在專案中尋找引用」：跨檔文字版引用清單（REFERENCES 面板，雙擊跳轉）；有 LSP 時 Shift+F12 為精準語意版 |
-| 跳至符號 | Ctrl+Shift+O：模糊搜尋目前檔的類別/函式並跳轉（tree-sitter 擷取符號） |
-| Sticky scroll | 捲動時固定目前函式/類別標頭於頂端，點擊跳轉（檢視選單可開關） |
-| Minimap | 右側程式碼縮圖，點擊/拖曳快速定位（檢視選單可開關） |
-| 麵包屑導覽 | 編輯器頂部顯示「檔 › 類別 › 函式」，點擊任一段跳轉 |
-| 括號自動配對 | 輸入 ( [ { " ' ` 自動補對側、選取後包圍、輸入閉合可跳過、退格刪空配對 |
-| 字詞出現處高亮 | 游標停在識別字，可視範圍內同名字詞自動標示 |
-| 縮排輔助線 | 各縮排層級淡色直線 |
-| 程式碼摺疊 | 行號區 ▾/▸ 點擊、Ctrl+Shift+[ / ]（大括號 + 縮排混合判斷） |
-| 分割視窗 | Ctrl+\（同文件雙視圖，編輯與 Undo 即時同步） |
-| 多游標 | 選字後 Ctrl+Shift+D 逐一加選相同字串，輸入同步套用，Esc 結束 |
-| 欄位／矩形編輯 | Alt + 滑鼠拖曳選取跨行同欄區塊，輸入/刪除同步套用至每一行 |
-| 本地智慧補全 | 未啟用 LSP 時 Ctrl+Space：從文件擷取識別字，依前綴/模糊 × 出現頻率 × 與游標就近度排序（離線、免金鑰） |
-| Snippet 樣板 | trigger + Tab 展開（`alexcode-snippets.json`，支援 `${1:預設}` / `$0`、跟隨縮排） |
+### 4. LSP (Language Server Protocol) 語言伺服器
+- 完整 JSON-RPC 2.0 協定層（`Content-Length` 框架封裝與串流 Reader）。
+- 即時診斷解析 (Diagnostics)。
+- 程式碼智慧補全與 Snippet 佔位符過濾 (`extract_completions`)。
+- 跳至定義 (Goto Definition)、尋找全部引用 (References)。
+- 符號重新命名 (Rename) 與跨檔案工作區編輯套用 (`apply_text_edits`)。
+- 增量同步 (Incremental Sync) diff 計算，UTF-16 代理對安全。
 
-### AI 輔助（本機/雲端 LLM）
-工具→AI 輔助（OpenAI 相容端點；預設指向本機 LM Studio `127.0.0.1:1234`，設定檔可改雲端 + API key）：
-- **AI 補全（Ctrl+Alt+A）**：游標前文脈送模型，建議以灰字 ghost text 顯示——Tab 接受、Esc 拒絕、
-  繼續打字自動消失；多行建議顯示「⏎ +N 行」。設定檔開 `autoTrigger` 可改為編輯停頓自動觸發。
-- **AI：解釋選取**：繁中解釋開新分頁。
-- **AI：重構選取**：AI 建議與原文以**並排 diff** 對照，確認後一鍵套用（可復原）。
-設定檔 `alexcode-ai.json`（端點/金鑰/模型/溫度/自動觸發），存檔即重載。
+### 5. Markdown 筆記雙鏈與知識圖譜 (Obsidian Style)
+- **Wikilink 雙鏈解析**：支援 `[[筆記名稱]]`、`[[筆記|別名]]`、`[[筆記#章節]]` 與標準 `[text](path.md)`。
+- 自動過濾程式碼區塊與行內代碼。
+- **全庫反向連結索引 (Backlinks Index)**：自動建立雙向參照關係與有向邊。
+- **力導向知識圖譜 (Fruchterman-Reingold Graph Layout)**：決定性均勻圓周初始佈局、斥力與引力模擬、向心重力防止孤立節點漂移。
 
-### 腳本外掛（JavaScript）
-工具→腳本外掛。把 `.js` 放進外掛資料夾（選單可直接開啟），透過全域 `alexcode` 物件擴充編輯器：
-```js
-alexcode.registerCommand("插入日期時間", function() {
-    alexcode.insertText(new Date().toLocaleString());
-});
+### 6. VT100 / ANSI 整合終端機
+- 純邏輯 VT100/ANSI 狀態機與 2D 螢幕單元模型。
+- 支援 CR/LF/BS/TAB (對齊 8 倍數)、EOL 自動折行、5000 行 Scrollback 捲動歷史。
+- CSI 游標移動 (CUU, CUD, CUF, CUB, CHA, CUP)、ED (2J) 全螢幕清除、EL (K) 行尾清除。
+- 完整 SGR 色彩支援（標準 8 色、粗體、高亮 16 色 90..97 / 100..107）。
+- UTF-8 多位元組跨封包邊界累積解碼（繁體中文、Emoji 正常顯示不亂碼）。
+
+### 7. 未來感主題系統 (Themes)
+- **Neon Grid**（預設）：深空藍底 (`#0a0e17`) + 霓虹青 (`#00e5ff`) + 洋紅 (`#ff2d95`)。
+- **Neon HUD**：更深底色與光暈邊界，搭配未來科技 HUD 角標覆蓋。
+- **Paper Light**：明亮護眼淺色風格。
+- **Matrix**：經典綠黑駭客終端風格。
+
+---
+
+## 📁 專案架構 (Architecture)
+
+```text
+alexcode_rust/
+├── Cargo.toml                  # 套件設定與依賴庫
+├── README.md                   # 說明文件
+├── src/
+│   ├── lib.rs                  # 函式庫根入口
+│   ├── main.rs                 # 應用程式啟動入口
+│   ├── theme/                  # 主題調色盤系統 (Neon Grid, HUD, Paper, Matrix)
+│   ├── filter/                 # Log 行篩選引擎 (||, &&, !, re:, Fuzzy)
+│   ├── git/                    # Git Gutter, Git Blame, 並排 Diff 計算
+│   ├── editor/                 # 緩衝區、多游標、AutoPair、BoxSelect、TextTools
+│   ├── lsp/                    # LSP JSON-RPC 2.0 協定、Reader、增量同步
+│   ├── markdown/               # Wikilink 解析、Backlink 索引、力導向知識圖譜
+│   ├── terminal/               # VT100/ANSI 解析器、螢幕 Cell 模型、選取擷取
+│   ├── search/                 # CommandMatch 模糊評分、Find in Files 搜尋引擎
+│   ├── index/                  # 符號型別判定、專案符號快取索引
+│   ├── ai/                     # 本地離線智慧補全、OpenAI 相容 LLM 客戶端
+│   ├── snippets/               # 樣板代碼展開控制器
+│   ├── plugins/                # 外掛指令擴充系統
+│   ├── core/                   # 網路路徑判斷、全域組態設定
+│   └── ui/                     # Egui / Eframe 現代化 GPU 加速前端介面
+└── tests/                      # 涵蓋全模組的完整單元測試套件
 ```
-API：`text()/setText()`（可 Ctrl+Z 復原）、`selectedText()/insertText()`、
-`currentLine()/lineCount()/line(n)/gotoLine(n)`、`currentFilePath()/openFile()`、
-`statusMessage()/prompt()`。首次啟動自動附上範例（`examples.js`）；改完選「重新載入外掛」即生效。
-選 JS 而非 C++ DLL：無編譯器 ABI 相容問題，存檔即用。
 
-### 整合終端機
-Ctrl+\` 開啟互動式終端機（停靠面板）。Windows 透過 ConPTY 接 PowerShell、
-Linux/macOS 透過 forkpty 接 `$SHELL`（v4.7 起），支援 VT100/ANSI
-色彩與粗體、游標控制、鍵盤轉送（含 Ctrl+C、方向鍵、Home/End）、視窗縮放同步、滾輪捲動回看、
-UTF-8 多位元組字元（中文/emoji，跨封包邊界正確累積解碼）。
-另保留第一版「輸出面板＋」（F5 建置任務輸出、雙擊錯誤跳行）。
+---
 
-### LSP 語言伺服器（v1 + v2）
-開啟 C/C++ 或 Python 檔案時自動連線對應語言伺服器：
-| 功能 | 操作 |
-|---|---|
-| 即時診斷 | 錯誤（洋紅）/ 警告（黃）波浪底線，滑鼠停留顯示訊息 |
-| 程式碼補全 | Ctrl+Space，或輸入伺服器觸發字元（如 `.`、`->`）自動彈出 |
-| 跳至定義 | F12（跨檔案，接導覽歷史 Alt+←） |
-| 全部引用 | Shift+F12（底部 REFERENCES 面板，雙擊跳轉） |
-| 重新命名符號 | Ctrl+Alt+R（跨檔案套用，每檔單一 Undo） |
-| 格式化文件 | Shift+Alt+F |
-| Hover 資訊 | 滑鼠停留於符號顯示文件 |
-| 狀態列 | `LSP: clangd ✓ E2 W1`（伺服器、錯誤/警告數） |
+## 🛠️ 建置與執行 (Build & Run)
 
-文件同步在伺服器支援時採用增量同步（只送變更範圍）。設定：Tools → 外部工具 →
-「編輯 LSP 設定檔」（`alexcode-lsp.json`），預設 `clangd`（C/C++）與 `pylsp`（Python），
-可自行增改副檔名對應與啟動參數。未安裝伺服器時靜默停用並於狀態列提示一次；大檔案模式自動停用。
+### 前置需求
+- 安裝 [Rust](https://rustup.rs/) (建議 1.70 以上版本)
 
-### Markdown 筆記（Obsidian 風）
-以資料夾為 vault，把 `.md` 之間的連結關係視覺化：
-| 功能 | 說明 |
-|---|---|
-| **Wikilink** | `[[筆記名]]`、`[[名\|別名]]`、`[[名#標題]]`；編輯器內 Ctrl+點擊跳轉，vault 內找不到時自動建立新筆記 |
-| **Backlinks 面板** | 檢視 → Backlinks：列出「有哪些檔連到目前這篇」，點擊開啟 |
-| **關係圖** | 檢視 → 關係圖：節點＝筆記（大小依連結數）、邊＝連結，力導向佈局自動排開，點節點開檔，目前筆記高亮 |
-| **高擬真預覽** | Markdown 預覽採 GitHub 風深色 CSS（標題層級、程式碼區塊、表格、引言），`[[wikilink]]` 渲染成可點擊的內部連結 |
-
-連結解析會略過程式碼區塊與行內 `code`，並忽略 http(s)/mailto 外部連結。
-
-### Git 整合
-- **行標示（gutter）**：行號區左緣即時顯示與 HEAD 的差異 — 新增行（青）、修改行（黃）、刪除位置（洋紅三角）。編輯停頓 0.6 秒重算；commit 後隨 30 秒週期自動消除。
-- **並排 diff 檢視器**（v4.7 起）：工具→比較目前分頁→「與 Git HEAD 並排比較」/「與磁碟版本並排比較」——
-  左右雙欄逐列對齊（LCS）、增刪改整行底色、同步捲動、開啟自動跳到第一處差異。
-- **行內 blame**（v4.7 起）：狀態列即時顯示游標行的 commit / 作者 / 日期 / 摘要（未提交變更會標示）。
-- **狀態列**：目前分支與變更檔數。
-- **檔案樹染色**：EXPLORER 中已修改（黃）/ 未追蹤（青）檔案上色。
-
-### Log 行篩選
-- 關鍵字以 `||` 分隔（向下相容舊式 `|`），例如 `error || timeout || 失敗`
-- 進階語法：`error && !heartbeat || fatal`（`&&` 群組內 AND、`!` 排除）
-- **`re:` 正規表示式**：`re:err(or)?s? && !debug`（無效 pattern 自動退回字面比對）
-- **Fuzzy 模糊比對**：子序列匹配（`mwin` → `MainWindow`）
-- **多色標示**：正向關鍵字六色霓虹循環，編輯器內直接染色
-- **篩選預設集**：工具列下拉儲存／套用／刪除常用條件
-- **Tail 聯動**：檔案被外部寫入時自動重載並重套篩選
-- **時間軸密度條**：呈現命中於整份文件的分布，點擊跳至該區段
-- 「→ Tab」把結果抽成新分頁，可再次篩選做漏斗分析
-
-### 文字工具箱（Tools 選單）
-行整理（排序/去重/移除空行/反轉/修剪）、JSON 格式化/壓縮/驗證、XML 格式化/驗證、
-編解碼（Base64 / URL / HTML Entity / Unicode escape）、時間戳 ↔ 時間、雜湊（MD5 / SHA-1 / SHA-256）、
-數字底數轉換、全形半形轉換、摘要統計、檔案比較 Diff、Markdown 預覽、匯出 HTML、
-建置任務（F5 + `alexcode-tasks.json`，雙擊錯誤跳行）、外部工具選單。
-
-### 主題系統
-內建四套主題，可於設定中心即時切換：
-- **Neon Grid**（預設）：深空藍底 + 霓虹青/洋紅
-- **Neon HUD**：Neon Grid 的未來科技變體 — 更深的底色、更強的強調色光暈與發光邊界，
-  外加編輯區四角的 HUD 角標覆蓋層（航太儀表框感；非互動、滑鼠穿透，僅此主題顯示）
-- **Paper Light**：亮色護眼
-- **Matrix**：綠調終端風
-
-調色盤集中於 `src/core/Theme.h`，以單一 `Palette` 結構驅動全套 QSS 與編輯器色票。
-「關於」對話框以內嵌的 **Orbitron** 字型（OFL）呈現 ALEXCODE 未來科技字標。
-
-### 自訂與可攜
-- **介面語言（i18n）**：設定中心可選 系統預設 / English / 繁體中文，選單、對話框、狀態列訊息全面雙語化（Qt `tr()` + 內嵌 `.qm`），重新啟動後生效。
-- **快捷鍵自訂**：Tools → 外部工具 →「編輯快捷鍵設定檔」（`alexcode-keys.json`，首次自動輸出現況模板），含衝突偵測，存檔即生效。
-- **可攜模式**：執行檔旁放 `portable.ini`，所有設定 / Session / 組態改存 `./data`，解壓即用、不碰系統登錄檔。一般模式則存於使用者 AppData（`settings.ini`）。
-
-翻譯來源為 `src/i18n/app_en.ts`、`app_zh_TW.ts`，以 `lupdate` 抽取；`.qm` 由 CMake `qt_add_translations` 於建置期自動編譯並內嵌至 `:/i18n`（不需手動 `lrelease`，`.qm` 不入版控）。
-
-### 單一視窗（雙擊檔案開成新分頁）
-- 已有 AlexCode 視窗在執行時，於檔案總管/Finder 雙擊關聯檔案（或執行 `AlexCode 檔案…`）會把檔案交給既有視窗**開成新分頁**並帶到前景，不再開新視窗；同時開多個檔案（多選後 Enter）也只會有一個視窗。
-- 機制：`QLockFile` 選出主實例，`QLocalServer`／`QLocalSocket`（Windows named pipe／Unix domain socket，僅限同一使用者）傳遞檔案路徑；主實例當機後下次啟動自動接手。可攜版與安裝版各自獨立。
-- 需要額外視窗時用 `AlexCode --new-window`；任何 `--` 參數（如 `--screenshot`）都以獨立行程執行。
-
-### 分割檢視、獨立視窗
-- **兩份文件並排**：檢視 → 分割檢視（`Ctrl+\`），上方選單可選「跟隨目前分頁」或固定某個分頁；分頁右鍵「在分割檢視中並排顯示」。
-- **分頁拖出成獨立視窗**：把分頁拖到分頁列外放開（或分頁右鍵「在新視窗開啟」、檢視 → 目前分頁在新視窗開啟），可移到另一個螢幕。獨立視窗與分頁共用同一份文件（編輯即時同步，`Ctrl+S` 存檔）；按「回到主視窗」關閉並切回分頁。原分頁保留在主視窗。
-
-### 大型檔案與超長行
-- Find in Files／Replace in Files 在背景執行（可取消、結果逐步出現），大專案或網路分享上不再讓視窗無回應。
-- 超長行（如壓縮的 `.min.js`，超過 `editor/longLineChars`，預設 10000 字元）不做語法高亮，且一律維持自動換行（不換行時 Qt 會把整行當成單一行排版，極慢）；游標字詞／搜尋結果標示只計算可見範圍。
-
-### macOS
-- 建置為 `AlexCode.app`；Finder 雙擊、「打開方式」、拖到 Dock 圖示皆可開檔（開到既有視窗的新分頁）。
-
-### 下載與發佈
-- 推 `v*` 標籤時 CI 自動建立 GitHub Release：Windows（zip + 安裝程式）、macOS（Universal DMG）、Linux（AppImage）。每次推送也會打包並做煙霧測試（移走建置用 Qt 後執行打包產物）。
-- macOS DMG 為 ad-hoc 簽章（未經 Apple 公證）：首次開啟請在 Finder 對 AlexCode 按右鍵 → 打開。
-- 本機打包：`scripts/package-macos.sh <build> <版本>`、`scripts/package-linux.sh <build> <版本>`。
-
-### 快速啟動
-- **視窗即時顯示**：主視窗先繪出，上次工作階段的分頁再於背景**串流還原**（依原順序逐一載入），不再等所有檔案解析完才出現畫面。
-- **延遲啟用重量級服務**：LSP（`clangd` 等）的 `didOpen` 與 Git gutter／blame 改為「分頁實際切到時才啟用」，前景開檔立即生效、背景還原的分頁則於首次切換時載入 — 避免多分頁還原時大量語言伺服器同步與 Git 子行程一次湧入拖慢開啟（Windows 尤其明顯）。
-- 大檔仍沿用分級降級（`editor/highlightMaxMB`、`editor/assistMaxMB`）自動關閉高亮／LSP／即時 Git。
-- **網路分享（SMB/NFS）友善**：還原工作階段時不在主執行緒碰原檔——非作用中分頁只建佔位，切到才於背景讀檔（讀不到時保留分頁，切回即重試）；未存檔分頁由本機快照還原並沿用原編碼／換行；專案資料夾存在檢查、Markdown 連結索引（僅在 Backlinks／Graph 開啟時建立）、資料夾監看清單皆改為背景執行。
-- 網路路徑相關設定（`settings.ini`）：`index/watchNetworkFolders`（預設 `false`，網路資料夾不掛目錄監看）、`network/disableGit`（預設 `false`；設為 `true` 則網路路徑不跑 git gutter／blame／狀態）。網路專案的 git 狀態輪詢自動由 30 秒放寬為 120 秒。
-- **開啟後不再 Not Responding**：檔案監看（外部變更、符號索引的資料夾監看）移至專屬背景執行緒註冊；背景讀檔/掃描改用專屬 I/O 執行緒池，不再佔用 Qt 繪圖也會用到的全域執行緒池（被佔滿時 UI 會卡在繪圖）；git / 語言伺服器不再以網路資料夾當子行程工作目錄；外部變更（含 tail 模式）改背景重讀並合併連續變更；網路資料夾的檔案樹改用不碰磁碟的通用圖示並停用其自身監看。
-- **卡頓診斷**：主執行緒卡住超過 400ms 時，於資料目錄的 `perf.log` 記錄卡頓時間與卡在哪個區段（例：`stall 812 ms @ setProjectFolder > fsModel.setRootPath (71%)`）。設定 `debug/stallLog=false` 關閉、`debug/stallThresholdMs` 調整門檻。自動偵測不到的網路路徑可用環境變數 `ALEXCODE_NETWORK_PREFIXES`（以 `;` 分隔的路徑前綴）指定。
-
-## 建置
-
-需求：Qt 6（含 `Qt5Compat` 模組）、CMake ≥ 3.16、C++17 編譯器、Ninja（建議）。
-
+### 建置與啟動
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/path/to/Qt/6.x/<kit>
-cmake --build build
-./build/src/AlexCode
+# 檢查與編譯
+cargo build --release
+
+# 執行 AlexCode
+cargo run --release
+
+# 執行所有單元測試
+cargo test
 ```
 
-Windows（MinGW + Qt 6.8.3）打包可攜版：
-```powershell
-windeployqt --release --compiler-runtime build\src\AlexCode.exe
-```
+---
 
-## 打包與發佈
+## 🧪 測試涵蓋 (Test Coverage)
 
-版本號統一在 `CMakeLists.txt` 的 `project(AlexCode VERSION x.y.z)`，建置時產生 `Version.h`，
-顯示於視窗標題與「關於 AlexCode」對話框（Help 選單）。
+專案包含對應於原 C++ 專案各個模組的完整單元測試：
+- `filter_test.rs`：AND / OR 邏輯、`||` 與 `|` 相容、進階語法、Regex 前綴與錯誤容忍。
+- `diff_calc_test.rs`：LCS 行對齊、純新增/純刪除、Modified 配對、不平衡區塊填充。
+- `auto_pair_test.rs`：括號引號補全、選取包圍、閉合跳過、成對刪除。
+- `box_select_test.rs`：矩形欄位計算、短行 clamp、反向拖曳正規化。
+- `command_match_test.rs`：命令面板評分（前綴 > 包含 > 模糊子序列）。
+- `md_link_test.rs`：Wikilink 雙鏈別名剝除、代碼區塊排除、正規化鍵。
+- `graph_layout_test.rs`：力導向座標邊界檢查、決定性佈局驗證。
+- `vt_parser_test.rs`：VT100 游標移動、螢幕清除、SGR 色彩、UTF-8 跨 Feed 解碼。
+- `local_completion_test.rs`：前綴與模糊排序、詞頻加權、就近度評分。
+- `text_tools_test.rs`：行排序、去重、反轉、全半形、Unicode、進位解析。
+- `git_blame_test.rs`：Porcelain 格式解析、未提交狀態標示。
+- `git_gutter_test.rs`：HEAD 差異標記、中段 LCS、大檔保護。
+- `lsp_protocol_test.rs`：框架封裝、增量同步 diff、TextEdit 逆序套用。
+- `file_tier_test.rs`：大檔大小門檻判定。
 
-一鍵打包可攜 zip：
-```powershell
-pwsh scripts/package.ps1 -QtDir C:\Qt\6.8.3\mingw_64
-# → dist\AlexCode-Windows-vX.Y.Z.zip（已含全部 DLL 與 portable.ini）
-```
+---
 
-**自動發佈**：推送 `v*` 標籤（如 `git tag v4.4.0 && git push origin v4.4.0`）會觸發
-GitHub Actions 建置、打包 zip，並建立 GitHub Release 附上該 zip。
+## 📄 授權 (License)
 
-**程式碼簽章（未內建）**：要消除「未知發行者」警告需 Authenticode 憑證，取得後可用
-`signtool sign /fd SHA256 /tr <時間戳記伺服器> /td SHA256 /f cert.pfx /p <密碼> AlexCode.exe` 簽署；
-CI 中則把憑證放 GitHub Secrets 後於 release 前加一步簽章。本專案預設不簽。
-
-## 測試
-```bash
-cd build && ctest   # 或直接執行 ./tests/AlexCodeTests
-```
-75 項單元測試，涵蓋篩選引擎（OR/AND、`||` 解析與舊式 `|` 相容、模糊比對、`re:` regex）、
-LSP 協定層（框架切割/重組、診斷/補全/定義/hover/references/rename/formatting 解析、增量同步 diff、
-伺服器能力解析）、Git gutter 行級 diff、VT100/ANSI 解析器（游標/清除/SGR/跨封包切割）、
-矩形選取邏輯、本地補全排序、與 10 萬行效能測試。
-另有無頭整合測試：真實 clangd（`tests/lsp_smoke.cpp`）與 PTY（`tests/pty_smoke.cpp`；
-Linux CI 以 ctest 執行 forkpty 驗證，Windows ConPTY 版供手動執行）。
-
-開發輔助：`AlexCode --screenshot out.png [檔案…]` 讓程式以 Qt 自我渲染存圖（不需實體螢幕、桌面鎖定亦可），方便自動化驗證 GUI。
+本專案採用 [MIT License](LICENSE) 授權開源。
