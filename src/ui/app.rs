@@ -8,33 +8,40 @@
 //! - 底部 Dock（終端機 / Markdown 關聯圖，左側強調色識別條）
 //! - 狀態列（漸層 + 光暈上邊框）
 
-use super::highlight::{find_matches, highlight, Lang};
+use super::highlight::{highlight, highlight_ranges, Lang};
 use super::icons::{paint_icon, tool_button, IconKind};
 use super::markdown_view::{
     render_markdown_toolbar, render_outline_panel, render_typora_document, MarkdownViewState, MdAction, MdViewMode,
 };
 use super::style::{self, hgradient, paint_hud_corners, vgradient, with_alpha, Colors, ORBITRON};
-use crate::core::{available_shells, open_terminal, reveal_in_file_manager, EditorConfig, ShellKind};
-use crate::editor::{detect_and_decode, EditorBuffer, FileEncoding, Position, Selection};
+use crate::core::{
+    available_shells, list_dir, open_terminal, reveal_in_file_manager, stamp_of, AppState, DirEntryInfo, EditorConfig,
+    FileWatcher, ShellKind, Stamp,
+};
+use crate::editor::{
+    decide as pair_decide, detect_and_decode, is_relevant as pair_relevant, should_delete_pair, Action as PairAction,
+    EditorBuffer, FileEncoding, Position, Selection,
+};
+use crate::git::{diff_line_states, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
-use crate::search::{command_match_score, search_in_files, FileMatch, SearchStats};
+use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, SearchStats};
 use crate::snippets::SnippetsController;
 use crate::terminal::VtParser;
 use crate::theme::ThemeManager;
-use crossbeam_channel::{unbounded, Receiver};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
     self, text::CCursor, text::CCursorRange, Align, Align2, Color32, FontFamily, FontId, Key, KeyboardShortcut,
     Layout, Modifiers, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const WELCOME: &str = r##"// ========================================================
-//  AlexCode — Neon Edition (v5.3 Rust Port)
+//  AlexCode — Neon Edition (Rust)
 //  A fast Notepad++ style code editor rewritten in Rust
 // ========================================================
 
@@ -108,6 +115,10 @@ pub enum Cmd {
     Save,
     SaveAs,
     CloseTab,
+    OpenFolder,
+    OpenRecent(String),
+    ToggleExplorer,
+    Replace,
     RevealInFolder,
     OpenShell(ShellKind),
     CopyPath,
@@ -190,6 +201,8 @@ pub struct AlexCodeApp {
     allow_exit: bool,
     /// 上一幀程式碼編輯區是否擁有鍵盤焦點（決定 Ctrl+Z 是否由文件的復原紀錄處理）
     editor_focused: bool,
+    /// 上一幀結束時編輯區是否有焦點（本幀處理輸入事件前的狀態）
+    editor_was_focused: bool,
     /// 目前分頁以 `\n` 連接的全文快取：鍵為 (分頁 id, 內容版本)
     text_cache: ((u64, u64), String),
     /// 編輯區排版結果（含語法高亮）快取：鍵為全文 / 語言 / 主題 / 字型 / 搜尋字串的雜湊。
@@ -203,6 +216,68 @@ pub struct AlexCodeApp {
     find_job: Option<FindJob>,
     last_title: String,
     pending_copy: Option<String>,
+
+    // ---- 跨次啟動的狀態 ----
+    /// `state.json` 的位置；None（測試）時不讀寫
+    state_path: Option<PathBuf>,
+    /// 上次寫入磁碟的內容（相同就不重寫）
+    saved_state: AppState,
+    last_persist: std::time::Instant,
+    recent_files: Vec<String>,
+    /// 專案資料夾由使用者以「開啟資料夾」指定：之後開檔不再改變它
+    root_pinned: bool,
+    auto_pair: bool,
+
+    // ---- 檔案總管側邊欄 ----
+    show_explorer: bool,
+    tree_cache: HashMap<PathBuf, TreeDir>,
+    tree_expanded: HashSet<PathBuf>,
+    tree_chan: (Sender<(PathBuf, Result<Vec<DirEntryInfo>, String>)>, Receiver<(PathBuf, Result<Vec<DirEntryInfo>, String>)>),
+
+    // ---- 尋找 / 取代 ----
+    find_opts: FindOptions,
+    show_replace: bool,
+    replace_text: String,
+    find_error: Option<String>,
+    /// 下一次套用 `pending_select` 時不要把鍵盤焦點移到編輯區（從尋找列操作時，焦點要留在尋找列）
+    select_keeps_focus: bool,
+    /// 目前的命中（字元區間, 當時的內容版本）：編輯區沒有焦點時以外框標示
+    find_current: Option<((usize, usize), u64)>,
+    /// 下一幀把鍵盤焦點交還給編輯區（關閉尋找列時）
+    focus_editor: bool,
+
+    // ---- 外部變更偵測 ----
+    watcher: Option<FileWatcher>,
+    /// 各分頁（依 id）上次讀寫磁碟時的檔案版本
+    disk_stamps: HashMap<u64, Option<Stamp>>,
+    /// 有未儲存修改、同時又被外部修改的分頁 id：等待使用者決定
+    disk_conflict: Option<u64>,
+
+    // ---- 單一實例：其他實例交來的檔案 ----
+    incoming: Option<Receiver<Vec<PathBuf>>>,
+
+    // ---- Git 行號區標記 ----
+    /// 各分頁（依 id）在 HEAD 的內容；None = 不在 Git 儲存庫內或未追蹤
+    git_head: HashMap<u64, Option<Arc<Vec<String>>>>,
+    git_chan: (Sender<(u64, Option<Vec<String>>)>, Receiver<(u64, Option<Vec<String>>)>),
+    /// 目前分頁的行狀態快取：鍵為 (分頁 id, 內容版本)
+    git_marks: ((u64, u64), HashMap<usize, u8>),
+
+    repaint: Option<egui::Context>,
+}
+
+enum TreeDir {
+    Loading,
+    Loaded(Arc<Vec<DirEntryInfo>>),
+    Failed(String),
+}
+
+enum TreeAction {
+    Open(PathBuf),
+    Toggle(PathBuf),
+    Reveal(PathBuf),
+    Shell(PathBuf, ShellKind),
+    CopyPath(PathBuf),
 }
 
 type FontAtlas = Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>;
@@ -287,6 +362,7 @@ impl AlexCodeApp {
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
+            editor_was_focused: false,
             text_cache: ((0, 0), String::new()),
             highlight_cache: None,
             find_cache: ((0, 0, String::new()), Vec::new()),
@@ -294,6 +370,31 @@ impl AlexCodeApp {
             find_job: None,
             last_title: String::new(),
             pending_copy: None,
+            state_path: None,
+            saved_state: AppState::default(),
+            last_persist: std::time::Instant::now(),
+            recent_files: Vec::new(),
+            root_pinned: false,
+            auto_pair: true,
+            show_explorer: false,
+            tree_cache: HashMap::new(),
+            tree_expanded: HashSet::new(),
+            tree_chan: unbounded(),
+            find_opts: FindOptions::default(),
+            show_replace: false,
+            replace_text: String::new(),
+            find_error: None,
+            select_keeps_focus: false,
+            find_current: None,
+            focus_editor: false,
+            watcher: None,
+            disk_stamps: HashMap::new(),
+            disk_conflict: None,
+            incoming: None,
+            git_head: HashMap::new(),
+            git_chan: unbounded(),
+            git_marks: ((0, 0), HashMap::new()),
+            repaint: None,
         };
 
         // 開啟歡迎頁面與 Typora Markdown 導覽頁
@@ -312,14 +413,187 @@ impl AlexCodeApp {
     pub fn with_context(cc: &eframe::CreationContext<'_>) -> Self {
         style::setup_fonts(&cc.egui_ctx);
         let mut app = Self::new();
+        app.repaint = Some(cc.egui_ctx.clone());
+        // 背景檢查已開啟的檔案是否被其他程式修改
+        let ctx = cc.egui_ctx.clone();
+        app.watcher = Some(FileWatcher::new(std::time::Duration::from_millis(1000), move || ctx.request_repaint()));
+        // 還原上次的主題、字型、資料夾與開啟的檔案
+        app.state_path = crate::core::config_dir().map(|d| d.join("state.json"));
+        if let Some(st) = app.state_path.as_deref().and_then(AppState::load) {
+            app.apply_state(st);
+        }
         // 命令列參數：直接開啟檔案
         for arg in std::env::args().skip(1) {
             let p = PathBuf::from(&arg);
             if p.is_file() {
-                app.open_path(&p);
+                app.open_path(&std::path::absolute(&p).unwrap_or(p));
             }
         }
+        app.saved_state = app.snapshot_state();
         app
+    }
+
+    /// 接上單一實例的通道：之後其他實例交來的檔案會在本視窗開啟
+    pub fn set_incoming(&mut self, rx: Receiver<Vec<PathBuf>>) {
+        self.incoming = Some(rx);
+    }
+
+    /// 已存檔（磁碟上有對應檔案）的分頁路徑
+    fn file_tabs(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .filter_map(|b| b.file_path.clone())
+            .filter(|p| Path::new(p).is_absolute())
+            .collect()
+    }
+
+    fn snapshot_state(&self) -> AppState {
+        AppState {
+            theme: self.theme_mgr.current_theme_name().to_string(),
+            font_size: self.font_size,
+            open_files: self.file_tabs(),
+            active_file: self
+                .active_buffer()
+                .and_then(|b| b.file_path.clone())
+                .filter(|p| Path::new(p).is_absolute()),
+            recent_files: self.recent_files.clone(),
+            folder: self.root_pinned.then(|| self.project_root.to_string_lossy().to_string()),
+            show_explorer: self.show_explorer,
+            auto_pair: self.auto_pair,
+        }
+    }
+
+    /// 套用上次保存的狀態；已不存在的檔案 / 資料夾略過
+    fn apply_state(&mut self, st: AppState) {
+        if ThemeManager::theme_names().iter().any(|n| *n == st.theme) {
+            self.theme_mgr.set_theme(&st.theme);
+        }
+        if st.font_size >= 8.0 && st.font_size <= 36.0 {
+            self.font_size = st.font_size;
+        }
+        self.recent_files = st.recent_files;
+        self.auto_pair = st.auto_pair;
+        if let Some(dir) = st.folder.map(PathBuf::from).filter(|d| d.is_dir()) {
+            self.set_folder(dir);
+        }
+        self.show_explorer = st.show_explorer;
+        let recent = self.recent_files.clone(); // 還原分頁不該改變「最近開啟」的順序
+        for f in &st.open_files {
+            let p = PathBuf::from(f);
+            if p.is_file() {
+                self.open_path(&p);
+            }
+        }
+        self.recent_files = recent;
+        if let Some(i) = st.active_file.and_then(|a| self.tabs.iter().position(|b| b.file_path.as_deref() == Some(a.as_str()))) {
+            self.active_tab_idx = i;
+        }
+    }
+
+    /// 狀態有變就寫回 `state.json`（測試中 `state_path` 為 None，不寫）
+    fn persist_state(&mut self) {
+        self.last_persist = std::time::Instant::now();
+        let Some(path) = self.state_path.clone() else { return };
+        let st = self.snapshot_state();
+        if st != self.saved_state && st.save(&path).is_ok() {
+            self.saved_state = st;
+        }
+    }
+
+    fn push_recent(&mut self, path: &str) {
+        let mut st = AppState { recent_files: std::mem::take(&mut self.recent_files), ..Default::default() };
+        st.push_recent(path);
+        self.recent_files = st.recent_files;
+    }
+
+    /// 指定專案資料夾（檔案總管的根目錄、全專案搜尋的範圍）
+    fn set_folder(&mut self, dir: PathBuf) {
+        self.project_root = dir.clone();
+        self.term_cwd = dir.clone();
+        self.root_pinned = true;
+        self.show_explorer = true;
+        self.tree_cache.clear();
+        self.tree_expanded.clear();
+        self.request_dir(dir);
+    }
+
+    /// 在背景執行緒列出資料夾內容（網路磁碟上列舉可能很慢，不能卡住介面）
+    fn request_dir(&mut self, dir: PathBuf) {
+        self.tree_cache.insert(dir.clone(), TreeDir::Loading);
+        let tx = self.tree_chan.0.clone();
+        let repaint = self.repaint.clone();
+        std::thread::spawn(move || {
+            let res = list_dir(&dir).map_err(|e| e.to_string());
+            let _ = tx.send((dir, res));
+            if let Some(ctx) = repaint {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// 在背景取得分頁檔案於 Git HEAD 的內容（行號區的新增 / 修改 / 刪除標記用）
+    fn request_git_head(&mut self, idx: usize) {
+        let Some(buf) = self.tabs.get(idx) else { return };
+        let Some(path) = buf.file_path.clone().map(PathBuf::from).filter(|p| p.is_absolute()) else { return };
+        let (id, tx, repaint) = (buf.id, self.git_chan.0.clone(), self.repaint.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send((id, crate::git::head_lines(&path)));
+            if let Some(ctx) = repaint {
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    /// 分頁內容剛從磁碟讀入或寫回磁碟後呼叫：記下磁碟版本，之後才能分辨「外部修改」與「自己存的檔」
+    fn note_disk_state(&mut self, idx: usize) {
+        let Some(buf) = self.tabs.get(idx) else { return };
+        if let Some(path) = buf.file_path.as_deref().map(Path::new).filter(|p| p.is_absolute()) {
+            self.disk_stamps.insert(buf.id, stamp_of(path));
+        }
+    }
+
+    /// 處理背景偵測到的磁碟變更
+    fn handle_disk_events(&mut self, events: Vec<(PathBuf, Option<Stamp>)>) {
+        for (path, stamp) in events {
+            let key = path.to_string_lossy().to_string();
+            let Some(idx) = self.tabs.iter().position(|b| b.file_path.as_deref() == Some(key.as_str())) else { continue };
+            let id = self.tabs[idx].id;
+            if self.disk_stamps.get(&id) == Some(&stamp) {
+                continue; // 就是我們自己剛存的版本
+            }
+            self.disk_stamps.insert(id, stamp);
+            if stamp.is_none() {
+                self.status_message = format!("「{}」已被刪除或移動（內容仍保留在分頁中）", Self::tab_title(&self.tabs[idx]));
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let (text, _) = self.tabs[idx].encoding.decode(&bytes);
+            if EditorBuffer::from_text(&text).lines == self.tabs[idx].lines {
+                continue; // 內容其實沒變（例如只是被 touch）
+            }
+            if self.tabs[idx].modified {
+                self.disk_conflict = Some(id); // 交給使用者決定
+            } else {
+                self.reload_tab_from(idx, &text);
+            }
+        }
+    }
+
+    /// 以磁碟上的新內容更新分頁。游標原本在最後一行（看 log 的常見情況）時跟著移到新的結尾。
+    fn reload_tab_from(&mut self, idx: usize, text: &str) {
+        let buf = &mut self.tabs[idx];
+        let at_end = buf.selections[0].head.line + 1 >= buf.lines.len();
+        buf.reload_text(text);
+        if at_end {
+            let line = buf.lines.len() - 1;
+            let col = buf.line_len(line);
+            buf.selections = vec![Selection::point(Position { line, col })];
+        }
+        self.status_message = format!("「{}」已被其他程式修改，已重新載入", Self::tab_title(&self.tabs[idx]));
+        if idx == self.active_tab_idx && self.editor_focused {
+            self.sync_cursor_to_editor();
+            self.scroll_to_cursor = at_end;
+        }
     }
 
     pub fn active_buffer(&self) -> Option<&EditorBuffer> {
@@ -385,6 +659,12 @@ impl AlexCodeApp {
             .unwrap_or_else(|| old_idx.min(self.tabs.len().saturating_sub(1)));
         if self.tabs.is_empty() {
             self.new_tab();
+        }
+        let alive: HashSet<u64> = self.tabs.iter().map(|b| b.id).collect();
+        self.disk_stamps.retain(|id, _| alive.contains(id));
+        self.git_head.retain(|id, _| alive.contains(id));
+        if self.disk_conflict.map_or(false, |id| !alive.contains(&id)) {
+            self.disk_conflict = None;
         }
     }
 
@@ -516,25 +796,24 @@ impl AlexCodeApp {
                 buf.file_path = Some(full.clone());
                 let is_md = Lang::from_path(&full) == Lang::Markdown;
                 // 若目前只有未修改的歡迎頁 / 空白頁，直接取代
-                let replace = self.tabs.len() == 1
-                    && !self.tabs[0].modified
-                    && self.tabs[0]
-                        .file_path
-                        .as_deref()
-                        .map_or(true, |p| !Path::new(p).is_absolute());
-                if replace {
-                    self.tabs[0] = buf;
-                    self.active_tab_idx = 0;
-                } else {
-                    self.tabs.push(buf);
-                    self.active_tab_idx = self.tabs.len() - 1;
+                // 開啟第一個真正的檔案時，收掉未修改的歡迎頁 / 空白頁
+                if self.file_tabs().is_empty() {
+                    self.tabs.retain(|b| b.modified);
                 }
+                self.tabs.push(buf);
+                self.active_tab_idx = self.tabs.len() - 1;
                 if is_md {
                     self.md_view.mode = MdViewMode::Typora;
                 }
-                if let Some(parent) = path.parent() {
-                    self.project_root = parent.to_path_buf();
+                // 沒有以「開啟資料夾」指定專案資料夾時，才跟著目前檔案走
+                if !self.root_pinned {
+                    if let Some(parent) = path.parent() {
+                        self.project_root = parent.to_path_buf();
+                    }
                 }
+                self.note_disk_state(self.active_tab_idx);
+                self.request_git_head(self.active_tab_idx);
+                self.push_recent(&full);
                 self.status_message = format!("已開啟 {}", full);
             }
             Err(e) => self.status_message = format!("開啟失敗：{} ({})", full, e),
@@ -633,8 +912,15 @@ impl AlexCodeApp {
         match std::fs::write(&path, bytes) {
             Ok(_) => {
                 let b = &mut self.tabs[idx];
-                b.file_path = Some(path.to_string_lossy().to_string());
+                let full = path.to_string_lossy().to_string();
+                let path_changed = b.file_path.as_deref() != Some(full.as_str());
+                b.file_path = Some(full.clone());
                 b.mark_saved();
+                self.note_disk_state(idx);
+                if path_changed {
+                    self.request_git_head(idx);
+                    self.push_recent(&full);
+                }
                 self.status_message = format!("已儲存 {}（{}）", path.display(), encoding.label());
                 true
             }
@@ -663,6 +949,8 @@ impl AlexCodeApp {
                 nb.encoding = encoding;
                 nb.file_path = Some(path);
                 self.tabs[idx] = nb;
+                self.note_disk_state(idx);
+                self.request_git_head(idx);
                 self.status_message = if bad {
                     format!("已用 {} 重新讀取，但有無法解碼的位元組（顯示為 �）；這個編碼可能不對，請勿存檔", encoding.label())
                 } else {
@@ -702,6 +990,9 @@ impl AlexCodeApp {
             ("檔案：新增檔案 (New File)".into(), Cmd::NewFile),
             ("檔案：新增 Markdown 筆記 (New Markdown)".into(), Cmd::NewMarkdown),
             ("檔案：開啟檔案 (Open File)".into(), Cmd::Open),
+            ("檔案：開啟資料夾 (Open Folder)".into(), Cmd::OpenFolder),
+            ("檢視：檔案總管側邊欄 (Explorer)".into(), Cmd::ToggleExplorer),
+            ("搜尋：取代 (Replace)".into(), Cmd::Replace),
             ("檔案：儲存 (Save)".into(), Cmd::Save),
             ("檔案：另存新檔 (Save As)".into(), Cmd::SaveAs),
             ("檔案：關閉分頁 (Close Tab)".into(), Cmd::CloseTab),
@@ -753,6 +1044,31 @@ impl AlexCodeApp {
             Cmd::Save => self.save_active(false),
             Cmd::SaveAs => self.save_active(true),
             Cmd::CloseTab => self.close_tab(self.active_tab_idx),
+            Cmd::OpenFolder => {
+                if let Some(dir) = rfd::FileDialog::new().set_directory(&self.project_root).pick_folder() {
+                    self.set_folder(dir);
+                }
+            }
+            Cmd::OpenRecent(path) => {
+                let p = PathBuf::from(&path);
+                if p.is_file() {
+                    self.open_path(&p);
+                } else {
+                    self.recent_files.retain(|r| r != &path);
+                    self.status_message = format!("檔案已不存在：{}", path);
+                }
+            }
+            Cmd::ToggleExplorer => {
+                self.show_explorer = !self.show_explorer;
+                if self.show_explorer && !self.tree_cache.contains_key(&self.project_root) {
+                    self.request_dir(self.project_root.clone());
+                }
+            }
+            Cmd::Replace => {
+                self.show_find_bar = true;
+                self.show_replace = true;
+                self.find_bar_focus = true;
+            }
             Cmd::RevealInFolder => self.reveal_tab(self.active_tab_idx),
             Cmd::OpenShell(kind) => self.open_shell_for_tab(self.active_tab_idx, kind),
             Cmd::CopyPath => {
@@ -858,8 +1174,14 @@ impl AlexCodeApp {
             Cmd::ZoomOut => self.font_size = (self.font_size - 1.0).max(8.0),
             Cmd::About => self.show_about = true,
             Cmd::Plugin(name) => {
+                // 外掛指令產生的文字插入到游標位置
                 if let Some(res) = self.plugin_mgr.run_command(&name) {
-                    self.status_message = format!("執行指令成功: {}", res);
+                    self.commit_md_edit();
+                    if let Some(b) = self.active_buffer_mut() {
+                        b.insert_text(&res);
+                    }
+                    self.sync_cursor_to_editor();
+                    self.status_message = format!("已插入：{}", res);
                 }
             }
         }
@@ -961,7 +1283,7 @@ impl AlexCodeApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let ca = Modifiers::COMMAND | Modifiers::ALT;
-        let shortcuts: [(Modifiers, Key, Cmd); 20] = [
+        let shortcuts: [(Modifiers, Key, Cmd); 22] = [
             (cs, Key::P, Cmd::CommandPalette),
             (cs, Key::F, Cmd::FindInFiles),
             (cs, Key::S, Cmd::SaveAs),
@@ -973,6 +1295,8 @@ impl AlexCodeApp {
             (Modifiers::COMMAND, Key::S, Cmd::Save),
             (Modifiers::COMMAND, Key::W, Cmd::CloseTab),
             (Modifiers::COMMAND, Key::F, Cmd::Find),
+            (Modifiers::COMMAND, Key::H, Cmd::Replace),
+            (Modifiers::COMMAND, Key::B, Cmd::ToggleExplorer),
             (Modifiers::COMMAND, Key::G, Cmd::GotoLine),
             (Modifiers::COMMAND, Key::D, Cmd::DuplicateLine),
             (Modifiers::COMMAND, Key::Slash, Cmd::ToggleComment),
@@ -1006,6 +1330,9 @@ impl AlexCodeApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.commit_md_edit();
+            if self.show_find_bar {
+                self.focus_editor = true; // 關閉尋找列後回到編輯區（游標停在目前的命中）
+            }
             self.show_find_bar = false;
             self.show_goto = false;
             self.show_command_palette = false;
@@ -1073,6 +1400,20 @@ impl AlexCodeApp {
                         if mi(ui, "新增檔案 (New)", "Ctrl+N") { cmd = Some(Cmd::NewFile); }
                         if mi(ui, "新增 Markdown 筆記 (New MD)", "") { cmd = Some(Cmd::NewMarkdown); }
                         if mi(ui, "開啟檔案 (Open)…", "Ctrl+O") { cmd = Some(Cmd::Open); }
+                        if mi(ui, "開啟資料夾 (Open Folder)…", "") { cmd = Some(Cmd::OpenFolder); }
+                        ui.menu_button("最近開啟的檔案", |ui| {
+                            ui.set_min_width(360.0);
+                            if self.recent_files.is_empty() {
+                                ui.label(RichText::new("（尚無紀錄）").color(c.fg_dim2));
+                            }
+                            for path in &self.recent_files {
+                                let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                                if ui.button(name).on_hover_text(path).clicked() {
+                                    cmd = Some(Cmd::OpenRecent(path.clone()));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
                         ui.separator();
                         if mi(ui, "儲存 (Save)", "Ctrl+S") { cmd = Some(Cmd::Save); }
                         if mi(ui, "另存新檔 (Save As)…", "Ctrl+Shift+S") { cmd = Some(Cmd::SaveAs); }
@@ -1106,6 +1447,7 @@ impl AlexCodeApp {
                     ui.menu_button("搜尋 (Search)", |ui| {
                         ui.set_min_width(260.0);
                         if mi(ui, "尋找 (Find)", "Ctrl+F") { cmd = Some(Cmd::Find); }
+                        if mi(ui, "取代 (Replace)", "Ctrl+H") { cmd = Some(Cmd::Replace); }
                         if mi(ui, "跳至行 (Go to Line)", "Ctrl+G") { cmd = Some(Cmd::GotoLine); }
                         ui.separator();
                         if mi(ui, "命令面板 (Command Palette)", "Ctrl+Shift+P") { cmd = Some(Cmd::CommandPalette); }
@@ -1116,6 +1458,14 @@ impl AlexCodeApp {
                         ui.set_min_width(260.0);
                         if mi(ui, "切換 Typora Markdown 模式", "Ctrl+Shift+M") {
                             cmd = Some(Cmd::CycleMarkdownMode);
+                        }
+                        let mut ex = self.show_explorer;
+                        if ui.checkbox(&mut ex, "檔案總管側邊欄 (Explorer)  Ctrl+B").clicked() {
+                            cmd = Some(Cmd::ToggleExplorer);
+                            ui.close_menu();
+                        }
+                        if ui.checkbox(&mut self.auto_pair, "自動配對括號與引號").clicked() {
+                            ui.close_menu();
                         }
                         if ui.checkbox(&mut self.md_view.show_outline, "Markdown 大綱側邊欄 (Outline)").clicked() {
                             ui.close_menu();
@@ -1182,7 +1532,7 @@ impl AlexCodeApp {
                             );
                         } else {
                             ui.label(
-                                RichText::new("v5.3")
+                                RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                                     .font(FontId::new(11.0, FontFamily::Name(ORBITRON.into())))
                                     .color(c.fg_dim2),
                             );
@@ -1424,18 +1774,121 @@ impl AlexCodeApp {
             });
     }
 
+    /// 目前游標在全文中的 byte 位置
+    fn caret_byte(&self, text: &str) -> usize {
+        let Some(buf) = self.active_buffer() else { return 0 };
+        let h = buf.selections[0].head;
+        let ci = Self::char_index_of(buf, h.line, h.col);
+        text.char_indices().nth(ci).map_or(text.len(), |(b, _)| b)
+    }
+
+    /// 選取 `text` 中的 byte 區間並捲動到該處
+    fn select_bytes(&mut self, text: &str, a: usize, b: usize) {
+        let ca = text[..a].chars().count();
+        let cb = ca + text[a..b].chars().count();
+        self.pending_select = Some((ca, cb));
+        self.scroll_to_cursor = true;
+        self.select_keeps_focus = true;
+        self.find_current = self.active_buffer().map(|b| ((ca, cb), b.revision()));
+        // 緩衝區的游標也同步，連續操作（下一個、取代）才會以這個命中為基準
+        if let Some(buf) = self.tabs.get_mut(self.active_tab_idx) {
+            let line = text[..b].matches('\n').count();
+            let col = text[..b].rsplit('\n').next().map_or(0, |l| l.chars().count());
+            buf.selections = vec![Selection::point(Position { line, col })];
+        }
+    }
+
+    /// 尋找下一個 / 上一個（以游標位置為基準，到底後從頭繞回）
+    fn find_step(&mut self, forward: bool) {
+        self.commit_md_edit();
+        let Some(text) = self.active_buffer().map(|b| b.edit_text()) else { return };
+        let matches = match find_all(&text, &self.find_bar_text, &self.find_opts) {
+            Ok(m) => m,
+            Err(e) => {
+                self.find_error = Some(e);
+                return;
+            }
+        };
+        if matches.is_empty() {
+            return;
+        }
+        let caret = self.caret_byte(&text);
+        let i = if forward {
+            matches.iter().position(|m| m.0 >= caret).unwrap_or(0)
+        } else {
+            matches.iter().rposition(|m| m.1 < caret).unwrap_or(matches.len() - 1)
+        };
+        self.find_cursor = i;
+        self.select_bytes(&text, matches[i].0, matches[i].1);
+    }
+
+    /// 取代目前選取的命中並跳到下一個；游標不在命中上時先跳到下一個命中
+    fn replace_current(&mut self) {
+        self.commit_md_edit();
+        let Some(text) = self.active_buffer().map(|b| b.edit_text()) else { return };
+        let Ok(matches) = find_all(&text, &self.find_bar_text, &self.find_opts) else { return };
+        let caret = self.caret_byte(&text);
+        let Some(&hit) = matches.iter().find(|m| m.1 == caret) else {
+            self.find_step(true);
+            return;
+        };
+        match replace_range(&text, hit, &self.find_bar_text, &self.replace_text, &self.find_opts) {
+            Ok((new_text, end)) => {
+                if let Some(buf) = self.active_buffer_mut() {
+                    buf.replace_all_text(&new_text);
+                }
+                let rest = find_all(&new_text, &self.find_bar_text, &self.find_opts).unwrap_or_default();
+                match rest.iter().position(|m| m.0 >= end).or(if rest.is_empty() { None } else { Some(0) }) {
+                    Some(i) => {
+                        self.find_cursor = i;
+                        self.select_bytes(&new_text, rest[i].0, rest[i].1);
+                    }
+                    None => self.select_bytes(&new_text, end, end),
+                }
+                self.status_message = "已取代 1 處".to_string();
+            }
+            Err(e) => self.status_message = e,
+        }
+    }
+
+    /// 取代文件中的所有命中（一次復原即可還原）
+    fn replace_all_matches(&mut self) {
+        self.commit_md_edit();
+        let Some(text) = self.active_buffer().map(|b| b.edit_text()) else { return };
+        match replace_all(&text, &self.find_bar_text, &self.replace_text, &self.find_opts) {
+            Ok((new_text, n)) => {
+                if n > 0 {
+                    if let Some(buf) = self.active_buffer_mut() {
+                        buf.replace_all_text(&new_text);
+                    }
+                    self.sync_cursor_to_editor();
+                }
+                self.status_message = format!("已取代 {} 處", n);
+            }
+            Err(e) => self.status_message = e,
+        }
+    }
+
     fn find_bar(&mut self, ctx: &egui::Context, c: &Colors) {
         if !self.show_find_bar {
             return;
         }
-        // 全文與命中位置都只在內容或搜尋字串改變時重算
+        // 全文與命中位置都只在內容、搜尋字串或選項改變時重算
         self.sync_text_cache();
-        let text = std::mem::take(&mut self.text_cache.1);
-        let fkey = (self.text_cache.0 .0, self.text_cache.0 .1, self.find_bar_text.clone());
+        let fkey = (
+            self.text_cache.0 .0,
+            self.text_cache.0 .1,
+            format!("{}\u{0}{:?}", self.find_bar_text, self.find_opts),
+        );
         if self.find_cache.0 != fkey {
-            self.find_cache = (fkey, find_matches(&text, &self.find_bar_text));
+            let found = find_all(&self.text_cache.1, &self.find_bar_text, &self.find_opts);
+            self.find_error = found.as_ref().err().cloned();
+            self.find_cache = (fkey, found.unwrap_or_default());
         }
-        let matches = std::mem::take(&mut self.find_cache.1);
+        let total = self.find_cache.1.len();
+        // (往下找?), 取代, 全部取代
+        let mut go: Option<bool> = None;
+        let (mut do_replace, mut do_replace_all) = (false, false);
         egui::TopBottomPanel::top("find_bar")
             .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
             .show_separator_line(false)
@@ -1459,10 +1912,11 @@ impl AlexCodeApp {
                     }
                     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     let shift = ui.input(|i| i.modifiers.shift);
-                    let mut go: Option<bool> = None;
                     if enter {
                         go = Some(!shift);
                         resp.request_focus();
+                        // 這個 Enter 屬於尋找列：不能再被後面的編輯區當成「輸入換行」
+                        ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::Enter, .. })));
                     }
                     if ui.button("▲").on_hover_text("上一個 (Shift+Enter)").clicked() {
                         go = Some(false);
@@ -1470,38 +1924,344 @@ impl AlexCodeApp {
                     if ui.button("▼").on_hover_text("下一個 (Enter)").clicked() {
                         go = Some(true);
                     }
-                    if let Some(forward) = go {
-                        if !matches.is_empty() {
-                            let n = matches.len();
-                            self.find_cursor = if forward {
-                                (self.find_cursor + 1) % n
-                            } else {
-                                (self.find_cursor + n - 1) % n
-                            };
-                            let (a, b) = matches[self.find_cursor.min(n - 1)];
-                            let ca = text[..a].chars().count();
-                            let cb = ca + text[a..b].chars().count();
-                            self.pending_select = Some((ca, cb));
-                            self.scroll_to_cursor = true;
-                        }
+                    let o = &mut self.find_opts;
+                    if ui.selectable_label(o.case_sensitive, "Aa").on_hover_text("區分大小寫").clicked() {
+                        o.case_sensitive = !o.case_sensitive;
                     }
-                    let label = if self.find_bar_text.is_empty() {
-                        String::new()
-                    } else if matches.is_empty() {
-                        "無結果".to_string()
+                    if ui.selectable_label(o.whole_word, "全字").on_hover_text("全字拼寫須相符").clicked() {
+                        o.whole_word = !o.whole_word;
+                    }
+                    if ui.selectable_label(o.regex, ".*").on_hover_text("使用正規表示式").clicked() {
+                        o.regex = !o.regex;
+                    }
+                    if ui.selectable_label(self.show_replace, "取代").on_hover_text("顯示 / 隱藏取代列 (Ctrl+H)").clicked() {
+                        self.show_replace = !self.show_replace;
+                    }
+                    let (label, ok) = if let Some(e) = &self.find_error {
+                        (e.clone(), false)
+                    } else if self.find_bar_text.is_empty() {
+                        (String::new(), true)
+                    } else if total == 0 {
+                        ("無結果".to_string(), false)
                     } else {
-                        format!("{} / {}", self.find_cursor.min(matches.len() - 1) + 1, matches.len())
+                        (format!("{} / {}", self.find_cursor.min(total - 1) + 1, total), true)
                     };
-                    ui.label(RichText::new(label).color(if matches.is_empty() { c.accent2 } else { c.accent }));
+                    ui.label(RichText::new(label).color(if ok { c.accent } else { c.accent2 }));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("✕").clicked() {
                             self.show_find_bar = false;
+                            self.focus_editor = true;
                         }
                     });
                 });
+                if self.show_replace {
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0 + ui.spacing().item_spacing.x);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut self.replace_text)
+                                .hint_text(if self.find_opts.regex { "取代為…（可用 $1 引用群組）" } else { "取代為…" })
+                                .desired_width(280.0),
+                        );
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                            do_replace = true;
+                            resp.request_focus();
+                            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Key { key: Key::Enter, .. })));
+                        }
+                        if ui.button("取代").on_hover_text("取代目前的命中並跳到下一個 (Enter)").clicked() {
+                            do_replace = true;
+                        }
+                        if ui.button("全部取代").clicked() {
+                            do_replace_all = true;
+                        }
+                    });
+                }
             });
-        self.text_cache.1 = text;
-        self.find_cache.1 = matches;
+        if let Some(forward) = go {
+            self.find_step(forward);
+        }
+        if do_replace {
+            self.replace_current();
+        }
+        if do_replace_all {
+            self.replace_all_matches();
+        }
+    }
+
+    /// 左側檔案總管：專案資料夾的樹狀檢視（資料夾內容在背景載入）
+    fn explorer_panel(&mut self, ctx: &egui::Context, c: &Colors) {
+        if !self.show_explorer {
+            return;
+        }
+        let root = self.project_root.clone();
+        if !self.tree_cache.contains_key(&root) {
+            self.request_dir(root.clone());
+        }
+        let active = self.active_buffer().and_then(|b| b.file_path.clone());
+        let mut actions: Vec<TreeAction> = Vec::new();
+        let (mut close, mut open_folder, mut refresh) = (false, false, false);
+        egui::SidePanel::left("explorer_panel")
+            .resizable(true)
+            .default_width(240.0)
+            .width_range(160.0..=520.0)
+            .frame(egui::Frame::none().fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
+            .show(ctx, |ui| {
+                if Self::dock_title(ui, c, "EXPLORER  檔案總管") {
+                    close = true;
+                }
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
+                    ui.add(egui::Label::new(RichText::new(name).color(c.accent).strong()).truncate(true))
+                        .on_hover_text(root.display().to_string());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        if ui.small_button("重新整理").clicked() {
+                            refresh = true;
+                        }
+                        if ui.small_button("開啟…").on_hover_text("選擇另一個資料夾").clicked() {
+                            open_folder = true;
+                        }
+                    });
+                });
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    self.tree_rows(ui, c, &root, 0, active.as_deref(), &mut actions);
+                });
+            });
+        if close {
+            self.show_explorer = false;
+        }
+        if open_folder {
+            self.run_cmd(Cmd::OpenFolder);
+        }
+        if refresh {
+            let dirs: Vec<PathBuf> = std::iter::once(root).chain(self.tree_expanded.iter().cloned()).collect();
+            self.tree_cache.clear();
+            for d in dirs {
+                self.request_dir(d);
+            }
+        }
+        for a in actions {
+            match a {
+                TreeAction::Open(p) => self.open_path(&p),
+                TreeAction::Toggle(d) => {
+                    if !self.tree_expanded.remove(&d) {
+                        if !self.tree_cache.contains_key(&d) {
+                            self.request_dir(d.clone());
+                        }
+                        self.tree_expanded.insert(d);
+                    }
+                }
+                TreeAction::Reveal(p) => {
+                    self.status_message = match reveal_in_file_manager(&p) {
+                        Ok(_) => format!("已在檔案總管顯示：{}", p.display()),
+                        Err(e) => format!("無法開啟檔案總管：{}", e),
+                    };
+                }
+                TreeAction::Shell(d, kind) => {
+                    self.status_message = match open_terminal(&d, kind) {
+                        Ok(_) => format!("已在 {} 開啟終端機", d.display()),
+                        Err(e) => format!("無法開啟終端機：{}", e),
+                    };
+                }
+                TreeAction::CopyPath(p) => {
+                    let text = p.to_string_lossy().to_string();
+                    self.status_message = format!("已複製路徑：{}", text);
+                    ctx.copy_text(text);
+                }
+            }
+        }
+    }
+
+    fn tree_rows(&self, ui: &mut egui::Ui, c: &Colors, dir: &Path, depth: usize, active: Option<&str>, actions: &mut Vec<TreeAction>) {
+        let indent = 8.0 + depth as f32 * 14.0;
+        let note = |ui: &mut egui::Ui, text: String, col: Color32| {
+            ui.horizontal(|ui| {
+                ui.add_space(indent + 14.0);
+                ui.label(RichText::new(text).size(12.0).color(col));
+            });
+        };
+        let list = match self.tree_cache.get(dir) {
+            Some(TreeDir::Loaded(list)) => list.clone(),
+            Some(TreeDir::Failed(e)) => return note(ui, format!("無法讀取：{}", e), c.accent2),
+            _ => return note(ui, "載入中…".to_string(), c.fg_dim2),
+        };
+        if list.is_empty() {
+            return note(ui, "（空資料夾）".to_string(), c.fg_dim2);
+        }
+        let row_h = 22.0;
+        for e in list.iter() {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
+            let expanded = e.is_dir && self.tree_expanded.contains(&e.path);
+            // 只畫看得到的列（大資料夾也不會拖慢每一幀）
+            if ui.is_rect_visible(rect) {
+                let is_active = !e.is_dir && active.map_or(false, |a| Path::new(a) == e.path);
+                let p = ui.painter();
+                if is_active {
+                    p.rect_filled(rect, 0.0, c.accent_faint);
+                    p.rect_filled(Rect::from_min_size(rect.min, egui::vec2(2.0, row_h)), 0.0, c.accent);
+                } else if resp.hovered() {
+                    p.rect_filled(rect, 0.0, c.hover);
+                }
+                let x = rect.left() + indent;
+                let cy = rect.center().y;
+                if e.is_dir {
+                    let pts = if expanded {
+                        vec![Pos2::new(x, cy - 2.5), Pos2::new(x + 8.0, cy - 2.5), Pos2::new(x + 4.0, cy + 3.0)]
+                    } else {
+                        vec![Pos2::new(x + 1.5, cy - 4.0), Pos2::new(x + 7.0, cy), Pos2::new(x + 1.5, cy + 4.0)]
+                    };
+                    p.add(Shape::convex_polygon(pts, c.fg_dim2, Stroke::NONE));
+                }
+                let col = if is_active {
+                    c.accent
+                } else if e.is_dir {
+                    c.fg
+                } else {
+                    c.fg_list
+                };
+                p.text(Pos2::new(x + 14.0, cy), Align2::LEFT_CENTER, &e.name, FontId::proportional(13.0), col);
+            }
+            if resp.clicked() {
+                actions.push(if e.is_dir { TreeAction::Toggle(e.path.clone()) } else { TreeAction::Open(e.path.clone()) });
+            }
+            resp.context_menu(|ui| {
+                ui.set_min_width(230.0);
+                let folder = if e.is_dir { e.path.clone() } else { e.path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
+                if ui.button("開啟檔案所在資料夾").clicked() {
+                    actions.push(TreeAction::Reveal(e.path.clone()));
+                    ui.close_menu();
+                }
+                for (kind, label) in available_shells() {
+                    if ui.button(*label).clicked() {
+                        actions.push(TreeAction::Shell(folder.clone(), *kind));
+                        ui.close_menu();
+                    }
+                }
+                ui.separator();
+                if ui.button("複製完整路徑").clicked() {
+                    actions.push(TreeAction::CopyPath(e.path.clone()));
+                    ui.close_menu();
+                }
+            });
+            if expanded {
+                self.tree_rows(ui, c, &e.path, depth + 1, active, actions);
+            }
+        }
+    }
+
+    /// 分頁有未儲存的修改、檔案又被其他程式改了：讓使用者決定要哪一份
+    fn disk_conflict_bar(&mut self, ctx: &egui::Context, c: &Colors) {
+        let idx = self.active_tab_idx;
+        let Some(buf) = self.tabs.get(idx).filter(|b| Some(b.id) == self.disk_conflict) else { return };
+        let name = Self::tab_title(buf);
+        let mut choice: Option<bool> = None; // true = 重新載入
+        egui::TopBottomPanel::top("disk_conflict_bar")
+            .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("「{}」已被其他程式修改，而你有尚未儲存的變更。", name)).color(c.warn));
+                    if ui.button("重新載入（放棄我的修改）").clicked() {
+                        choice = Some(true);
+                    }
+                    if ui.button("保留我的版本").clicked() {
+                        choice = Some(false);
+                    }
+                });
+            });
+        match choice {
+            Some(true) => {
+                self.disk_conflict = None;
+                let path = self.tabs[idx].file_path.clone().unwrap_or_default();
+                match std::fs::read(&path) {
+                    Ok(bytes) => {
+                        let (text, _) = self.tabs[idx].encoding.decode(&bytes);
+                        self.reload_tab_from(idx, &text);
+                        self.note_disk_state(idx);
+                    }
+                    Err(e) => self.status_message = format!("重新載入失敗：{}", e),
+                }
+            }
+            Some(false) => {
+                self.disk_conflict = None;
+                self.status_message = "已保留你的版本；儲存時會覆寫磁碟上的檔案".to_string();
+            }
+            None => {}
+        }
+    }
+
+    /// 自動配對：在 TextEdit 處理輸入事件之前改寫事件。回傳 TextEdit 處理完後游標要再移動的字元數。
+    fn auto_pair_events(ui: &egui::Ui, editor_id: egui::Id, text: &str) -> isize {
+        let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).and_then(|s| s.cursor.char_range()) else {
+            return 0;
+        };
+        let (a, b) = (range.primary.index.min(range.secondary.index), range.primary.index.max(range.secondary.index));
+        // 本幀恰好輸入一個字元（輸入法組字、貼上等情況不處理）
+        let typed: Option<char> = ui.input(|i| {
+            let mut texts = i.events.iter().filter_map(|e| match e {
+                egui::Event::Text(t) => Some(t),
+                _ => None,
+            });
+            match (texts.next(), texts.next()) {
+                (Some(t), None) if t.chars().count() == 1 => t.chars().next(),
+                _ => None,
+            }
+        });
+        let backspace = typed.is_none() && ui.input(|i| i.modifiers.is_none() && i.key_pressed(Key::Backspace));
+        if !backspace && !typed.map_or(false, pair_relevant) {
+            return 0;
+        }
+        let before = if a > 0 { text.chars().nth(a - 1) } else { None };
+        let after = text.chars().nth(b);
+        if backspace {
+            // 游標在一對空的括號 / 引號中間：連右邊那個一起刪
+            if a == b && should_delete_pair(before, after) {
+                ui.input_mut(|i| {
+                    i.events.push(egui::Event::Key {
+                        key: Key::Delete,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    })
+                });
+            }
+            return 0;
+        }
+        let Some(ch) = typed else { return 0 };
+        let d = pair_decide(ch, before, after, a != b);
+        let set_text = |new: String| {
+            ui.input_mut(|i| {
+                for e in &mut i.events {
+                    if let egui::Event::Text(t) = e {
+                        *t = new.clone();
+                    }
+                }
+            })
+        };
+        match d.action {
+            PairAction::AutoClose => match d.close {
+                Some(close) => {
+                    set_text(format!("{ch}{close}"));
+                    -1
+                }
+                None => 0,
+            },
+            PairAction::SkipOver => {
+                ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+                1
+            }
+            PairAction::Surround => match (d.open, d.close) {
+                (Some(open), Some(close)) => {
+                    let sel: String = text.chars().skip(a).take(b - a).collect();
+                    set_text(format!("{open}{sel}{close}"));
+                    0
+                }
+                _ => 0,
+            },
+            PairAction::Insert => 0,
+        }
     }
 
     fn status_bar(&mut self, ctx: &egui::Context, c: &Colors) {
@@ -1819,6 +2579,8 @@ impl AlexCodeApp {
             }
         }
 
+        self.disk_conflict_bar(ctx, c);
+        self.editor_was_focused = self.editor_focused;
         self.editor_focused = false; // 由 code_editor 在本幀重新設定
         let mut md_action = MdAction::None;
         egui::CentralPanel::default()
@@ -1926,8 +2688,18 @@ impl AlexCodeApp {
                 .cursor
                 .set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(b))));
             state.store(ui.ctx(), editor_id);
+            if !std::mem::take(&mut self.select_keeps_focus) {
+                ui.ctx().memory_mut(|m| m.request_focus(editor_id));
+            }
+        }
+        if std::mem::take(&mut self.focus_editor) {
             ui.ctx().memory_mut(|m| m.request_focus(editor_id));
         }
+        let find_current = if self.show_find_bar {
+            self.find_current.filter(|(_, rev)| *rev == self.tabs[idx].revision()).map(|(r, _)| r)
+        } else {
+            None
+        };
 
         let row_h = ui.fonts(|f| f.row_height(&font));
         let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
@@ -1939,6 +2711,7 @@ impl AlexCodeApp {
         let pal_c = pal.clone();
         let font_c = font.clone();
         let theme = self.theme_mgr.current_theme_name().to_string();
+        let fopts = self.find_opts;
         let mut hl_cache = self.highlight_cache.take();
         let mut layouter = |ui: &egui::Ui, s: &str, _wrap: f32| {
             use std::hash::{Hash, Hasher};
@@ -1948,19 +2721,35 @@ impl AlexCodeApp {
             theme.hash(&mut h);
             font_c.size.to_bits().hash(&mut h);
             find.hash(&mut h);
+            fopts.hash(&mut h);
             let key = h.finish();
             let atlas = ui.fonts(|f| f.texture_atlas());
             match &hl_cache {
                 Some((k, galley, a)) if *k == key && Arc::ptr_eq(a, &atlas) => galley.clone(),
                 _ => {
                     let l = if s.len() > HIGHLIGHT_MAX_BYTES { Lang::Plain } else { lang };
-                    let job = highlight(s, l, &pal_c, font_c.clone(), &find);
+                    let hits = find_all(s, &find, &fopts).unwrap_or_default();
+                    let job = highlight_ranges(s, l, &pal_c, font_c.clone(), &hits);
                     let galley = ui.fonts(|f| f.layout_job(job));
                     hl_cache = Some((key, galley.clone(), atlas));
                     galley
                 }
             }
         };
+
+        // Git 行狀態：只在內容或 HEAD 內容改變時重算
+        let buf_key = (self.tabs[idx].id, self.tabs[idx].revision());
+        match self.git_head.get(&buf_key.0) {
+            Some(Some(head)) => {
+                if self.git_marks.0 != buf_key {
+                    self.git_marks = (buf_key, diff_line_states(head, &self.tabs[idx].lines, 800));
+                }
+            }
+            _ => self.git_marks = ((0, 0), HashMap::new()),
+        }
+        let git_marks = std::mem::take(&mut self.git_marks.1);
+        let was_focused = self.editor_was_focused;
+        let pair_enabled = self.auto_pair && !matches!(lang, Lang::Plain | Lang::Markdown);
 
         let mut new_cursor: Option<(usize, usize)> = None;
         let mut changed = false;
@@ -1978,6 +2767,9 @@ impl AlexCodeApp {
                     let line_bg_idx = ui.painter().add(Shape::Noop);
                     let gutter_idx = ui.painter().add(Shape::Noop);
 
+                    let cursor_shift =
+                        if pair_enabled && was_focused { Self::auto_pair_events(ui, editor_id, &text) } else { 0 };
+
                     let output = egui::TextEdit::multiline(&mut text)
                         .id(editor_id)
                         .font(font.clone())
@@ -1992,6 +2784,16 @@ impl AlexCodeApp {
 
                     changed = output.response.changed();
                     self.editor_focused = output.response.has_focus();
+                    if cursor_shift != 0 {
+                        // 自動補上右括號後游標留在中間；跳過既有的右括號時游標右移
+                        if let Some(mut st) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
+                            if let Some(r) = st.cursor.char_range() {
+                                let i = (r.primary.index as isize + cursor_shift).max(0) as usize;
+                                st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(i))));
+                                st.store(ui.ctx(), editor_id);
+                            }
+                        }
+                    }
                     let galley = &output.galley;
                     let gpos = output.galley_pos;
 
@@ -2048,6 +2850,25 @@ impl AlexCodeApp {
                                     c.accent,
                                 ));
                             }
+                            // Git：新增（強調色條）/ 修改（黃色條）/ 此行上方有刪除（洋紅三角）
+                            if let Some(&st) = git_marks.get(&i) {
+                                let x = gutter_rect.right() - 4.0;
+                                if st & (ADDED | MODIFIED) != 0 {
+                                    let col = if st & MODIFIED != 0 { c.warn } else { c.accent };
+                                    shapes.push(Shape::rect_filled(
+                                        Rect::from_min_size(Pos2::new(x, y), egui::vec2(3.0, row_h)),
+                                        0.0,
+                                        col,
+                                    ));
+                                }
+                                if st & DELETED_ABOVE != 0 {
+                                    shapes.push(Shape::convex_polygon(
+                                        vec![Pos2::new(x - 3.0, y - 3.0), Pos2::new(x + 3.0, y), Pos2::new(x - 3.0, y + 3.0)],
+                                        c.accent2,
+                                        Stroke::NONE,
+                                    ));
+                                }
+                            }
                             if bookmarks.contains(&i) {
                                 shapes.push(Shape::circle_filled(
                                     Pos2::new(gutter_rect.left() + 9.0, y + row_h * 0.5),
@@ -2069,9 +2890,25 @@ impl AlexCodeApp {
                         }
                     }
 
+                    // 編輯區沒有焦點時（焦點在尋找列）egui 不畫選取：自行以外框標出目前的命中
+                    if let Some((a, b)) = find_current.filter(|_| !output.response.has_focus()) {
+                        let ra = galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(a)));
+                        let rb = galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(b)));
+                        if (ra.top() - rb.top()).abs() < 0.5 {
+                            let r = Rect::from_min_max(ra.left_top(), rb.right_bottom()).translate(gpos.to_vec2());
+                            ui.painter().rect_stroke(r.expand(1.0), 2.0, Stroke::new(1.5_f32, c.accent));
+                        }
+                    }
+
                     if scroll_to_cursor {
-                        if let Some(cr) = output.cursor_range {
-                            let r = galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2());
+                        // 沒有焦點時 output.cursor_range 為 None：改用編輯狀態中記錄的游標
+                        let primary = output.cursor_range.map(|cr| cr.primary).or_else(|| {
+                            egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                                .and_then(|st| st.cursor.char_range())
+                                .map(|r| galley.from_ccursor(r.primary))
+                        });
+                        if let Some(cur) = primary {
+                            let r = galley.pos_from_cursor(&cur).translate(gpos.to_vec2());
                             ui.scroll_to_rect(r.expand2(egui::vec2(40.0, row_h * 2.0)), Some(Align::Center));
                         }
                     }
@@ -2079,6 +2916,7 @@ impl AlexCodeApp {
             });
 
         self.highlight_cache = hl_cache;
+        self.git_marks.1 = git_marks;
         if changed {
             self.tabs[idx].apply_typed_text(&text);
         }
@@ -2365,7 +3203,7 @@ impl AlexCodeApp {
                                 .color(c.accent),
                         );
                         ui.label(
-                            RichText::new("NEON EDITION · v5.3 RUST PORT")
+                            RichText::new(concat!("NEON EDITION · v", env!("CARGO_PKG_VERSION"), " RUST"))
                                 .font(FontId::new(10.0, FontFamily::Name(ORBITRON.into())))
                                 .color(c.accent2),
                         );
@@ -2484,6 +3322,48 @@ impl eframe::App for AlexCodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui_frame(ctx);
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_state();
+    }
+}
+
+impl AlexCodeApp {
+    /// 收取背景工作的結果：外部檔案變更、其他實例交來的檔案、資料夾列舉、Git HEAD 內容；並定期保存狀態
+    fn poll_services(&mut self, ctx: &egui::Context) {
+        if let Some(w) = &self.watcher {
+            w.set_paths(self.file_tabs().into_iter().map(PathBuf::from).collect());
+            let events = w.poll();
+            if !events.is_empty() {
+                self.handle_disk_events(events);
+            }
+        }
+        let batches: Vec<Vec<PathBuf>> = self.incoming.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        for files in batches {
+            for f in files {
+                self.open_path(&f);
+            }
+            // 把視窗帶到前景
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        let dirs: Vec<_> = self.tree_chan.1.try_iter().collect();
+        for (dir, res) in dirs {
+            let entry = match res {
+                Ok(list) => TreeDir::Loaded(Arc::new(list)),
+                Err(e) => TreeDir::Failed(e),
+            };
+            self.tree_cache.insert(dir, entry);
+        }
+        let heads: Vec<_> = self.git_chan.1.try_iter().collect();
+        for (id, lines) in heads {
+            self.git_head.insert(id, lines.map(Arc::new));
+            self.git_marks.0 = (0, 0);
+        }
+        if self.last_persist.elapsed() > std::time::Duration::from_secs(3) {
+            self.persist_state();
+        }
+    }
 }
 
 impl AlexCodeApp {
@@ -2503,6 +3383,8 @@ impl AlexCodeApp {
                 self.logo = Some(ctx.load_texture("alexcode-logo", img, egui::TextureOptions::LINEAR));
             }
         }
+
+        self.poll_services(ctx);
 
         // 視窗標題顯示目前檔案（只在標題真的改變時才送出命令）
         if let Some(buf) = self.active_buffer() {
@@ -2548,6 +3430,7 @@ impl AlexCodeApp {
         self.status_bar(ctx, &colors);
         self.terminal_dock(ctx, &colors);
         self.graph_dock(ctx, &colors);
+        self.explorer_panel(ctx, &colors);
         self.tab_bar(ctx, &colors);
         self.find_bar(ctx, &colors);
         self.editor_area(ctx, &colors);
@@ -2771,6 +3654,288 @@ mod tests {
         assert_eq!(app.tab_dir(0), root, "unsaved tab falls back to the project folder");
         app.open_path(&path);
         assert_eq!(app.tab_dir(app.active_tab_idx), dir.path());
+    }
+
+    fn write(dir: &tempfile::TempDir, name: &str, text: &str) -> PathBuf {
+        let p = dir.path().join(name);
+        std::fs::write(&p, text).unwrap();
+        p
+    }
+
+    #[test]
+    fn session_state_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(&dir, "a.rs", "fn a() {}");
+        let b = write(&dir, "b.txt", "bee");
+        let state_file = dir.path().join("cfg").join("state.json");
+
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.open_path(&a);
+        app.open_path(&b);
+        app.active_tab_idx = 0;
+        app.theme_mgr.set_theme("Matrix");
+        app.font_size = 17.0;
+        app.set_folder(dir.path().to_path_buf());
+        app.auto_pair = false;
+        app.persist_state();
+        assert!(state_file.exists());
+
+        // 「重新啟動」：新的 App 讀回同一份狀態
+        let mut app2 = AlexCodeApp::new();
+        app2.apply_state(AppState::load(&state_file).unwrap());
+        assert_eq!(app2.file_tabs(), app.file_tabs());
+        assert_eq!(app2.tabs.len(), 2, "welcome tabs are replaced by the restored files");
+        assert_eq!(app2.tabs[app2.active_tab_idx].file_path, app.tabs[0].file_path);
+        assert_eq!(app2.theme_mgr.current_theme_name(), "Matrix");
+        assert_eq!(app2.font_size, 17.0);
+        assert_eq!(app2.project_root, dir.path());
+        assert!(app2.root_pinned && app2.show_explorer && !app2.auto_pair);
+        assert_eq!(app2.recent_files, app.recent_files);
+
+        // 已不存在的檔案略過，不會出錯
+        std::fs::remove_file(&b).unwrap();
+        let mut app3 = AlexCodeApp::new();
+        app3.apply_state(AppState::load(&state_file).unwrap());
+        assert_eq!(app3.file_tabs().len(), 1);
+    }
+
+    #[test]
+    fn opening_files_keeps_pinned_folder_and_tracks_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let a = write(&dir, "a.txt", "a");
+        std::fs::write(sub.join("b.txt"), "b").unwrap();
+
+        let mut app = AlexCodeApp::new();
+        app.open_path(&a);
+        assert_eq!(app.project_root, dir.path(), "without a pinned folder the root follows the file");
+        app.set_folder(dir.path().to_path_buf());
+        app.open_path(&sub.join("b.txt"));
+        assert_eq!(app.project_root, dir.path(), "a pinned folder is not changed by opening files");
+        assert_eq!(app.recent_files.len(), 2);
+        assert!(app.recent_files[0].ends_with("b.txt"));
+    }
+
+    #[test]
+    fn external_change_reloads_clean_tab_and_asks_for_dirty_tab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "log.txt", "one\ntwo");
+        let mut app = AlexCodeApp::new();
+        app.open_path(&path);
+        let idx = app.active_tab_idx;
+        let id = app.tabs[idx].id;
+
+        // 自己存檔造成的變更不算外部修改
+        app.tabs[idx].replace_all_text("one\ntwo\nmine");
+        assert!(app.save_tab(idx, false));
+        app.handle_disk_events(vec![(path.clone(), stamp_of(&path))]);
+        assert_eq!(app.tabs[idx].edit_text(), "one\ntwo\nmine");
+        assert!(app.disk_conflict.is_none());
+
+        // 未修改的分頁：自動重新載入，游標在最後一行時跟到新的結尾
+        let last = app.tabs[idx].lines.len() - 1;
+        app.tabs[idx].selections = vec![Selection::point(Position { line: last, col: 0 })];
+        std::fs::write(&path, "one\ntwo\nmine\nappended by another program").unwrap();
+        app.handle_disk_events(vec![(path.clone(), stamp_of(&path))]);
+        assert_eq!(app.tabs[idx].lines.len(), 4);
+        assert!(!app.tabs[idx].modified);
+        assert_eq!(app.tabs[idx].selections[0].head.line, 3);
+        assert_eq!(app.tabs[idx].id, id);
+
+        // 有未儲存修改的分頁：不覆蓋，交給使用者決定
+        app.tabs[idx].replace_all_text("my unsaved edit");
+        std::fs::write(&path, "changed again on disk, longer").unwrap();
+        app.handle_disk_events(vec![(path.clone(), stamp_of(&path))]);
+        assert_eq!(app.tabs[idx].edit_text(), "my unsaved edit");
+        assert_eq!(app.disk_conflict, Some(id));
+
+        // 內容相同（只是時間戳變了）不重新載入也不詢問
+        app.disk_conflict = None;
+        app.tabs[idx].mark_saved();
+        std::fs::write(&path, "my unsaved edit").unwrap();
+        let rev = app.tabs[idx].revision();
+        app.handle_disk_events(vec![(path.clone(), stamp_of(&path))]);
+        assert_eq!(app.tabs[idx].revision(), rev);
+        assert!(app.disk_conflict.is_none());
+    }
+
+    #[test]
+    fn find_next_previous_and_replace() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "foo bar\nfoo baz\nFOO end");
+        app.find_bar_text = "foo".into();
+        app.replace_text = "qux".into();
+
+        app.find_step(true);
+        assert_eq!(app.pending_select, Some((0, 3)), "first Enter selects the first match");
+        frame(&mut app, &ctx, vec![]);
+        app.find_step(true);
+        assert_eq!(app.pending_select, Some((8, 11)));
+        frame(&mut app, &ctx, vec![]);
+        app.find_step(false);
+        assert_eq!(app.pending_select, Some((0, 3)));
+        frame(&mut app, &ctx, vec![]);
+        app.find_step(false);
+        assert_eq!(app.pending_select, Some((16, 19)), "wraps around to the last match");
+        frame(&mut app, &ctx, vec![]);
+
+        // 取代目前命中（最後一個），接著繞回第一個
+        app.replace_current();
+        assert_eq!(app.tabs[0].edit_text(), "foo bar\nfoo baz\nqux end");
+        assert_eq!(app.pending_select, Some((0, 3)));
+        frame(&mut app, &ctx, vec![]);
+
+        // 區分大小寫 + 全部取代；一次復原就能還原
+        app.tabs[0].replace_all_text("foo Foo foo");
+        app.find_opts.case_sensitive = true;
+        app.replace_all_matches();
+        assert_eq!(app.tabs[0].edit_text(), "qux Foo qux");
+        app.run_cmd(Cmd::Undo);
+        assert_eq!(app.tabs[0].edit_text(), "foo Foo foo");
+
+        // 正規表示式錯誤：顯示訊息，不更動文件
+        app.find_opts.regex = true;
+        app.find_bar_text = "(".into();
+        app.show_find_bar = true;
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.find_error.is_some());
+        app.replace_all_matches();
+        assert_eq!(app.tabs[0].edit_text(), "foo Foo foo");
+    }
+
+    #[test]
+    fn enter_in_find_field_never_edits_the_document() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "let foo = 1;\nfoo();");
+        app.run_cmd(Cmd::Replace);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![Event::Text("foo".into())]);
+        assert_eq!(app.find_bar_text, "foo");
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+            frame(&mut app, &ctx, vec![]);
+            assert_eq!(app.tabs[0].edit_text(), "let foo = 1;\nfoo();", "Enter in the find field must only search");
+            assert!(!app.tabs[0].modified);
+            assert!(!app.editor_focused, "focus stays in the find field");
+        }
+        assert_eq!(app.tabs[0].selections[0].head, Position { line: 0, col: 7 }, "3rd Enter wrapped to the first match");
+
+        // 關閉尋找列（Esc）後焦點回到編輯區
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(!app.show_find_bar);
+        assert!(app.editor_focused);
+    }
+
+    #[test]
+    fn auto_pair_closes_skips_and_deletes() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "");
+        let type_ = |app: &mut AlexCodeApp, t: &str| {
+            frame(app, &ctx, vec![Event::Text(t.into())]);
+            frame(app, &ctx, vec![]);
+        };
+        type_(&mut app, "(");
+        assert_eq!(app.tabs[0].edit_text(), "()");
+        type_(&mut app, "x");
+        assert_eq!(app.tabs[0].edit_text(), "(x)", "cursor stays between the pair");
+        type_(&mut app, ")");
+        assert_eq!(app.tabs[0].edit_text(), "(x)", "typing the closer skips over it");
+        type_(&mut app, ";");
+        assert_eq!(app.tabs[0].edit_text(), "(x);");
+
+        // 空的一對：退格連右邊一起刪
+        type_(&mut app, "[");
+        assert_eq!(app.tabs[0].edit_text(), "(x);[]");
+        frame(&mut app, &ctx, vec![key(Key::Backspace, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "(x);");
+
+        // 關閉設定後照常輸入
+        app.auto_pair = false;
+        type_(&mut app, "{");
+        assert_eq!(app.tabs[0].edit_text(), "(x);{");
+    }
+
+    #[test]
+    fn git_marks_follow_head_content() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "a\nb CHANGED\nc\nnew");
+        let id = app.tabs[0].id;
+        let head: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        app.git_head.insert(id, Some(Arc::new(head)));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.git_marks.1.get(&1), Some(&MODIFIED));
+        assert_eq!(app.git_marks.1.get(&3), Some(&ADDED));
+        assert_eq!(app.git_marks.1.get(&0), None);
+
+        // 改回與 HEAD 相同 → 標記消失
+        app.tabs[0].replace_all_text("a\nb\nc");
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.git_marks.1.is_empty());
+
+        // 外部修改後重新載入：標記跟著新內容
+        app.reload_tab_from(0, "a\nb\nc\nappended");
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.git_marks.1.get(&3), Some(&ADDED));
+
+        // 不在 Git 內的檔案沒有標記
+        app.git_head.insert(id, None);
+        app.tabs[0].replace_all_text("zzz");
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.git_marks.1.is_empty());
+    }
+
+    #[test]
+    fn head_lines_reads_committed_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().map_or(false, |o| o.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            return; // 測試環境沒有 git
+        }
+        let f = write(&dir, "f.txt", "v1\nline");
+        assert!(crate::git::head_lines(&f).is_none(), "untracked file has no HEAD version");
+        assert!(git(&["add", "."]));
+        assert!(git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]));
+        std::fs::write(&f, "v2").unwrap();
+        assert_eq!(crate::git::head_lines(&f).unwrap(), vec!["v1", "line"]);
+        assert!(crate::git::head_lines(&dir.path().join("nope.txt")).is_none());
+    }
+
+    #[test]
+    fn explorer_lists_folder_in_background_and_opens_files() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "main.rs", "fn main() {}");
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        let mut app = app_with(&ctx, "x");
+        app.set_folder(dir.path().to_path_buf());
+        let t = std::time::Instant::now();
+        while !matches!(app.tree_cache.get(dir.path()), Some(TreeDir::Loaded(_))) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(5), "folder listing never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            frame(&mut app, &ctx, vec![]);
+        }
+        let Some(TreeDir::Loaded(list)) = app.tree_cache.get(dir.path()) else { unreachable!() };
+        let names: Vec<&str> = list.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["src", "main.rs"]);
+        frame(&mut app, &ctx, vec![]); // 含檔案總管的一幀可正常繪製
+    }
+
+    #[test]
+    fn plugin_command_inserts_its_result_at_the_cursor() {
+        let mut app = AlexCodeApp::new();
+        app.plugin_mgr.register_command("stamp", || "<<X>>".to_string());
+        app.tabs[0] = EditorBuffer::from_text("ab");
+        app.active_tab_idx = 0;
+        app.tabs[0].selections = vec![Selection::point(Position { line: 0, col: 1 })];
+        app.run_cmd(Cmd::Plugin("stamp".into()));
+        assert_eq!(app.tabs[0].edit_text(), "a<<X>>b");
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`

@@ -174,6 +174,23 @@ impl EditorBuffer {
         }
     }
 
+    /// 以磁碟上的新內容取代整份文件（檔案被其他程式修改後重新載入）：
+    /// 清空復原紀錄並視為未修改；分頁 id、書籤與游標位置（在範圍內的部分）保留
+    pub fn reload_text(&mut self, text: &str) {
+        let fresh = Self::from_text(text);
+        self.lines = fresh.lines;
+        self.line_ending = fresh.line_ending;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.undo_bytes = 0;
+        self.saved_id = 0;
+        self.modified = false;
+        let n = self.lines.len();
+        self.bookmarks.retain(|&l| l < n);
+        self.clamp_cursors();
+        self.revision += 1;
+    }
+
     /// 以整份文字取代緩衝區（指令、Markdown 區塊編輯等），可復原
     pub fn replace_all_text(&mut self, text: &str) {
         self.apply_text(text, false);

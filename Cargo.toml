@@ -1,6 +1,6 @@
 [package]
 name = "alexcode"
-version = "5.3.0"
+version = "5.5.0"
 edition = "2021"
 authors = ["Alex Chiang <alex721chiang>", "AlexCode Rust Contributors"]
 description = "A fast, futuristic Notepad++ style code editor with LSP, Git, log filtering, markdown wiki, and neon HUD themes rewritten in Rust."

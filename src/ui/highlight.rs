@@ -362,6 +362,11 @@ pub fn find_matches(text: &str, needle: &str) -> Vec<(usize, usize)> {
 
 /// 產生帶語法色與搜尋命中底色的 LayoutJob
 pub fn highlight(text: &str, lang: Lang, pal: &Palette, font: FontId, find: &str) -> LayoutJob {
+    highlight_ranges(text, lang, pal, font, &find_matches(text, find))
+}
+
+/// 同 [`highlight`]，但搜尋命中的 byte 區間由呼叫端提供（支援區分大小寫 / 全字 / 正規表示式）
+pub fn highlight_ranges(text: &str, lang: Lang, pal: &Palette, font: FontId, matches: &[(usize, usize)]) -> LayoutJob {
     let sc = SynColors {
         fg: hex(pal.fg),
         kw: hex(pal.syn_kw),
@@ -376,7 +381,6 @@ pub fn highlight(text: &str, lang: Lang, pal: &Palette, font: FontId, find: &str
         search_fg: hex(pal.search_fg),
     };
     let tokens = tokenize(text, lang);
-    let matches = find_matches(text, find);
 
     let mut job = LayoutJob::default();
     let mut mi = 0;
