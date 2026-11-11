@@ -1,63 +1,123 @@
-name: Rust Edition Build & Release
+# 建置 / 測試（Windows、Linux、macOS），推 v*-rust* 標籤時另外發佈 Release。
+#
+# 本 repo 的 Release 為不可變（immutable）：發佈後無法再加檔案。
+# 因此流程是：先建立「草稿」Release → 三個平台各自上傳安裝檔 → 全部成功才發佈。
+name: Rust Build & Release
 
 on:
   push:
-    branches:
-      - rust-edition
-    tags:
-      - 'v*-rust*'
+    branches: [ main, rust-edition ]
+    tags: [ 'v*-rust*' ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  build-windows:
-    name: Build Windows x64 Release
-    runs-on: windows-latest
+  draft:
+    name: Create draft release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+              --title "AlexCode $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: draft
+    # 非標籤的推送沒有 draft 工作（skipped）：照常建置與測試
+    if: ${{ !cancelled() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows x64, os: windows-latest }
+          - { name: Linux x86_64, os: ubuntu-latest }
+          - { name: macOS arm64, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+
+      # 預設為 deny 的 lint（correctness 類）會讓建置失敗；其餘為警告
+      - name: Clippy
+        run: cargo clippy --all-targets
+
       - name: Run Unit & Integration Tests
-        run: cargo test --quiet
+        run: cargo test
 
       - name: Build Release Binary
         run: cargo build --release
 
-      - name: Package Portable Archive
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist/AlexCode-Rust
-          Copy-Item target/release/alexcode.exe dist/AlexCode-Rust/
-          Copy-Item README.md dist/AlexCode-Rust/
-          Copy-Item LICENSE dist/AlexCode-Rust/
-          Compress-Archive -Path dist/AlexCode-Rust/* -DestinationPath AlexCode-Rust-win64-portable.zip -Force
+          New-Item -ItemType Directory -Force -Path dist/AlexCode-Rust | Out-Null
+          Copy-Item target/release/alexcode.exe, README.md, LICENSE dist/AlexCode-Rust/
+          Compress-Archive -Path dist/AlexCode-Rust/* -DestinationPath dist/AlexCode-Rust-win64-portable.zip -Force
+          Copy-Item target/release/alexcode.exe dist/alexcode.exe
+
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          case "$RUNNER_OS" in
+            Linux) NAME=AlexCode-Rust-linux-x86_64 ;;
+            *)     NAME=AlexCode-Rust-macos-arm64 ;;
+          esac
+          mkdir -p "dist/$NAME"
+          cp target/release/alexcode README.md LICENSE "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          rm -r "dist/$NAME"
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v7
+        continue-on-error: true   # 工件儲存配額用罄不該讓建置變紅
         with:
-          name: AlexCode-Rust-win64-portable
+          name: AlexCode-Rust-${{ runner.os }}
           path: |
-            target/release/alexcode.exe
-            AlexCode-Rust-win64-portable.zip
+            dist/*.zip
+            dist/*.exe
+            dist/*.tar.gz
+          retention-days: 5
 
-      - name: Publish GitHub Release (on tag, if not already published)
+      - name: Upload to draft release
         if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          gh release view $tag >$null 2>&1
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release $tag already exists (immutable release). Skipping duplicate upload."
-          } else {
-            gh release create $tag target/release/alexcode.exe AlexCode-Rust-win64-portable.zip --generate-notes
-          }
+          shopt -s nullglob
+          gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.exe dist/*.tar.gz --clobber
+
+  publish:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --draft=false --latest

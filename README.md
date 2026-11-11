@@ -1,9 +1,9 @@
-# AlexCode — Neon Edition (Rust Port v5.4)
+# AlexCode — Neon Edition (Rust v5.5)
 
 [![Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-neon.svg)](https://github.com/emilk/egui)
-[![Release](https://img.shields.io/badge/Release-v5.4.1--rust-00e5ff.svg)](https://github.com/alex721chiang/alexcode_editor/releases/tag/v5.4.1-rust)
+[![Release](https://img.shields.io/badge/Release-v5.5.0--rust-00e5ff.svg)](https://github.com/alex721chiang/alexcode_editor/releases/latest)
 
 AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完全移植為高效、記憶體安全且跨平台的純 Rust 實現。
 保留了 Notepad++ 風格的日常編輯體驗、強大的 Log 行篩選引擎、LSP 語言伺服器協定支援、Git 行級差異與 Blame 追蹤、**Typora 風格直觀 Markdown 即時預覽與原位編輯**、Obsidian 雙鏈筆記關聯圖、VT100 終端機，以及極具未來感的 **Neon Grid / Neon HUD** 霓虹調色盤主題。
@@ -14,9 +14,29 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 
 免安裝、單一執行檔內嵌圖示與 Orbitron 字型，下載後直接雙擊即可執行（Windows 10 / 11 x64）：
 
-- 🚀 **[點此直接下載 `alexcode.exe` (單一獨立執行檔)](https://github.com/alex721chiang/alexcode_editor/releases/download/v5.4.1-rust/alexcode.exe)**
-- 📦 **[點此下載 `AlexCode-Rust-v5.4.0-win64-portable.zip` (免安裝可攜完整包)](https://github.com/alex721chiang/alexcode_editor/releases/download/v5.4.1-rust/AlexCode-Rust-v5.4.0-win64-portable.zip)**
-- 🔗 **[前往 GitHub Releases 頁面查看版本說明](https://github.com/alex721chiang/alexcode_editor/releases/tag/v5.4.1-rust)**
+- 🚀 **[Windows：`alexcode.exe`（單一獨立執行檔）](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/alexcode.exe)**
+- 📦 **[Windows：`AlexCode-Rust-win64-portable.zip`（免安裝可攜包）](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-win64-portable.zip)**
+- 🐧 **[Linux x86_64：`AlexCode-Rust-linux-x86_64.tar.gz`](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-linux-x86_64.tar.gz)**
+- 🍎 **[macOS (Apple Silicon)：`AlexCode-Rust-macos-arm64.tar.gz`](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-macos-arm64.tar.gz)**（未簽章，第一次執行需在系統設定中允許）
+- 🔗 **[前往 GitHub Releases 頁面查看版本說明](https://github.com/alex721chiang/alexcode_editor/releases/latest)**
+
+---
+
+## 🆕 v5.5 新增 (What's New)
+
+| 功能 | 操作 |
+|---|---|
+| 分頁右鍵選單：開啟所在資料夾、在此開啟 cmd / PowerShell / Windows Terminal、複製路徑、關閉其他 / 右側 / 全部 | 在分頁上按右鍵 |
+| 檔案總管側邊欄、開啟資料夾 | `Ctrl+B`、檔案 → 開啟資料夾 |
+| 尋找與取代（區分大小寫 / 全字 / 正規表示式） | `Ctrl+F`、`Ctrl+H` |
+| 編碼偵測與轉換（UTF-8 / BOM / UTF-16 / Big5 / GBK / Shift_JIS） | 點狀態列的編碼 |
+| 未儲存提示、外部變更自動重新載入 | 自動 |
+| 工作階段還原、最近開啟的檔案 | 自動、檔案 → 最近開啟的檔案 |
+| 單一實例（雙擊檔案開在現有視窗） | 自動；`--new-instance` 另開視窗 |
+| Git 行號區標記（新增 / 修改 / 刪除）、自動配對括號 | 自動；檢視選單可關閉自動配對 |
+
+> **目前狀態**：下方列出的 LSP、AI 補全、Sticky Scroll、矩形選取，其邏輯模組與測試已在程式庫中，但尚未接上介面；
+> 內建終端機為逐指令執行（非互動式）。完整說明見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ---
 
