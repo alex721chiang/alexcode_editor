@@ -20,8 +20,9 @@ use crate::core::{
 };
 use crate::editor::{
     decide as pair_decide, detect_and_decode, is_relevant as pair_relevant, should_delete_pair, Action as PairAction,
-    EditorBuffer, FileEncoding, Position, Selection,
+    sticky_headers, EditorBuffer, FileEncoding, Position, Selection,
 };
+use crate::index::{extract_symbols, Symbol, SymbolLang};
 use crate::git::{diff_line_states, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
@@ -263,8 +264,20 @@ pub struct AlexCodeApp {
     /// 目前分頁的行狀態快取：鍵為 (分頁 id, 內容版本)
     git_marks: ((u64, u64), HashMap<usize, u8>),
 
+    // ---- Sticky Scroll ----
+    /// 目前分頁的符號（函式 / 類別…區塊）快取：鍵為 (分頁 id, 內容版本, 語言)
+    sticky_key: Option<(u64, u64, Lang)>,
+    sticky_syms: Arc<Vec<Symbol>>,
+    /// 上一幀固定在編輯區頂端的標頭：(行號, 畫面上的位置)
+    sticky_rows: Vec<(usize, Rect)>,
+    /// 上一幀沒有被固定標頭蓋住的第一行
+    sticky_below: usize,
+
     repaint: Option<egui::Context>,
 }
+
+/// 固定在編輯區頂端的標頭最多幾層（超過時保留最內層）
+const STICKY_MAX_ROWS: usize = 5;
 
 enum TreeDir {
     Loading,
@@ -394,6 +407,10 @@ impl AlexCodeApp {
             git_head: HashMap::new(),
             git_chan: unbounded(),
             git_marks: ((0, 0), HashMap::new()),
+            sticky_key: None,
+            sticky_syms: Arc::new(Vec::new()),
+            sticky_rows: Vec::new(),
+            sticky_below: 0,
             repaint: None,
         };
 
@@ -1465,6 +1482,9 @@ impl AlexCodeApp {
                             ui.close_menu();
                         }
                         if ui.checkbox(&mut self.auto_pair, "自動配對括號與引號").clicked() {
+                            ui.close_menu();
+                        }
+                        if ui.checkbox(&mut self.config.sticky_scroll, "固定目前的函式標題 (Sticky Scroll)").clicked() {
                             ui.close_menu();
                         }
                         if ui.checkbox(&mut self.md_view.show_outline, "Markdown 大綱側邊欄 (Outline)").clicked() {
@@ -2665,6 +2685,32 @@ impl AlexCodeApp {
         }
     }
 
+    /// 上一幀固定在編輯區頂端的標頭行號（由外層到內層）
+    #[cfg(test)]
+    fn sticky_lines(&self) -> Vec<usize> {
+        self.sticky_rows.iter().map(|(line, _)| *line).collect()
+    }
+
+    /// 目前分頁中可固定在頂端的區塊；只在內容或語言改變時重新擷取
+    fn sticky_symbols(&mut self, idx: usize, lang: Lang, bytes: usize) -> Arc<Vec<Symbol>> {
+        let key = Some((self.tabs[idx].id, self.tabs[idx].revision(), lang));
+        if self.sticky_key != key {
+            let syntax = match lang {
+                Lang::Rust => Some(SymbolLang::Rust),
+                Lang::CLike | Lang::JavaScript => Some(SymbolLang::CFamily),
+                Lang::Python => Some(SymbolLang::Python),
+                _ => None,
+            };
+            let syms = match syntax {
+                Some(s) if bytes <= HIGHLIGHT_MAX_BYTES => extract_symbols(&self.tabs[idx].lines, s),
+                _ => Vec::new(),
+            };
+            self.sticky_key = key;
+            self.sticky_syms = Arc::new(syms);
+        }
+        self.sticky_syms.clone()
+    }
+
     fn code_editor(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
         let idx = self.active_tab_idx;
         if idx >= self.tabs.len() {
@@ -2755,7 +2801,19 @@ impl AlexCodeApp {
         let mut changed = false;
         let scroll_to_cursor = std::mem::take(&mut self.scroll_to_cursor);
 
-        egui::ScrollArea::both()
+        // Sticky Scroll：上一幀固定標頭佔用的高度，以及游標原本的位置（用來判斷游標是否移動）
+        let sticky_syms = if self.config.sticky_scroll {
+            self.sticky_symbols(idx, lang, text.len())
+        } else {
+            Arc::new(Vec::new())
+        };
+        let sticky_h = if sticky_syms.is_empty() { 0.0 } else { self.sticky_rows.len() as f32 * row_h };
+        let prev_cursor = {
+            let head = self.tabs[idx].selections[0].head;
+            (head.line, head.col)
+        };
+
+        let scroll = egui::ScrollArea::both()
             .id_source(("editor-scroll", idx))
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -2801,6 +2859,14 @@ impl AlexCodeApp {
                     let cur_row = output.cursor_range.map(|cr| (cr.primary.rcursor.row, cr.primary.rcursor.column));
                     if let Some((r, col)) = cur_row {
                         new_cursor = Some((r, col));
+                    }
+                    // 游標移到固定標頭底下（例如按方向鍵往上）時多捲一點，讓游標所在行露出來
+                    if let Some(cr) = output.cursor_range.filter(|_| sticky_h > 0.0 && !scroll_to_cursor) {
+                        let r = galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2());
+                        if cur_row != Some(prev_cursor) && r.top() < ui.clip_rect().top() + sticky_h {
+                            let target = Rect::from_min_max(Pos2::new(r.left(), r.top() - sticky_h), r.max);
+                            ui.scroll_to_rect(target, None);
+                        }
                     }
                     let active_line = cur_row
                         .map(|(r, _)| r)
@@ -2914,6 +2980,69 @@ impl AlexCodeApp {
                     }
                 });
             });
+
+        // Sticky Scroll：把游標上方已捲出畫面的函式 / 類別標題固定在編輯區頂端
+        self.sticky_rows.clear();
+        self.sticky_below = 0;
+        if !sticky_syms.is_empty() {
+            let view = scroll.inner_rect;
+            let offset = scroll.state.offset;
+            // 第一個完整可見的行（文字上方有 4px 邊界）
+            let first = ((offset.y - 4.0) / row_h - 0.01).ceil().max(0.0) as usize;
+            // 固定的標頭本身會蓋住幾行：以「標頭底下的第一行」為準反覆計算到穩定
+            let mut rows = 0;
+            for _ in 0..=STICKY_MAX_ROWS {
+                let n = sticky_headers(&sticky_syms, first + rows, STICKY_MAX_ROWS).len();
+                if n == rows {
+                    break;
+                }
+                rows = n;
+            }
+            let headers = sticky_headers(&sticky_syms, first + rows, STICKY_MAX_ROWS);
+            self.sticky_below = first + headers.len();
+
+            let painter = ui.painter_at(view);
+            let area = Rect::from_min_size(view.min, egui::vec2(view.width(), headers.len() as f32 * row_h));
+            painter.rect_filled(area, 0.0, c.panel);
+            let num_font = FontId::monospace((self.font_size - 1.0).max(8.0));
+            let hl_lang = if text.len() > HIGHLIGHT_MAX_BYTES { Lang::Plain } else { lang };
+            let mut jump = None;
+            for (k, sym) in headers.iter().enumerate() {
+                let Some(line_text) = self.tabs[idx].lines.get(sym.line) else { continue };
+                let row = Rect::from_min_size(
+                    Pos2::new(view.left(), view.top() + k as f32 * row_h),
+                    egui::vec2(view.width(), row_h),
+                );
+                let resp = ui
+                    .interact(row, ui.id().with(("sticky-header", k)), Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.hovered() {
+                    painter.rect_filled(row, 0.0, c.hover);
+                }
+                if resp.clicked() {
+                    jump = Some(sym.line);
+                }
+                let num = painter.layout_no_wrap((sym.line + 1).to_string(), num_font.clone(), c.faint);
+                let num_pos = Pos2::new(view.left() + gutter_w - 10.0 - num.size().x, row.top() + (row_h - num.size().y) * 0.5);
+                painter.galley(num_pos, num, c.faint);
+                let galley = ui.fonts(|f| f.layout_job(highlight_ranges(line_text, hl_lang, pal, font.clone(), &[])));
+                let text_clip = Rect::from_min_max(Pos2::new(view.left() + gutter_w, row.top()), row.max);
+                ui.painter_at(text_clip.intersect(view)).galley(
+                    Pos2::new(view.left() + gutter_w + 10.0 - offset.x, row.top()),
+                    galley,
+                    c.fg,
+                );
+                self.sticky_rows.push((sym.line, row));
+            }
+            if !self.sticky_rows.is_empty() {
+                painter.line_segment([area.left_bottom(), area.right_bottom()], Stroke::new(1.0_f32, c.border));
+            }
+            if let Some(line) = jump {
+                let i = Self::char_index_of(&self.tabs[idx], line, 0);
+                self.pending_select = Some((i, i));
+                self.scroll_to_cursor = true;
+            }
+        }
 
         self.highlight_cache = hl_cache;
         self.git_marks.1 = git_marks;
@@ -3936,6 +4065,109 @@ mod tests {
         app.tabs[0].selections = vec![Selection::point(Position { line: 0, col: 1 })];
         app.run_cmd(Cmd::Plugin("stamp".into()));
         assert_eq!(app.tabs[0].edit_text(), "a<<X>>b");
+    }
+
+    /// 0: `impl`、1: `fn first`（到 122）、124: `fn second`（到 245）、247: `}`
+    fn sticky_source() -> String {
+        let mut s = String::from("impl Thing {\n");
+        for name in ["first", "second"] {
+            s += &format!("    fn {name}(&self) {{\n");
+            for i in 0..120 {
+                s += &format!("        let v{i} = {i};\n");
+            }
+            s += "    }\n\n";
+        }
+        s + "}\n"
+    }
+
+    /// 把游標移到指定行並捲動到畫面中央
+    fn goto_line(app: &mut AlexCodeApp, ctx: &egui::Context, line: usize) {
+        let i = AlexCodeApp::char_index_of(&app.tabs[0], line, 0);
+        app.pending_select = Some((i, i));
+        app.scroll_to_cursor = true;
+        settle(app, ctx);
+    }
+
+    /// egui 的捲動有動畫：多跑幾幀讓它停下來
+    fn settle(app: &mut AlexCodeApp, ctx: &egui::Context) {
+        for _ in 0..90 {
+            frame(app, ctx, vec![]);
+        }
+    }
+
+    fn cursor_line(app: &AlexCodeApp) -> usize {
+        app.tabs[0].selections[0].head.line
+    }
+
+    #[test]
+    fn sticky_scroll_pins_enclosing_headers() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, &sticky_source());
+        assert_eq!(app.sticky_lines(), Vec::<usize>::new(), "nothing is pinned at the top of the file");
+
+        goto_line(&mut app, &ctx, 60);
+        assert_eq!(app.sticky_lines(), vec![0, 1]);
+        goto_line(&mut app, &ctx, 200);
+        assert_eq!(app.sticky_lines(), vec![0, 124]);
+        goto_line(&mut app, &ctx, 0);
+        assert_eq!(app.sticky_lines(), Vec::<usize>::new());
+
+        // 編輯後符號重新計算：把 first 改名不影響行號，刪掉 impl 那一行則只剩函式
+        goto_line(&mut app, &ctx, 60);
+        let text = app.tabs[0].edit_text().replacen("impl Thing {\n", "\n", 1);
+        app.tabs[0].replace_all_text(&text);
+        settle(&mut app, &ctx);
+        assert_eq!(app.sticky_lines(), vec![1]);
+
+        // 可在設定中關閉
+        app.config.sticky_scroll = false;
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.sticky_lines(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn sticky_header_click_jumps_to_its_line() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, &sticky_source());
+        goto_line(&mut app, &ctx, 200);
+        let (line, rect) = app.sticky_rows[1];
+        assert_eq!(line, 124);
+        let pos = rect.center();
+        let button = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&mut app, &ctx, vec![Event::PointerMoved(pos)]);
+        frame(&mut app, &ctx, vec![button(true)]);
+        frame(&mut app, &ctx, vec![button(false)]);
+        settle(&mut app, &ctx);
+        assert_eq!(cursor_line(&app), 124, "clicking a pinned header moves the cursor to that line");
+        assert_eq!(app.sticky_lines(), vec![0, 1], "line 124 is centred, so the top of the view is back inside `first`");
+        assert!(app.sticky_below <= 124, "the clicked header is visible in the text itself");
+    }
+
+    #[test]
+    fn cursor_never_hides_under_sticky_headers() {
+        let ctx = ctx();
+        // 五層巢狀：固定的標頭有五行
+        let mut src = String::from("mod a {\nmod b {\nmod c {\nimpl Thing {\nfn deep(&self) {\n");
+        for i in 0..300 {
+            src += &format!("    let v{i} = {i};\n");
+        }
+        src += "}\n}\n}\n}\n}\n";
+        let mut app = app_with(&ctx, &src);
+        goto_line(&mut app, &ctx, 200);
+        assert_eq!(app.sticky_lines(), vec![0, 1, 2, 3, 4]);
+        let start = cursor_line(&app);
+        for step in 1..=60 {
+            frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE)]);
+            settle(&mut app, &ctx);
+            assert_eq!(cursor_line(&app), start - step);
+            assert!(
+                cursor_line(&app) >= app.sticky_below,
+                "cursor line {} is covered by the pinned headers (first uncovered line {})",
+                cursor_line(&app),
+                app.sticky_below
+            );
+        }
+        assert!(app.sticky_below < 190, "the view must have scrolled up with the cursor");
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
