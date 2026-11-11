@@ -14,12 +14,12 @@ use super::markdown_view::{
     render_markdown_toolbar, render_outline_panel, render_typora_document, MarkdownViewState, MdAction, MdViewMode,
 };
 use super::style::{self, hgradient, paint_hud_corners, vgradient, with_alpha, Colors, ORBITRON};
-use crate::core::EditorConfig;
-use crate::editor::{EditorBuffer, Position, Selection};
+use crate::core::{available_shells, open_terminal, reveal_in_file_manager, EditorConfig, ShellKind};
+use crate::editor::{detect_and_decode, EditorBuffer, FileEncoding, Position, Selection};
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
-use crate::search::{command_match_score, search_in_files, FileMatch};
+use crate::search::{command_match_score, search_in_files, FileMatch, SearchStats};
 use crate::snippets::SnippetsController;
 use crate::terminal::VtParser;
 use crate::theme::ThemeManager;
@@ -30,7 +30,7 @@ use eframe::egui::{
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 const WELCOME: &str = r##"// ========================================================
@@ -108,6 +108,9 @@ pub enum Cmd {
     Save,
     SaveAs,
     CloseTab,
+    RevealInFolder,
+    OpenShell(ShellKind),
+    CopyPath,
     Undo,
     Redo,
     DuplicateLine,
@@ -180,7 +183,56 @@ pub struct AlexCodeApp {
     project_root: PathBuf,
     term_rx: Option<Receiver<Vec<u8>>>,
     term_cwd: PathBuf,
+
+    /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
+    pending_close: Option<PendingClose>,
+    /// 已確認可以結束程式（不再攔截視窗關閉）
+    allow_exit: bool,
+    /// 上一幀程式碼編輯區是否擁有鍵盤焦點（決定 Ctrl+Z 是否由文件的復原紀錄處理）
+    editor_focused: bool,
+    /// 目前分頁以 `\n` 連接的全文快取：鍵為 (分頁 id, 內容版本)
+    text_cache: ((u64, u64), String),
+    /// 編輯區排版結果（含語法高亮）快取：鍵為全文 / 語言 / 主題 / 字型 / 搜尋字串的雜湊。
+    /// 一併記住排版當時的字型圖集：egui 重建圖集（縮放改變、圖集快滿）後舊排版的字形座標即失效。
+    highlight_cache: Option<(u64, Arc<egui::Galley>, FontAtlas)>,
+    /// 尋找列命中位置快取
+    find_cache: ((u64, u64, String), Vec<(usize, usize)>),
+    /// Log 篩選命中的行號快取
+    filter_cache: (Option<(u64, u64, String, bool, bool)>, Vec<usize>),
+    /// 背景執行中的全專案搜尋
+    find_job: Option<FindJob>,
+    last_title: String,
+    pending_copy: Option<String>,
 }
+
+type FontAtlas = Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>;
+
+struct PendingClose {
+    /// 要關閉的分頁 id
+    ids: Vec<u64>,
+    /// 關閉後結束程式
+    exit: bool,
+}
+
+struct FindJob {
+    rx: Receiver<(Vec<FileMatch>, SearchStats)>,
+    cancel: Arc<AtomicBool>,
+}
+
+/// 分頁右鍵選單的動作
+enum TabAction {
+    Reveal(usize),
+    Shell(usize, ShellKind),
+    CopyPath(usize),
+    CopyName(usize),
+    Close(usize),
+    CloseOthers(usize),
+    CloseRight(usize),
+    CloseAll,
+}
+
+/// 超過此大小的文件不做語法高亮（仍可編輯與搜尋）
+const HIGHLIGHT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 impl Default for AlexCodeApp {
     fn default() -> Self {
@@ -232,6 +284,16 @@ impl AlexCodeApp {
             project_root: cwd.clone(),
             term_rx: None,
             term_cwd: cwd,
+            pending_close: None,
+            allow_exit: false,
+            editor_focused: false,
+            text_cache: ((0, 0), String::new()),
+            highlight_cache: None,
+            find_cache: ((0, 0, String::new()), Vec::new()),
+            filter_cache: (None, Vec::new()),
+            find_job: None,
+            last_title: String::new(),
+            pending_copy: None,
         };
 
         // 開啟歡迎頁面與 Typora Markdown 導覽頁
@@ -292,16 +354,133 @@ impl AlexCodeApp {
         self.md_view.mode = MdViewMode::Typora;
     }
 
+    /// 關閉分頁；有未儲存的變更時先詢問
     pub fn close_tab(&mut self, idx: usize) {
-        self.commit_md_edit();
-        if idx < self.tabs.len() {
-            self.tabs.remove(idx);
-            if self.active_tab_idx > idx || self.active_tab_idx >= self.tabs.len() {
-                self.active_tab_idx = self.active_tab_idx.saturating_sub(1);
-            }
+        if let Some(id) = self.tabs.get(idx).map(|b| b.id) {
+            self.request_close(vec![id], false);
         }
+    }
+
+    /// 要求關閉一批分頁（`exit` 為 true 時關閉後結束程式）。
+    /// 其中有未儲存的變更就先跳出「儲存 / 不儲存 / 取消」，否則直接關閉。
+    fn request_close(&mut self, ids: Vec<u64>, exit: bool) {
+        self.commit_md_edit();
+        if self.tabs.iter().any(|b| b.modified && ids.contains(&b.id)) {
+            self.pending_close = Some(PendingClose { ids, exit });
+        } else {
+            self.finish_close(&ids, exit);
+        }
+    }
+
+    fn finish_close(&mut self, ids: &[u64], exit: bool) {
+        if exit {
+            self.allow_exit = true; // update() 會送出視窗關閉命令
+            return;
+        }
+        let active_id = self.tabs.get(self.active_tab_idx).map(|b| b.id);
+        let old_idx = self.active_tab_idx;
+        self.tabs.retain(|b| !ids.contains(&b.id));
+        self.active_tab_idx = active_id
+            .and_then(|id| self.tabs.iter().position(|b| b.id == id))
+            .unwrap_or_else(|| old_idx.min(self.tabs.len().saturating_sub(1)));
         if self.tabs.is_empty() {
             self.new_tab();
+        }
+    }
+
+    /// 分頁對應的資料夾：已存檔的檔案取其所在資料夾，否則用目前專案資料夾
+    fn tab_dir(&self, idx: usize) -> PathBuf {
+        self.tabs
+            .get(idx)
+            .and_then(|b| b.file_path.as_deref())
+            .map(Path::new)
+            .filter(|p| p.is_absolute())
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.project_root.clone())
+    }
+
+    fn reveal_tab(&mut self, idx: usize) {
+        let file = self
+            .tabs
+            .get(idx)
+            .and_then(|b| b.file_path.clone())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.exists());
+        let target = file.unwrap_or_else(|| self.tab_dir(idx));
+        self.status_message = match reveal_in_file_manager(&target) {
+            Ok(_) => format!("已在檔案總管顯示：{}", target.display()),
+            Err(e) => format!("無法開啟檔案總管：{}", e),
+        };
+    }
+
+    fn open_shell_for_tab(&mut self, idx: usize, kind: ShellKind) {
+        let dir = self.tab_dir(idx);
+        self.status_message = match open_terminal(&dir, kind) {
+            Ok(_) => format!("已在 {} 開啟終端機", dir.display()),
+            Err(e) => format!("無法開啟終端機：{}", e),
+        };
+    }
+
+    fn run_tab_action(&mut self, ctx: &egui::Context, action: TabAction) {
+        let ids_where = |tabs: &[EditorBuffer], keep: &dyn Fn(usize) -> bool| -> Vec<u64> {
+            tabs.iter().enumerate().filter(|(i, _)| keep(*i)).map(|(_, b)| b.id).collect()
+        };
+        match action {
+            TabAction::Reveal(i) => self.reveal_tab(i),
+            TabAction::Shell(i, kind) => self.open_shell_for_tab(i, kind),
+            TabAction::CopyPath(i) => {
+                if let Some(p) = self.tabs.get(i).and_then(|b| b.file_path.clone()) {
+                    ctx.copy_text(p.clone());
+                    self.status_message = format!("已複製路徑：{}", p);
+                }
+            }
+            TabAction::CopyName(i) => {
+                if let Some(b) = self.tabs.get(i) {
+                    let name = Self::tab_title(b);
+                    ctx.copy_text(name.clone());
+                    self.status_message = format!("已複製檔名：{}", name);
+                }
+            }
+            TabAction::Close(i) => self.close_tab(i),
+            TabAction::CloseOthers(i) => {
+                let ids = ids_where(&self.tabs, &|k| k != i);
+                self.request_close(ids, false);
+            }
+            TabAction::CloseRight(i) => {
+                let ids = ids_where(&self.tabs, &|k| k > i);
+                self.request_close(ids, false);
+            }
+            TabAction::CloseAll => {
+                let ids = ids_where(&self.tabs, &|_| true);
+                self.request_close(ids, false);
+            }
+        }
+    }
+
+    /// 確保 `text_cache` 是目前分頁的最新全文（內容沒變就不重新串接）
+    fn sync_text_cache(&mut self) {
+        if let Some(b) = self.tabs.get(self.active_tab_idx) {
+            let key = (b.id, b.revision());
+            if self.text_cache.0 != key {
+                self.text_cache = (key, b.edit_text());
+            }
+        }
+    }
+
+    /// 確保 `filter_cache` 是目前分頁、目前篩選條件下命中的行號
+    fn sync_filter_hits(&mut self) {
+        let Some(b) = self.tabs.get(self.active_tab_idx) else { return };
+        let key = (b.id, b.revision(), self.filter_query.clone(), self.filter_logic == FilterLogic::Or, self.filter_fuzzy);
+        if self.filter_cache.0.as_ref() != Some(&key) {
+            let hits = b
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| self.filter_engine.match_compiled(l))
+                .map(|(i, _)| i)
+                .collect();
+            self.filter_cache = (Some(key), hits);
         }
     }
 
@@ -330,8 +509,10 @@ impl AlexCodeApp {
         }
         match std::fs::read(path) {
             Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
+                // 偵測編碼（UTF-8 / BOM / Big5 / GBK / Shift_JIS …）並記在分頁上，存檔時以同一編碼寫回
+                let (text, encoding) = detect_and_decode(&bytes);
                 let mut buf = EditorBuffer::from_text(&text);
+                buf.encoding = encoding;
                 buf.file_path = Some(full.clone());
                 let is_md = Lang::from_path(&full) == Lang::Markdown;
                 // 若目前只有未修改的歡迎頁 / 空白頁，直接取代
@@ -420,8 +601,12 @@ impl AlexCodeApp {
 
     fn save_active(&mut self, force_dialog: bool) {
         self.commit_md_edit();
-        let idx = self.active_tab_idx;
-        let Some(buf) = self.tabs.get(idx) else { return };
+        self.save_tab(self.active_tab_idx, force_dialog);
+    }
+
+    /// 儲存指定分頁；回傳是否真的寫入成功（使用者取消對話框或寫入失敗都回傳 false）
+    fn save_tab(&mut self, idx: usize, force_dialog: bool) -> bool {
+        let Some(buf) = self.tabs.get(idx) else { return false };
         let current = buf.file_path.clone().unwrap_or_default();
         let path = if !force_dialog && Path::new(&current).is_absolute() {
             Some(PathBuf::from(&current))
@@ -431,17 +616,60 @@ impl AlexCodeApp {
                 .set_directory(&self.project_root)
                 .save_file()
         };
-        if let Some(path) = path {
-            let text = self.tabs[idx].text();
-            match std::fs::write(&path, text) {
-                Ok(_) => {
-                    let b = &mut self.tabs[idx];
-                    b.file_path = Some(path.to_string_lossy().to_string());
-                    b.modified = false;
-                    self.status_message = format!("已儲存 {}", path.display());
-                }
-                Err(e) => self.status_message = format!("儲存失敗：{}", e),
+        let Some(path) = path else { return false };
+        let encoding = self.tabs[idx].encoding;
+        // 文字含有此編碼無法表示的字元時拒絕寫入，避免靜默換成替代字元
+        let bytes = match encoding.encode(&self.tabs[idx].text()) {
+            Ok(b) => b,
+            Err(ch) => {
+                self.status_message = format!(
+                    "未儲存：字元「{}」無法以 {} 表示。請點狀態列的編碼改成 UTF-8 後再儲存",
+                    ch,
+                    encoding.label()
+                );
+                return false;
             }
+        };
+        match std::fs::write(&path, bytes) {
+            Ok(_) => {
+                let b = &mut self.tabs[idx];
+                b.file_path = Some(path.to_string_lossy().to_string());
+                b.mark_saved();
+                self.status_message = format!("已儲存 {}（{}）", path.display(), encoding.label());
+                true
+            }
+            Err(e) => {
+                self.status_message = format!("儲存失敗：{}", e);
+                false
+            }
+        }
+    }
+
+    /// 以指定編碼重新讀取磁碟上的檔案（自動偵測猜錯時使用）
+    fn reload_with_encoding(&mut self, idx: usize, encoding: FileEncoding) {
+        let Some(buf) = self.tabs.get(idx) else { return };
+        let Some(path) = buf.file_path.clone().filter(|p| Path::new(p).is_absolute()) else {
+            self.status_message = "此分頁尚未存檔，無法重新讀取".to_string();
+            return;
+        };
+        if buf.modified {
+            self.status_message = "有未儲存的變更，請先儲存或復原後再以其他編碼重新讀取".to_string();
+            return;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let (text, bad) = encoding.decode(&bytes);
+                let mut nb = EditorBuffer::from_text(&text);
+                nb.encoding = encoding;
+                nb.file_path = Some(path);
+                self.tabs[idx] = nb;
+                self.status_message = if bad {
+                    format!("已用 {} 重新讀取，但有無法解碼的位元組（顯示為 �）；這個編碼可能不對，請勿存檔", encoding.label())
+                } else {
+                    format!("已用 {} 重新讀取", encoding.label())
+                };
+            }
+            Err(e) => self.status_message = format!("重新讀取失敗：{}", e),
         }
     }
 
@@ -477,6 +705,8 @@ impl AlexCodeApp {
             ("檔案：儲存 (Save)".into(), Cmd::Save),
             ("檔案：另存新檔 (Save As)".into(), Cmd::SaveAs),
             ("檔案：關閉分頁 (Close Tab)".into(), Cmd::CloseTab),
+            ("檔案：開啟檔案所在資料夾 (Reveal in Folder)".into(), Cmd::RevealInFolder),
+            ("檔案：複製完整路徑 (Copy Path)".into(), Cmd::CopyPath),
             ("編輯：複製當前行 (Duplicate Line)".into(), Cmd::DuplicateLine),
             ("編輯：刪除當前行 (Delete Line)".into(), Cmd::DeleteLine),
             ("編輯：切換註解 (Toggle Comment)".into(), Cmd::ToggleComment),
@@ -497,6 +727,9 @@ impl AlexCodeApp {
             ("工具：全形轉半形 (To Half-width)".into(), Cmd::HalfWidth),
             ("說明：關於 AlexCode (About)".into(), Cmd::About),
         ];
+        for (kind, label) in available_shells() {
+            v.push((format!("檔案：{}", label), Cmd::OpenShell(*kind)));
+        }
         for name in ThemeManager::theme_names() {
             v.push((format!("主題：{}", name), Cmd::Theme(name)));
         }
@@ -520,16 +753,24 @@ impl AlexCodeApp {
             Cmd::Save => self.save_active(false),
             Cmd::SaveAs => self.save_active(true),
             Cmd::CloseTab => self.close_tab(self.active_tab_idx),
+            Cmd::RevealInFolder => self.reveal_tab(self.active_tab_idx),
+            Cmd::OpenShell(kind) => self.open_shell_for_tab(self.active_tab_idx, kind),
+            Cmd::CopyPath => {
+                // 剪貼簿需要 egui Context：交給下一幀的 update() 處理
+                self.pending_copy = self.active_buffer().and_then(|b| b.file_path.clone());
+            }
             Cmd::Undo => {
                 self.commit_md_edit();
-                if let Some(b) = self.active_buffer_mut() {
-                    b.undo();
+                if self.active_buffer_mut().map_or(false, |b| b.undo()) {
+                    self.sync_cursor_to_editor();
+                    self.scroll_to_cursor = true;
                 }
             }
             Cmd::Redo => {
                 self.commit_md_edit();
-                if let Some(b) = self.active_buffer_mut() {
-                    b.redo();
+                if self.active_buffer_mut().map_or(false, |b| b.redo()) {
+                    self.sync_cursor_to_editor();
+                    self.scroll_to_cursor = true;
                 }
             }
             Cmd::DuplicateLine => {
@@ -747,6 +988,19 @@ impl AlexCodeApp {
                 self.run_cmd(cmd);
             }
         }
+        // 復原 / 重做只有一套紀錄（EditorBuffer）：程式碼編輯區有焦點時攔下快捷鍵，
+        // 不讓 egui TextEdit 內建的另一套復原紀錄處理。其他輸入框（尋找、篩選…）維持各自的復原。
+        if self.editor_focused {
+            let redo = ctx.input_mut(|i| {
+                i.consume_shortcut(&KeyboardShortcut::new(cs, Key::Z))
+                    || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y))
+            });
+            if redo {
+                self.run_cmd(Cmd::Redo);
+            } else if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z))) {
+                self.run_cmd(Cmd::Undo);
+            }
+        }
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F2))) {
             self.run_cmd(Cmd::ToggleBookmark);
         }
@@ -755,6 +1009,7 @@ impl AlexCodeApp {
             self.show_find_bar = false;
             self.show_goto = false;
             self.show_command_palette = false;
+            self.pending_close = None;
         }
         // 拖放檔案開啟
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
@@ -821,6 +1076,12 @@ impl AlexCodeApp {
                         ui.separator();
                         if mi(ui, "儲存 (Save)", "Ctrl+S") { cmd = Some(Cmd::Save); }
                         if mi(ui, "另存新檔 (Save As)…", "Ctrl+Shift+S") { cmd = Some(Cmd::SaveAs); }
+                        ui.separator();
+                        if mi(ui, "開啟檔案所在資料夾", "") { cmd = Some(Cmd::RevealInFolder); }
+                        for (kind, label) in available_shells() {
+                            if mi(ui, label, "") { cmd = Some(Cmd::OpenShell(*kind)); }
+                        }
+                        if mi(ui, "複製完整路徑", "") { cmd = Some(Cmd::CopyPath); }
                         ui.separator();
                         if mi(ui, "關閉分頁 (Close)", "Ctrl+W") { cmd = Some(Cmd::CloseTab); }
                         if ui.button("結束 (Exit)").clicked() {
@@ -1021,14 +1282,10 @@ impl AlexCodeApp {
             self.filter_engine.compile(&self.filter_query);
         }
         if !self.filter_query.trim().is_empty() {
+            self.sync_filter_hits();
             if ui.button("提取 Tab").on_hover_text("將篩選結果開成新分頁").clicked() {
                 if let Some(buf) = self.tabs.get(self.active_tab_idx) {
-                    let lines: Vec<&str> = buf
-                        .lines
-                        .iter()
-                        .filter(|l| self.filter_engine.match_compiled(l))
-                        .map(|s| s.as_str())
-                        .collect();
+                    let lines: Vec<&str> = self.filter_cache.1.iter().filter_map(|&i| buf.lines.get(i)).map(|s| s.as_str()).collect();
                     let mut nb = EditorBuffer::from_text(&lines.join("\n"));
                     nb.file_path = Some(format!("filtered_{}.log", self.tabs.len() + 1));
                     self.tabs.push(nb);
@@ -1037,9 +1294,10 @@ impl AlexCodeApp {
                     self.filter_engine.compile("");
                 }
             }
-            if let Some(buf) = self.tabs.get(self.active_tab_idx) {
-                let hit = buf.lines.iter().filter(|l| self.filter_engine.match_compiled(l)).count();
-                ui.label(RichText::new(format!("{} / {} 行", hit, buf.lines.len())).color(c.accent));
+            {
+                self.sync_filter_hits();
+                let total = self.tabs.get(self.active_tab_idx).map_or(0, |b| b.lines.len());
+                ui.label(RichText::new(format!("{} / {} 行", self.filter_cache.1.len(), total)).color(c.accent));
             }
         }
     }
@@ -1052,6 +1310,8 @@ impl AlexCodeApp {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 1.0));
                 ui.painter().add(vgradient(full, c.panel, c.bg));
                 let mut close_idx = None;
+                let mut tab_action: Option<TabAction> = None;
+                let tab_count = self.tabs.len();
                 egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
@@ -1125,12 +1385,38 @@ impl AlexCodeApp {
                             if resp.middle_clicked() {
                                 close_idx = Some(i);
                             }
-                            resp.on_hover_text(self.tabs[i].file_path.clone().unwrap_or_default());
+                            let on_disk = self.tabs[i].file_path.as_deref().map_or(false, |p| Path::new(p).is_absolute());
+                            let resp = resp.on_hover_text(self.tabs[i].file_path.clone().unwrap_or_default());
+                            // 右鍵選單：檔案總管 / 終端機 / 複製路徑 / 關閉
+                            resp.context_menu(|ui| {
+                                ui.set_min_width(250.0);
+                                let mut pick = |ui: &mut egui::Ui, enabled: bool, label: &str, a: TabAction| {
+                                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                                        tab_action = Some(a);
+                                        ui.close_menu();
+                                    }
+                                };
+                                pick(ui, true, "開啟檔案所在資料夾", TabAction::Reveal(i));
+                                for (kind, label) in available_shells() {
+                                    pick(ui, true, label, TabAction::Shell(i, *kind));
+                                }
+                                ui.separator();
+                                pick(ui, on_disk, "複製完整路徑", TabAction::CopyPath(i));
+                                pick(ui, true, "複製檔名", TabAction::CopyName(i));
+                                ui.separator();
+                                pick(ui, true, "關閉", TabAction::Close(i));
+                                pick(ui, tab_count > 1, "關閉其他分頁", TabAction::CloseOthers(i));
+                                pick(ui, i + 1 < tab_count, "關閉右側分頁", TabAction::CloseRight(i));
+                                pick(ui, true, "全部關閉", TabAction::CloseAll);
+                            });
                         }
                     });
                 });
                 if let Some(i) = close_idx {
                     self.close_tab(i);
+                }
+                if let Some(a) = tab_action {
+                    self.run_tab_action(ctx, a);
                 }
                 // 分頁列與編輯區的分隔線
                 let r = ui.max_rect().expand2(egui::vec2(4.0, 0.0));
@@ -1142,6 +1428,14 @@ impl AlexCodeApp {
         if !self.show_find_bar {
             return;
         }
+        // 全文與命中位置都只在內容或搜尋字串改變時重算
+        self.sync_text_cache();
+        let text = std::mem::take(&mut self.text_cache.1);
+        let fkey = (self.text_cache.0 .0, self.text_cache.0 .1, self.find_bar_text.clone());
+        if self.find_cache.0 != fkey {
+            self.find_cache = (fkey, find_matches(&text, &self.find_bar_text));
+        }
+        let matches = std::mem::take(&mut self.find_cache.1);
         egui::TopBottomPanel::top("find_bar")
             .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
             .show_separator_line(false)
@@ -1163,8 +1457,6 @@ impl AlexCodeApp {
                         resp.request_focus();
                         self.find_bar_focus = false;
                     }
-                    let text = self.tabs.get(self.active_tab_idx).map(|b| b.edit_text()).unwrap_or_default();
-                    let matches = find_matches(&text, &self.find_bar_text);
                     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     let shift = ui.input(|i| i.modifiers.shift);
                     let mut go: Option<bool> = None;
@@ -1208,6 +1500,8 @@ impl AlexCodeApp {
                     });
                 });
             });
+        self.text_cache.1 = text;
+        self.find_cache.1 = matches;
     }
 
     fn status_bar(&mut self, ctx: &egui::Context, c: &Colors) {
@@ -1232,6 +1526,9 @@ impl AlexCodeApp {
                     (1, 1, "LF", 0)
                 };
                 let lang = self.tab_lang(self.active_tab_idx);
+                let encoding = self.active_buffer().map_or(FileEncoding::Utf8, |b| b.encoding);
+                // (新編碼, 是否為「重新讀取」)
+                let mut enc_choice: Option<(FileEncoding, bool)> = None;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     let seg = |ui: &mut egui::Ui, t: String, col: Color32| {
@@ -1245,7 +1542,32 @@ impl AlexCodeApp {
                     ui.add_space(6.0);
                     seg(ui, format!("Ln {}, Col {}", line_no, col), c.fg_dim2);
                     seg(ui, format!("{} 行", lines), c.fg_dim2);
-                    seg(ui, "UTF-8".into(), c.fg_dim2);
+                    // 編碼：點擊可改存檔編碼，或以其他編碼重新讀取
+                    ui.menu_button(RichText::new(encoding.label()).size(12.0).color(c.fg_dim2), |ui| {
+                        ui.set_min_width(200.0);
+                        ui.label(RichText::new("存檔時使用的編碼").size(11.5).color(c.fg_dim2));
+                        for e in FileEncoding::ALL {
+                            if ui.selectable_label(e == encoding, e.label()).clicked() {
+                                enc_choice = Some((e, false));
+                                ui.close_menu();
+                            }
+                        }
+                        ui.separator();
+                        ui.menu_button("以其他編碼重新讀取", |ui| {
+                            for e in FileEncoding::ALL {
+                                if ui.button(e.label()).clicked() {
+                                    enc_choice = Some((e, true));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    })
+                    .response
+                    .on_hover_text("檔案編碼（點擊變更）");
+                    ui.add_space(10.0);
+                    let (sr, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), Sense::hover());
+                    ui.painter().rect_filled(sr, 0.0, c.border);
+                    ui.add_space(10.0);
                     seg(ui, eol.into(), c.fg_dim2);
                     seg(ui, lang.display_name().into(), c.fg_dim2);
                     ui.label(RichText::new(&self.status_message).size(12.0).color(c.fg_dim));
@@ -1263,6 +1585,16 @@ impl AlexCodeApp {
                         ui.label(RichText::new(format!("{}%", (self.font_size / 14.0 * 100.0).round())).size(12.0).color(c.fg_dim2));
                     });
                 });
+                if let Some((e, reload)) = enc_choice {
+                    let idx = self.active_tab_idx;
+                    if reload {
+                        self.commit_md_edit();
+                        self.reload_with_encoding(idx, e);
+                    } else if let Some(b) = self.tabs.get_mut(idx) {
+                        b.set_encoding(e);
+                        self.status_message = format!("存檔編碼已改為 {}（儲存後生效）", e.label());
+                    }
+                }
             });
     }
 
@@ -1487,6 +1819,7 @@ impl AlexCodeApp {
             }
         }
 
+        self.editor_focused = false; // 由 code_editor 在本幀重新設定
         let mut md_action = MdAction::None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(c.bg))
@@ -1578,7 +1911,9 @@ impl AlexCodeApp {
         let lang = self.tab_lang(idx);
         let font = FontId::monospace(self.font_size);
         let find = if self.show_find_bar { self.find_bar_text.clone() } else { String::new() };
-        let mut text = self.tabs[idx].edit_text();
+        // 全文只在內容改變時重新串接（不再每一幀 join 所有行）
+        self.sync_text_cache();
+        let mut text = std::mem::take(&mut self.text_cache.1);
         let line_count = self.tabs[idx].lines.len();
         let bookmarks = self.tabs[idx].bookmarks.clone();
         let path_key = self.tabs[idx].file_path.clone().unwrap_or_default();
@@ -1599,11 +1934,32 @@ impl AlexCodeApp {
         let digits = line_count.to_string().len().max(3);
         let gutter_w = digits as f32 * char_w + 30.0;
 
+        // 語法高亮與排版只在輸入（文字 / 語言 / 主題 / 字型 / 搜尋字串）改變時重算；
+        // 其餘每一幀只花一次全文雜湊。過大的文件不做語法高亮。
         let pal_c = pal.clone();
         let font_c = font.clone();
-        let mut layouter = move |ui: &egui::Ui, s: &str, _wrap: f32| {
-            let job = highlight(s, lang, &pal_c, font_c.clone(), &find);
-            ui.fonts(|f| f.layout_job(job))
+        let theme = self.theme_mgr.current_theme_name().to_string();
+        let mut hl_cache = self.highlight_cache.take();
+        let mut layouter = |ui: &egui::Ui, s: &str, _wrap: f32| {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.hash(&mut h);
+            lang.display_name().hash(&mut h);
+            theme.hash(&mut h);
+            font_c.size.to_bits().hash(&mut h);
+            find.hash(&mut h);
+            let key = h.finish();
+            let atlas = ui.fonts(|f| f.texture_atlas());
+            match &hl_cache {
+                Some((k, galley, a)) if *k == key && Arc::ptr_eq(a, &atlas) => galley.clone(),
+                _ => {
+                    let l = if s.len() > HIGHLIGHT_MAX_BYTES { Lang::Plain } else { lang };
+                    let job = highlight(s, l, &pal_c, font_c.clone(), &find);
+                    let galley = ui.fonts(|f| f.layout_job(job));
+                    hl_cache = Some((key, galley.clone(), atlas));
+                    galley
+                }
+            }
         };
 
         let mut new_cursor: Option<(usize, usize)> = None;
@@ -1635,6 +1991,7 @@ impl AlexCodeApp {
                         .show(ui);
 
                     changed = output.response.changed();
+                    self.editor_focused = output.response.has_focus();
                     let galley = &output.galley;
                     let gpos = output.galley_pos;
 
@@ -1721,8 +2078,15 @@ impl AlexCodeApp {
                 });
             });
 
+        self.highlight_cache = hl_cache;
         if changed {
-            self.tabs[idx].replace_all_text(&text);
+            self.tabs[idx].apply_typed_text(&text);
+        }
+        // 把全文放回快取（貼上的內容含 \r 時緩衝區會正規化換行，快取就不能沿用）
+        if !text.contains('\r') {
+            self.text_cache = ((self.tabs[idx].id, self.tabs[idx].revision()), text);
+        } else {
+            self.text_cache = ((0, 0), String::new());
         }
         if let Some((line, col)) = new_cursor {
             let buf = &mut self.tabs[idx];
@@ -1734,23 +2098,20 @@ impl AlexCodeApp {
     /// Log 篩選結果檢視（僅顯示符合的行，保留原始行號）
     fn filtered_view(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
         let idx = self.active_tab_idx;
+        // 命中的行號有快取；顯示時直接借用緩衝區的行，不複製
+        self.sync_filter_hits();
+        let hits = std::mem::take(&mut self.filter_cache.1);
         let Some(buf) = self.tabs.get(idx) else { return };
         let lang = self.tab_lang(idx);
         let font = FontId::monospace(self.font_size);
         let needle = self.filter_engine.positive_keywords().into_iter().next().unwrap_or_default();
-        let hits: Vec<(usize, String)> = buf
-            .lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| self.filter_engine.match_compiled(l))
-            .map(|(i, l)| (i, l.clone()))
-            .collect();
         let digits = buf.lines.len().to_string().len().max(3);
         let row_h = ui.fonts(|f| f.row_height(&font));
         let mut jump: Option<usize> = None;
 
         egui::ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, hits.len(), |ui, range| {
-            for (ln, line) in &hits[range] {
+            for ln in &hits[range] {
+                let Some(line) = buf.lines.get(*ln) else { continue };
                 let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(400.0), row_h), Sense::click());
                 if resp.hovered() {
                     ui.painter().rect_filled(rect, 0.0, c.current_line);
@@ -1773,6 +2134,7 @@ impl AlexCodeApp {
                 resp.on_hover_text("雙擊跳至此行");
             }
         });
+        self.filter_cache.1 = hits;
         if let Some(ln) = jump {
             self.filter_query.clear();
             self.filter_engine.compile("");
@@ -1875,7 +2237,20 @@ impl AlexCodeApp {
             }
         }
 
-        // 全專案搜尋
+        // 全專案搜尋：收取背景執行緒的結果
+        if let Some(job) = &self.find_job {
+            if let Ok((matches, stats)) = job.rx.try_recv() {
+                self.status_message = if stats.canceled {
+                    format!("搜尋已取消（已找到 {} 筆）", matches.len())
+                } else if stats.truncated {
+                    format!("找到 {} 筆結果（已達上限，僅顯示前 {} 筆）", matches.len(), matches.len())
+                } else {
+                    format!("找到 {} 筆結果（掃描 {} 個檔案）", matches.len(), stats.files_scanned)
+                };
+                self.find_results = matches;
+                self.find_job = None;
+            }
+        }
         if self.show_find_in_files {
             let mut open = true;
             let mut to_open: Option<(String, usize)> = None;
@@ -1894,13 +2269,35 @@ impl AlexCodeApp {
                                 .desired_width(ui.available_width() - 90.0),
                         );
                         let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                        if ui.button("搜尋").clicked() || enter {
+                        if (ui.button("搜尋").clicked() || enter) && !self.find_query.is_empty() {
+                            // 在背景執行緒搜尋：大型資料夾 / 網路磁碟不會凍結視窗
+                            if let Some(job) = self.find_job.take() {
+                                job.cancel.store(true, Ordering::Relaxed);
+                            }
                             let cancel = Arc::new(AtomicBool::new(false));
-                            let (matches, _) = search_in_files(&self.project_root, &[], &self.find_query, &cancel, 500);
-                            self.status_message = format!("找到 {} 筆結果", matches.len());
-                            self.find_results = matches;
+                            let (tx, rx) = unbounded();
+                            let (root, query, flag) = (self.project_root.clone(), self.find_query.clone(), cancel.clone());
+                            let repaint = ui.ctx().clone();
+                            std::thread::spawn(move || {
+                                let _ = tx.send(search_in_files(&root, &[], &query, &flag, 500));
+                                repaint.request_repaint();
+                            });
+                            self.find_job = Some(FindJob { rx, cancel });
+                            self.find_results.clear();
+                            self.status_message = "搜尋中…".to_string();
                         }
                     });
+                    if self.find_job.is_some() {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new("搜尋中…").color(c.fg_dim));
+                            if ui.small_button("取消").clicked() {
+                                if let Some(job) = &self.find_job {
+                                    job.cancel.store(true, Ordering::Relaxed);
+                                }
+                            }
+                        });
+                    }
                     ui.label(RichText::new(format!("範圍：{}", self.project_root.display())).size(11.5).color(c.fg_dim2));
                     if ui.small_button("變更資料夾…").clicked() {
                         if let Some(d) = rfd::FileDialog::new().set_directory(&self.project_root).pick_folder() {
@@ -1938,8 +2335,13 @@ impl AlexCodeApp {
             }
             if !open {
                 self.show_find_in_files = false;
+                if let Some(job) = &self.find_job {
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
             }
         }
+
+        self.unsaved_dialog(ctx, c);
 
         // 關於
         if self.show_about {
@@ -1986,8 +2388,107 @@ impl AlexCodeApp {
     }
 }
 
+impl AlexCodeApp {
+    /// 「尚未儲存的變更」對話框：儲存 / 不儲存 / 取消
+    fn unsaved_dialog(&mut self, ctx: &egui::Context, c: &Colors) {
+        let Some(pending) = &self.pending_close else { return };
+        let dirty: Vec<(u64, String)> = self
+            .tabs
+            .iter()
+            .filter(|b| b.modified && pending.ids.contains(&b.id))
+            .map(|b| (b.id, Self::tab_title(b)))
+            .collect();
+        let exit = pending.exit;
+        if dirty.is_empty() {
+            let p = self.pending_close.take().unwrap();
+            self.finish_close(&p.ids, p.exit);
+            return;
+        }
+        // 蓋住主畫面，對話框處理完之前不能操作後面的內容
+        egui::Area::new(egui::Id::new("unsaved-dim"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(Pos2::ZERO)
+            .show(ctx, |ui| {
+                let r = ctx.screen_rect();
+                ui.allocate_response(r.size(), Sense::click());
+                ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(140));
+            });
+        // 0 = 取消, 1 = 儲存, 2 = 不儲存
+        let mut choice: Option<u8> = None;
+        // 對話框開著時，後面的輸入框不該繼續收到鍵盤輸入
+        ctx.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
+        egui::Area::new(egui::Id::new("unsaved-dialog"))
+            .order(egui::Order::Tooltip)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::Frame::window(&ctx.style()).show(ui, |ui| {
+                ui.set_min_width(380.0);
+                ui.label(RichText::new("尚未儲存的變更").color(c.accent).strong());
+                ui.add_space(6.0);
+                ui.label(if exit {
+                    "結束前，下列檔案有尚未儲存的變更："
+                } else {
+                    "下列檔案有尚未儲存的變更："
+                });
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    for (_, name) in &dirty {
+                        ui.label(RichText::new(format!("  ●  {}", name)).color(c.accent2));
+                    }
+                });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let save = if dirty.len() > 1 { "全部儲存" } else { "儲存" };
+                    if ui.button(RichText::new(save).color(c.accent).strong()).clicked() {
+                        choice = Some(1);
+                    }
+                    if ui.button("不儲存").clicked() {
+                        choice = Some(2);
+                    }
+                    if ui.button("取消").clicked() {
+                        choice = Some(0);
+                    }
+                });
+                });
+            });
+        match choice {
+            Some(0) => self.pending_close = None,
+            Some(1) => {
+                let p = self.pending_close.take().unwrap();
+                for (id, name) in &dirty {
+                    let saved = self.tabs.iter().position(|b| b.id == *id).map_or(false, |i| self.save_tab(i, false));
+                    if !saved {
+                        // 任何一個沒存成功（取消另存對話框、寫入失敗、編碼無法表示）就整個取消，不關閉也不結束
+                        if !self.status_message.starts_with("未儲存") && !self.status_message.starts_with("儲存失敗") {
+                            self.status_message = format!("「{}」尚未儲存，已取消關閉", name);
+                        }
+                        return;
+                    }
+                }
+                self.finish_close(&p.ids, p.exit);
+            }
+            Some(_) => {
+                let p = self.pending_close.take().unwrap();
+                self.finish_close(&p.ids, p.exit);
+            }
+            None => {}
+        }
+    }
+}
+
 impl eframe::App for AlexCodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ui_frame(ctx);
+    }
+}
+
+impl AlexCodeApp {
+    /// 一幀的完整 UI（與 eframe 無關，測試可用無視窗的 `egui::Context` 直接驅動）
+    pub fn ui_frame(&mut self, ctx: &egui::Context) {
         let pal = self.theme_mgr.current_palette().clone();
         let colors = Colors::from_palette(&pal, self.theme_mgr.is_neon_hud());
 
@@ -2003,17 +2504,44 @@ impl eframe::App for AlexCodeApp {
             }
         }
 
-        // 視窗標題顯示目前檔案
+        // 視窗標題顯示目前檔案（只在標題真的改變時才送出命令）
         if let Some(buf) = self.active_buffer() {
             let title = format!(
                 "{}{} — AlexCode Neon Edition",
                 if buf.modified { "● " } else { "" },
                 Self::tab_title(buf)
             );
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            if title != self.last_title {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+                self.last_title = title;
+            }
         }
 
-        self.handle_shortcuts(ctx);
+        // 結束程式（視窗 X、Alt+F4、選單「結束」）：有未儲存的變更時攔下並詢問
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
+            self.commit_md_edit();
+            if self.tabs.iter().any(|b| b.modified) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                let ids = self.tabs.iter().map(|b| b.id).collect();
+                self.request_close(ids, true);
+            }
+        }
+        if self.allow_exit && self.pending_close.is_none() && !ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if let Some(text) = self.pending_copy.take() {
+            self.status_message = format!("已複製路徑：{}", text);
+            ctx.copy_text(text);
+        }
+
+        // 詢問對話框開著時不處理快捷鍵（Esc 取消除外）
+        if self.pending_close.is_some() {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.pending_close = None;
+            }
+        } else {
+            self.handle_shortcuts(ctx);
+        }
 
         self.menu_bar(ctx, &colors);
         self.tool_bar(ctx, &colors);
@@ -2024,5 +2552,263 @@ impl eframe::App for AlexCodeApp {
         self.find_bar(ctx, &colors);
         self.editor_area(ctx, &colors);
         self.popup_windows(ctx, &colors);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui::{Event, RawInput, ViewportCommand, ViewportEvent, ViewportId};
+
+    fn ctx() -> egui::Context {
+        let ctx = egui::Context::default();
+        style::setup_fonts(&ctx);
+        ctx
+    }
+
+    fn frame_with(app: &mut AlexCodeApp, ctx: &egui::Context, edit: impl FnOnce(&mut RawInput)) -> egui::FullOutput {
+        let mut input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+            focused: true,
+            ..Default::default()
+        };
+        edit(&mut input);
+        ctx.run(input, |ctx| app.ui_frame(ctx))
+    }
+
+    fn frame(app: &mut AlexCodeApp, ctx: &egui::Context, events: Vec<Event>) -> egui::FullOutput {
+        frame_with(app, ctx, |i| i.events = events)
+    }
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    /// 開一個只有單一程式碼分頁的 App，並讓編輯區取得焦點
+    fn app_with(ctx: &egui::Context, text: &str) -> AlexCodeApp {
+        let mut app = AlexCodeApp::new();
+        let mut b = EditorBuffer::from_text(text);
+        b.file_path = Some("t.rs".into());
+        app.tabs = vec![b];
+        app.active_tab_idx = 0;
+        app.pending_select = Some((0, 0));
+        frame(&mut app, ctx, vec![]);
+        frame(&mut app, ctx, vec![]);
+        assert!(app.editor_focused, "editor should have keyboard focus");
+        app
+    }
+
+    #[test]
+    fn big5_file_survives_edit_and_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big5.txt");
+        // 「測試」+ CRLF + "abc"
+        let original = [0xB4, 0xFA, 0xB8, 0xD5, b'\r', b'\n', b'a', b'b', b'c'];
+        std::fs::write(&path, original).unwrap();
+
+        let mut app = AlexCodeApp::new();
+        app.open_path(&path);
+        let idx = app.active_tab_idx;
+        assert_eq!(app.tabs[idx].encoding, FileEncoding::Big5);
+        assert_eq!(app.tabs[idx].lines, vec!["測試", "abc"]);
+
+        // 未修改直接存：位元組完全相同
+        assert!(app.save_tab(idx, false));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        // 修改後存：仍是 Big5，其餘位元組不變
+        app.tabs[idx].replace_all_text("測試\nabcd");
+        assert!(app.save_tab(idx, false));
+        let mut expected = original.to_vec();
+        expected.push(b'd');
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(!app.tabs[idx].modified);
+
+        // 加入 Big5 無法表示的字元：拒絕寫入，檔案保持原樣
+        app.tabs[idx].replace_all_text("測試😀");
+        assert!(!app.save_tab(idx, false));
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(app.tabs[idx].modified);
+    }
+
+    #[test]
+    fn closing_modified_tab_asks_first() {
+        let mut app = AlexCodeApp::new();
+        let n = app.tabs.len();
+        app.tabs[0].replace_all_text("changed");
+        app.close_tab(0);
+        assert_eq!(app.tabs.len(), n, "modified tab must not be dropped silently");
+        assert!(app.pending_close.is_some());
+
+        // 未修改的分頁直接關閉
+        app.pending_close = None;
+        app.close_tab(1);
+        assert_eq!(app.tabs.len(), n - 1);
+        assert!(app.pending_close.is_none());
+    }
+
+    #[test]
+    fn discard_choice_closes_and_keeps_active_tab() {
+        let mut app = AlexCodeApp::new();
+        app.new_tab(); // 3 個分頁，作用中為最後一個
+        let keep = app.tabs[2].id;
+        app.tabs[0].replace_all_text("changed");
+        let ids = vec![app.tabs[0].id, app.tabs[1].id];
+        app.request_close(ids.clone(), false);
+        assert!(app.pending_close.is_some());
+        let p = app.pending_close.take().unwrap();
+        app.finish_close(&p.ids, p.exit); // 「不儲存」
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.tabs[app.active_tab_idx].id, keep);
+    }
+
+    #[test]
+    fn window_close_is_cancelled_while_there_are_unsaved_changes() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "fn main() {}");
+        app.tabs[0].replace_all_text("fn main() { changed }");
+        let close = |i: &mut RawInput| {
+            i.viewports.entry(ViewportId::ROOT).or_default().events.push(ViewportEvent::Close);
+        };
+        let out = frame_with(&mut app, &ctx, close);
+        let cmds = &out.viewport_output[&ViewportId::ROOT].commands;
+        assert!(cmds.contains(&ViewportCommand::CancelClose), "close must be cancelled: {cmds:?}");
+        assert!(app.pending_close.as_ref().map_or(false, |p| p.exit));
+
+        // 沒有未儲存的變更時不攔截
+        app.pending_close = None;
+        app.tabs[0].mark_saved();
+        let out = frame_with(&mut app, &ctx, close);
+        assert!(!out.viewport_output[&ViewportId::ROOT].commands.contains(&ViewportCommand::CancelClose));
+    }
+
+    #[test]
+    fn ctrl_z_and_toolbar_undo_share_one_history() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "abc");
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!(app.tabs[0].edit_text(), "Xabc");
+        assert!(app.tabs[0].modified);
+
+        // Ctrl+Z 走文件的復原紀錄（不是 TextEdit 內建的那一套）
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "abc");
+        assert!(!app.tabs[0].modified);
+
+        // 工具列 / 選單的「重做」能重做 Ctrl+Z 復原的內容
+        app.run_cmd(Cmd::Redo);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "Xabc");
+
+        // Ctrl+Y 與工具列「復原」交錯使用也一致
+        app.run_cmd(Cmd::Undo);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "abc");
+        frame(&mut app, &ctx, vec![key(Key::Y, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "Xabc");
+    }
+
+    #[test]
+    fn typing_after_undo_edits_the_restored_text() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "abc");
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![Event::Text("Y".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "Yabc");
+    }
+
+    #[test]
+    fn filter_and_find_results_follow_edits() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "error one\nok\nerror two");
+        app.filter_query = "error".into();
+        app.filter_engine.compile("error");
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.filter_cache.1, vec![0, 2]);
+        app.tabs[0].replace_all_text("error one\nok\nfine");
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.filter_cache.1, vec![0]);
+
+        app.filter_query.clear();
+        app.filter_engine.compile("");
+        app.show_find_bar = true;
+        app.find_bar_text = "o".into();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.find_cache.1.len(), 3); // err[o]r、[o]ne、[o]k
+        app.tabs[0].replace_all_text("zzz");
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.find_cache.1.is_empty());
+    }
+
+    #[test]
+    fn layout_cache_is_dropped_when_font_atlas_is_rebuilt() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "fn main() {}");
+        frame(&mut app, &ctx, vec![]);
+        let before = app.highlight_cache.as_ref().unwrap().1.clone();
+        frame(&mut app, &ctx, vec![]);
+        assert!(Arc::ptr_eq(&before, &app.highlight_cache.as_ref().unwrap().1), "idle frames reuse the layout");
+
+        // 縮放改變 → egui 重建字型圖集 → 舊排版不可再用
+        ctx.set_pixels_per_point(2.0);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(!Arc::ptr_eq(&before, &app.highlight_cache.as_ref().unwrap().1));
+    }
+
+    #[test]
+    fn tab_dir_uses_file_folder_or_project_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "x").unwrap();
+        let mut app = AlexCodeApp::new();
+        let root = app.project_root.clone();
+        assert_eq!(app.tab_dir(0), root, "unsaved tab falls back to the project folder");
+        app.open_path(&path);
+        assert_eq!(app.tab_dir(app.active_tab_idx), dir.path());
+    }
+
+    /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn idle_frame_cost_report() {
+        let ctx = ctx();
+        let text: String = (0..20_000).map(|i| format!("    let value_{i} = compute(\"{i}\"); // error line {i}\n")).collect();
+        let mut app = app_with(&ctx, &text);
+        app.show_find_bar = true;
+        app.find_bar_text = "error".into();
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        println!("IDLE_FRAME_MS editor+find = {:.2}", t.elapsed().as_secs_f64() * 1000.0 / 20.0);
+
+        app.show_find_bar = false;
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        println!("IDLE_FRAME_MS editor only = {:.2}", t.elapsed().as_secs_f64() * 1000.0 / 20.0);
+        app.filter_query = "error".into();
+        app.filter_engine.compile("error");
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        println!("IDLE_FRAME_MS filter view = {:.2}", t.elapsed().as_secs_f64() * 1000.0 / 20.0);
     }
 }
