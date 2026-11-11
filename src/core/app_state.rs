@@ -3,6 +3,7 @@
 //! 存成設定資料夾下的 `state.json`（Windows：`%APPDATA%\AlexCode`、
 //! macOS：`~/Library/Application Support/AlexCode`、Linux：`$XDG_CONFIG_HOME/alexcode`）。
 
+use super::config::EditorConfig;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,8 @@ pub struct AppState {
     pub folder: Option<String>,
     pub show_explorer: bool,
     pub auto_pair: bool,
+    /// 設定對話框的內容；None = 由沒有設定對話框的舊版本存的檔（沿用上面的 `font_size` / `auto_pair`）
+    pub config: Option<EditorConfig>,
 }
 
 impl AppState {

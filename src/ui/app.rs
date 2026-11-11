@@ -22,6 +22,7 @@ use crate::editor::{
     decide as pair_decide, detect_and_decode, is_relevant as pair_relevant, should_delete_pair, Action as PairAction,
     sticky_headers, EditorBuffer, FileEncoding, Position, Selection,
 };
+use crate::core::config::{MAX_FONT_SIZE, MAX_TAB_SIZE, MIN_FONT_SIZE, MIN_TAB_SIZE};
 use crate::index::{extract_symbols, Symbol, SymbolLang};
 use crate::git::{diff_line_states, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::filter::{FilterEngine, FilterLogic};
@@ -147,6 +148,7 @@ pub enum Cmd {
     HalfWidth,
     ZoomIn,
     ZoomOut,
+    Settings,
     About,
     Plugin(String),
 }
@@ -181,7 +183,6 @@ pub struct AlexCodeApp {
     // ---- GUI 狀態 ----
     logo: Option<egui::TextureHandle>,
     applied_theme: String,
-    font_size: f32,
     show_find_bar: bool,
     find_bar_text: String,
     find_bar_focus: bool,
@@ -227,7 +228,6 @@ pub struct AlexCodeApp {
     recent_files: Vec<String>,
     /// 專案資料夾由使用者以「開啟資料夾」指定：之後開檔不再改變它
     root_pinned: bool,
-    auto_pair: bool,
 
     // ---- 檔案總管側邊欄 ----
     show_explorer: bool,
@@ -272,6 +272,12 @@ pub struct AlexCodeApp {
     sticky_rows: Vec<(usize, Rect)>,
     /// 上一幀沒有被固定標頭蓋住的第一行
     sticky_below: usize,
+
+    // ---- 設定對話框 ----
+    show_settings: bool,
+    /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
+    #[cfg(test)]
+    probe: HashMap<&'static str, Rect>,
 
     repaint: Option<egui::Context>,
 }
@@ -358,7 +364,6 @@ impl AlexCodeApp {
             md_view: MarkdownViewState::default(),
             logo: None,
             applied_theme: String::new(),
-            font_size: 14.0,
             show_find_bar: false,
             find_bar_text: String::new(),
             find_bar_focus: false,
@@ -388,7 +393,6 @@ impl AlexCodeApp {
             last_persist: std::time::Instant::now(),
             recent_files: Vec::new(),
             root_pinned: false,
-            auto_pair: true,
             show_explorer: false,
             tree_cache: HashMap::new(),
             tree_expanded: HashSet::new(),
@@ -411,6 +415,9 @@ impl AlexCodeApp {
             sticky_syms: Arc::new(Vec::new()),
             sticky_rows: Vec::new(),
             sticky_below: 0,
+            show_settings: false,
+            #[cfg(test)]
+            probe: HashMap::new(),
             repaint: None,
         };
 
@@ -467,7 +474,7 @@ impl AlexCodeApp {
     fn snapshot_state(&self) -> AppState {
         AppState {
             theme: self.theme_mgr.current_theme_name().to_string(),
-            font_size: self.font_size,
+            font_size: self.config.font_size,
             open_files: self.file_tabs(),
             active_file: self
                 .active_buffer()
@@ -476,7 +483,11 @@ impl AlexCodeApp {
             recent_files: self.recent_files.clone(),
             folder: self.root_pinned.then(|| self.project_root.to_string_lossy().to_string()),
             show_explorer: self.show_explorer,
-            auto_pair: self.auto_pair,
+            auto_pair: self.config.auto_pair,
+            config: Some(EditorConfig {
+                theme: self.theme_mgr.current_theme_name().to_string(),
+                ..self.config.clone()
+            }),
         }
     }
 
@@ -485,15 +496,26 @@ impl AlexCodeApp {
         if ThemeManager::theme_names().iter().any(|n| *n == st.theme) {
             self.theme_mgr.set_theme(&st.theme);
         }
-        if st.font_size >= 8.0 && st.font_size <= 36.0 {
-            self.font_size = st.font_size;
+        match st.config {
+            // 主題由 ThemeManager 管理：config.theme 只是存檔時的副本
+            Some(cfg) => self.config = EditorConfig { theme: self.config.theme.clone(), ..cfg.sanitized() },
+            // 沒有設定對話框的舊版本存的檔：沿用當時的字型大小與自動配對
+            None => {
+                if (MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&st.font_size) {
+                    self.config.font_size = st.font_size;
+                }
+                self.config.auto_pair = st.auto_pair;
+            }
         }
         self.recent_files = st.recent_files;
-        self.auto_pair = st.auto_pair;
+        self.show_explorer = st.show_explorer;
+        if !self.config.restore_session {
+            return; // 偏好設定與「最近開啟」照常還原，但不重新開啟上次的資料夾與檔案
+        }
         if let Some(dir) = st.folder.map(PathBuf::from).filter(|d| d.is_dir()) {
             self.set_folder(dir);
+            self.show_explorer = st.show_explorer;
         }
-        self.show_explorer = st.show_explorer;
         let recent = self.recent_files.clone(); // 還原分頁不該改變「最近開啟」的順序
         for f in &st.open_files {
             let p = PathBuf::from(f);
@@ -1033,6 +1055,7 @@ impl AlexCodeApp {
             ("工具：行排序 遞減 (Sort Desc)".into(), Cmd::SortDesc),
             ("工具：去除重複行 (Deduplicate)".into(), Cmd::Dedup),
             ("工具：全形轉半形 (To Half-width)".into(), Cmd::HalfWidth),
+            ("檔案：設定 (Settings)".into(), Cmd::Settings),
             ("說明：關於 AlexCode (About)".into(), Cmd::About),
         ];
         for (kind, label) in available_shells() {
@@ -1187,8 +1210,9 @@ impl AlexCodeApp {
             Cmd::SortDesc => self.replace_text_with(|t| crate::editor::sort_lines(t, true)),
             Cmd::Dedup => self.replace_text_with(crate::editor::remove_duplicate_lines),
             Cmd::HalfWidth => self.replace_text_with(crate::editor::to_half_width),
-            Cmd::ZoomIn => self.font_size = (self.font_size + 1.0).min(36.0),
-            Cmd::ZoomOut => self.font_size = (self.font_size - 1.0).max(8.0),
+            Cmd::ZoomIn => self.config.font_size = (self.config.font_size + 1.0).min(MAX_FONT_SIZE),
+            Cmd::ZoomOut => self.config.font_size = (self.config.font_size - 1.0).max(MIN_FONT_SIZE),
+            Cmd::Settings => self.show_settings = true,
             Cmd::About => self.show_about = true,
             Cmd::Plugin(name) => {
                 // 外掛指令產生的文字插入到游標位置
@@ -1300,7 +1324,8 @@ impl AlexCodeApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let ca = Modifiers::COMMAND | Modifiers::ALT;
-        let shortcuts: [(Modifiers, Key, Cmd); 22] = [
+        let shortcuts: [(Modifiers, Key, Cmd); 23] = [
+            (Modifiers::COMMAND, Key::Comma, Cmd::Settings),
             (cs, Key::P, Cmd::CommandPalette),
             (cs, Key::F, Cmd::FindInFiles),
             (cs, Key::S, Cmd::SaveAs),
@@ -1352,6 +1377,7 @@ impl AlexCodeApp {
             }
             self.show_find_bar = false;
             self.show_goto = false;
+            self.show_settings = false;
             self.show_command_palette = false;
             self.pending_close = None;
         }
@@ -1441,6 +1467,8 @@ impl AlexCodeApp {
                         }
                         if mi(ui, "複製完整路徑", "") { cmd = Some(Cmd::CopyPath); }
                         ui.separator();
+                        if mi(ui, "設定 (Settings)…", "Ctrl+,") { cmd = Some(Cmd::Settings); }
+                        ui.separator();
                         if mi(ui, "關閉分頁 (Close)", "Ctrl+W") { cmd = Some(Cmd::CloseTab); }
                         if ui.button("結束 (Exit)").clicked() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1481,7 +1509,7 @@ impl AlexCodeApp {
                             cmd = Some(Cmd::ToggleExplorer);
                             ui.close_menu();
                         }
-                        if ui.checkbox(&mut self.auto_pair, "自動配對括號與引號").clicked() {
+                        if ui.checkbox(&mut self.config.auto_pair, "自動配對括號與引號").clicked() {
                             ui.close_menu();
                         }
                         if ui.checkbox(&mut self.config.sticky_scroll, "固定目前的函式標題 (Sticky Scroll)").clicked() {
@@ -2211,6 +2239,40 @@ impl AlexCodeApp {
         }
     }
 
+    /// 「按 Tab 鍵插入空白」：在 TextEdit 處理輸入事件之前，把 Tab 按鍵改寫成補到下一個定位點的空白。
+    /// Shift+Tab（減少縮排）維持 TextEdit 內建行為。
+    fn tab_to_spaces_events(ui: &egui::Ui, editor_id: egui::Id, text: &str, tab_size: usize) {
+        let is_tab = |e: &egui::Event| {
+            matches!(e, egui::Event::Key { key: Key::Tab, pressed: true, modifiers, .. } if modifiers.is_none())
+        };
+        if !ui.input(|i| i.events.iter().any(is_tab)) {
+            return;
+        }
+        let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).and_then(|s| s.cursor.char_range()) else {
+            return;
+        };
+        let tab_size = tab_size.max(1);
+        let start = range.primary.index.min(range.secondary.index);
+        // 選取範圍起點所在的欄（既有的 Tab 字元算到它的下一個定位點）
+        let mut col = 0usize;
+        for ch in text.chars().take(start) {
+            col = match ch {
+                '\n' => 0,
+                '\t' => col + tab_size - col % tab_size,
+                _ => col + 1,
+            };
+        }
+        ui.input_mut(|i| {
+            for e in &mut i.events {
+                if is_tab(e) {
+                    let n = tab_size - col % tab_size;
+                    *e = egui::Event::Text(" ".repeat(n));
+                    col += n;
+                }
+            }
+        });
+    }
+
     /// 自動配對：在 TextEdit 處理輸入事件之前改寫事件。回傳 TextEdit 處理完後游標要再移動的字元數。
     fn auto_pair_events(ui: &egui::Ui, editor_id: egui::Id, text: &str) -> isize {
         let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).and_then(|s| s.cursor.char_range()) else {
@@ -2362,7 +2424,7 @@ impl AlexCodeApp {
                         ui.painter().circle_filled(dot.center(), 3.5, c.accent);
                         ui.painter().circle_stroke(dot.center(), 5.5, Stroke::new(1.0_f32, c.glow));
                         ui.add_space(8.0);
-                        ui.label(RichText::new(format!("{}%", (self.font_size / 14.0 * 100.0).round())).size(12.0).color(c.fg_dim2));
+                        ui.label(RichText::new(format!("{}%", (self.config.font_size / 14.0 * 100.0).round())).size(12.0).color(c.fg_dim2));
                     });
                 });
                 if let Some((e, reload)) = enc_choice {
@@ -2616,7 +2678,7 @@ impl AlexCodeApp {
                         String::new()
                     };
                     let root = self.project_root.clone();
-                    let fsize = self.font_size;
+                    let fsize = self.config.font_size;
                     match self.md_view.mode {
                         MdViewMode::Typora => {
                             if let Some(buf) = self.tabs.get_mut(self.active_tab_idx) {
@@ -2717,7 +2779,7 @@ impl AlexCodeApp {
             return;
         }
         let lang = self.tab_lang(idx);
-        let font = FontId::monospace(self.font_size);
+        let font = FontId::monospace(self.config.font_size);
         let find = if self.show_find_bar { self.find_bar_text.clone() } else { String::new() };
         // 全文只在內容改變時重新串接（不再每一幀 join 所有行）
         self.sync_text_cache();
@@ -2795,7 +2857,7 @@ impl AlexCodeApp {
         }
         let git_marks = std::mem::take(&mut self.git_marks.1);
         let was_focused = self.editor_was_focused;
-        let pair_enabled = self.auto_pair && !matches!(lang, Lang::Plain | Lang::Markdown);
+        let pair_enabled = self.config.auto_pair && !matches!(lang, Lang::Plain | Lang::Markdown);
 
         let mut new_cursor: Option<(usize, usize)> = None;
         let mut changed = false;
@@ -2827,6 +2889,9 @@ impl AlexCodeApp {
 
                     let cursor_shift =
                         if pair_enabled && was_focused { Self::auto_pair_events(ui, editor_id, &text) } else { 0 };
+                    if self.config.insert_spaces && was_focused {
+                        Self::tab_to_spaces_events(ui, editor_id, &text, self.config.tab_size);
+                    }
 
                     let output = egui::TextEdit::multiline(&mut text)
                         .id(editor_id)
@@ -2894,7 +2959,7 @@ impl AlexCodeApp {
                             Stroke::new(1.0_f32, c.border),
                         ),
                     ];
-                    let num_font = FontId::monospace((self.font_size - 1.0).max(8.0));
+                    let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
                     ui.fonts(|f| {
                         for (i, row) in galley.rows.iter().enumerate() {
                             let y = gpos.y + row.rect.top();
@@ -3004,7 +3069,7 @@ impl AlexCodeApp {
             let painter = ui.painter_at(view);
             let area = Rect::from_min_size(view.min, egui::vec2(view.width(), headers.len() as f32 * row_h));
             painter.rect_filled(area, 0.0, c.panel);
-            let num_font = FontId::monospace((self.font_size - 1.0).max(8.0));
+            let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
             let hl_lang = if text.len() > HIGHLIGHT_MAX_BYTES { Lang::Plain } else { lang };
             let mut jump = None;
             for (k, sym) in headers.iter().enumerate() {
@@ -3070,7 +3135,7 @@ impl AlexCodeApp {
         let hits = std::mem::take(&mut self.filter_cache.1);
         let Some(buf) = self.tabs.get(idx) else { return };
         let lang = self.tab_lang(idx);
-        let font = FontId::monospace(self.font_size);
+        let font = FontId::monospace(self.config.font_size);
         let needle = self.filter_engine.positive_keywords().into_iter().next().unwrap_or_default();
         let digits = buf.lines.len().to_string().len().max(3);
         let row_h = ui.fonts(|f| f.row_height(&font));
@@ -3089,7 +3154,7 @@ impl AlexCodeApp {
                     Pos2::new(rect.left() + gw - 10.0, rect.center().y),
                     Align2::RIGHT_CENTER,
                     format!("{}", ln + 1),
-                    FontId::monospace(self.font_size - 1.0),
+                    FontId::monospace(self.config.font_size - 1.0),
                     c.accent2,
                 );
                 let job = highlight(line, lang, pal, font.clone(), &needle);
@@ -3351,6 +3416,80 @@ impl AlexCodeApp {
             if !open {
                 self.show_about = false;
             }
+        }
+
+        self.settings_dialog(ctx, c);
+    }
+
+    /// 記下具名控制項的位置（只在測試中有作用）
+    #[allow(unused_variables)]
+    fn mark(&mut self, name: &'static str, resp: &egui::Response) {
+        #[cfg(test)]
+        self.probe.insert(name, resp.rect);
+    }
+
+    /// 設定對話框：修改立即生效，並隨 `state.json` 保存
+    fn settings_dialog(&mut self, ctx: &egui::Context, c: &Colors) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new(RichText::new("SETTINGS").font(FontId::new(12.0, FontFamily::Name(ORBITRON.into()))).color(c.accent))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(380.0);
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let note = |ui: &mut egui::Ui, text: &str| {
+                    ui.label(RichText::new(text).size(11.5).color(c.fg_dim2));
+                };
+
+                ui.horizontal(|ui| {
+                    ui.label("字型大小");
+                    let r = ui.add(egui::Slider::new(&mut self.config.font_size, MIN_FONT_SIZE..=MAX_FONT_SIZE).step_by(1.0).suffix(" pt"));
+                    self.mark("settings.font_size", &r);
+                });
+
+                ui.separator();
+                let r = ui.checkbox(&mut self.config.insert_spaces, "按 Tab 鍵插入空白（取代 Tab 字元）");
+                self.mark("settings.insert_spaces", &r);
+                ui.add_enabled_ui(self.config.insert_spaces, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Tab 寬度");
+                        let r = ui.add(egui::Slider::new(&mut self.config.tab_size, MIN_TAB_SIZE..=MAX_TAB_SIZE).suffix(" 格"));
+                        self.mark("settings.tab_size", &r);
+                    });
+                });
+                note(ui, "Tab 寬度決定按 Tab 鍵時對齊到的定位點；檔案中既有的 Tab 字元固定以 4 格顯示。");
+
+                ui.separator();
+                let r = ui.checkbox(&mut self.config.restore_session, "啟動時還原上次開啟的檔案與資料夾");
+                self.mark("settings.restore_session", &r);
+                let r = ui.checkbox(&mut self.config.auto_pair, "自動配對括號與引號");
+                self.mark("settings.auto_pair", &r);
+                let r = ui.checkbox(&mut self.config.sticky_scroll, "固定目前的函式標題 (Sticky Scroll)");
+                self.mark("settings.sticky_scroll", &r);
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let r = ui.button("還原預設值");
+                    self.mark("settings.reset", &r);
+                    if r.clicked() {
+                        self.config = EditorConfig::default();
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("  關閉  ").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                note(ui, "修改會立即生效並自動保存。");
+            });
+        if !open || close {
+            self.show_settings = false;
         }
     }
 }
@@ -3804,9 +3943,9 @@ mod tests {
         app.open_path(&b);
         app.active_tab_idx = 0;
         app.theme_mgr.set_theme("Matrix");
-        app.font_size = 17.0;
+        app.config.font_size = 17.0;
         app.set_folder(dir.path().to_path_buf());
-        app.auto_pair = false;
+        app.config.auto_pair = false;
         app.persist_state();
         assert!(state_file.exists());
 
@@ -3817,9 +3956,9 @@ mod tests {
         assert_eq!(app2.tabs.len(), 2, "welcome tabs are replaced by the restored files");
         assert_eq!(app2.tabs[app2.active_tab_idx].file_path, app.tabs[0].file_path);
         assert_eq!(app2.theme_mgr.current_theme_name(), "Matrix");
-        assert_eq!(app2.font_size, 17.0);
+        assert_eq!(app2.config.font_size, 17.0);
         assert_eq!(app2.project_root, dir.path());
-        assert!(app2.root_pinned && app2.show_explorer && !app2.auto_pair);
+        assert!(app2.root_pinned && app2.show_explorer && !app2.config.auto_pair);
         assert_eq!(app2.recent_files, app.recent_files);
 
         // 已不存在的檔案略過，不會出錯
@@ -3984,7 +4123,7 @@ mod tests {
         assert_eq!(app.tabs[0].edit_text(), "(x);");
 
         // 關閉設定後照常輸入
-        app.auto_pair = false;
+        app.config.auto_pair = false;
         type_(&mut app, "{");
         assert_eq!(app.tabs[0].edit_text(), "(x);{");
     }
@@ -4168,6 +4307,148 @@ mod tests {
             );
         }
         assert!(app.sticky_below < 190, "the view must have scrolled up with the cursor");
+    }
+
+    #[test]
+    fn settings_are_saved_in_state_json_and_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("state.json");
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.config.font_size = 18.0;
+        app.config.tab_size = 2;
+        app.config.insert_spaces = true;
+        app.config.sticky_scroll = false;
+        app.config.auto_pair = false;
+        app.persist_state();
+
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        assert_eq!(json["config"]["tab_size"], 2);
+        assert_eq!(json["config"]["insert_spaces"], true);
+        assert_eq!(json["config"]["restore_session"], true);
+
+        let mut app2 = AlexCodeApp::new();
+        app2.apply_state(AppState::load(&state_file).unwrap());
+        assert_eq!(app2.config.font_size, 18.0);
+        assert_eq!(app2.config.tab_size, 2);
+        assert!(app2.config.insert_spaces && !app2.config.sticky_scroll && !app2.config.auto_pair);
+        assert!(app2.config.restore_session);
+    }
+
+    #[test]
+    fn state_from_older_version_keeps_font_size_and_gets_default_settings() {
+        // v5.5.0 的 state.json 沒有 config 區塊
+        let dir = tempfile::tempdir().unwrap();
+        let old = write(&dir, "state.json", r#"{"theme":"Matrix","font_size":17.0,"auto_pair":false,"show_explorer":true}"#);
+        let mut app = AlexCodeApp::new();
+        app.apply_state(AppState::load(&old).unwrap());
+        assert_eq!(app.config.font_size, 17.0);
+        assert!(!app.config.auto_pair);
+        assert_eq!(app.config.tab_size, 4);
+        assert!(app.config.restore_session && app.config.sticky_scroll && !app.config.insert_spaces);
+
+        // 超出範圍的值（手動改壞設定檔）會被修正，不會讓介面壞掉
+        let bad = write(&dir, "bad.json", r#"{"config":{"font_size":900.0,"tab_size":0}}"#);
+        let mut app = AlexCodeApp::new();
+        app.apply_state(AppState::load(&bad).unwrap());
+        assert_eq!(app.config.font_size, 36.0);
+        assert_eq!(app.config.tab_size, 1);
+        assert!(app.config.restore_session, "fields missing from the config block use their defaults");
+    }
+
+    #[test]
+    fn restore_session_off_starts_without_last_files_and_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(&dir, "a.rs", "fn a() {}");
+        let state_file = dir.path().join("cfg").join("state.json");
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.open_path(&a);
+        app.set_folder(dir.path().to_path_buf());
+        app.config.restore_session = false;
+        app.config.font_size = 20.0;
+        app.persist_state();
+
+        let mut app2 = AlexCodeApp::new();
+        let welcome_tabs = app2.tabs.len();
+        app2.apply_state(AppState::load(&state_file).unwrap());
+        assert!(app2.file_tabs().is_empty(), "last session's files are not reopened");
+        assert_eq!(app2.tabs.len(), welcome_tabs);
+        assert!(!app2.root_pinned, "last session's folder is not reopened");
+        assert_eq!(app2.config.font_size, 20.0, "preferences are still restored");
+        assert!(!app2.config.restore_session);
+        assert_eq!(app2.recent_files, app.recent_files, "the recent files list is kept");
+    }
+
+    #[test]
+    fn tab_key_inserts_spaces_to_the_next_tab_stop_when_enabled() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "ab");
+        app.pending_select = Some((2, 2));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+
+        // 預設：插入 Tab 字元
+        frame(&mut app, &ctx, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].edit_text(), "ab\t");
+        app.run_cmd(Cmd::Undo);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "ab");
+
+        app.config.insert_spaces = true;
+        app.config.tab_size = 4;
+        app.pending_select = Some((2, 2));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].edit_text(), "ab  ", "from column 2 the next stop is column 4");
+        frame(&mut app, &ctx, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].edit_text(), "ab      ", "from a tab stop a full tab width is inserted");
+        assert!(app.editor_focused, "Tab must not move keyboard focus away from the editor");
+
+        app.config.tab_size = 3;
+        frame(&mut app, &ctx, vec![key(Key::Tab, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].edit_text(), "ab       ", "column 8 -> 9 with a tab width of 3");
+    }
+
+    fn click(app: &mut AlexCodeApp, ctx: &egui::Context, pos: Pos2) {
+        let button = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(app, ctx, vec![Event::PointerMoved(pos)]);
+        frame(app, ctx, vec![button(true)]);
+        frame(app, ctx, vec![button(false)]);
+        frame(app, ctx, vec![]);
+    }
+
+    #[test]
+    fn settings_dialog_edits_the_config() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "fn main() {}");
+        assert!(!app.show_settings);
+        frame(&mut app, &ctx, vec![key(Key::Comma, Modifiers::COMMAND)]);
+        assert!(app.show_settings, "Ctrl+, opens the settings dialog");
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+
+        assert!(app.config.restore_session && !app.config.insert_spaces);
+        let pos = app.probe["settings.restore_session"].center();
+        click(&mut app, &ctx, pos);
+        assert!(!app.config.restore_session, "clicking the checkbox turns session restore off");
+        let pos = app.probe["settings.insert_spaces"].center();
+        click(&mut app, &ctx, pos);
+        assert!(app.config.insert_spaces);
+
+        app.config.font_size = 22.0;
+        app.config.tab_size = 8;
+        let pos = app.probe["settings.reset"].center();
+        click(&mut app, &ctx, pos);
+        assert_eq!(app.config, EditorConfig::default(), "the reset button restores every default");
+
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+        assert!(!app.show_settings, "Esc closes the dialog");
+
+        // 命令面板 / 選單共用的命令
+        app.run_cmd(Cmd::Settings);
+        assert!(app.show_settings);
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
