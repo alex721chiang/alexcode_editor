@@ -290,6 +290,10 @@ pub struct AlexCodeApp {
     /// 顯示在視窗中的結果或錯誤：(是否為錯誤, 訊息)
     replace_note: Option<(bool, String)>,
 
+    // ---- 背景開檔 ----
+    /// 內容還在背景執行緒讀取的分頁（依 id）：分頁已經出現，但還不能編輯或存檔
+    loading: HashMap<u64, LoadJob>,
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -351,6 +355,16 @@ struct ReplaceJob {
     /// 這個工作所依據的預覽條件（寫入完成後用來找出要重新載入的分頁）
     plan: ReplacePlan,
 }
+
+/// 背景讀取中的檔案：讀檔、偵測編碼、切行都在背景執行緒完成，結果是一個可以直接換上的緩衝區
+struct LoadJob {
+    rx: Receiver<Result<EditorBuffer, String>>,
+    /// 載入完成後要跳到的行（從全專案搜尋的結果開檔時）
+    goto_line: Option<usize>,
+}
+
+/// 達到這個大小的檔案改在背景讀取（網路磁碟上的檔案不論大小一律在背景讀取）
+const BACKGROUND_OPEN_BYTES: u64 = 2 * 1024 * 1024;
 
 /// 兩個路徑字串是否指向同一個檔案（Windows 上不分大小寫與斜線方向）
 fn same_file(a: &str, b: &str) -> bool {
@@ -465,6 +479,7 @@ impl AlexCodeApp {
             replace_job: None,
             replace_plan: None,
             replace_note: None,
+            loading: HashMap::new(),
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -647,6 +662,9 @@ impl AlexCodeApp {
             let key = path.to_string_lossy().to_string();
             let Some(idx) = self.tabs.iter().position(|b| b.file_path.as_deref() == Some(key.as_str())) else { continue };
             let id = self.tabs[idx].id;
+            if self.loading.contains_key(&id) {
+                continue; // 內容還在背景載入：讀到的就會是最新的版本
+            }
             if self.disk_stamps.get(&id) == Some(&stamp) {
                 continue; // 就是我們自己剛存的版本
             }
@@ -752,6 +770,7 @@ impl AlexCodeApp {
         let alive: HashSet<u64> = self.tabs.iter().map(|b| b.id).collect();
         self.disk_stamps.retain(|id, _| alive.contains(id));
         self.git_head.retain(|id, _| alive.contains(id));
+        self.loading.retain(|id, _| alive.contains(id));
         if self.disk_conflict.map_or(false, |id| !alive.contains(&id)) {
             self.disk_conflict = None;
         }
@@ -869,6 +888,43 @@ impl AlexCodeApp {
             .unwrap_or(Lang::Plain)
     }
 
+    /// 這個檔案是否要在背景讀取。網路路徑只看路徑字串就決定：
+    /// 連查詢檔案大小都可能在伺服器沒有回應時卡住視窗。
+    fn opens_in_background(path: &Path) -> bool {
+        crate::core::is_network_path(&path.to_string_lossy())
+            || std::fs::metadata(path).is_ok_and(|m| m.len() >= BACKGROUND_OPEN_BYTES)
+    }
+
+    /// 讀檔並偵測編碼（UTF-8 / BOM / Big5 / GBK / Shift_JIS …）；編碼記在緩衝區上，存檔時以同一編碼寫回
+    fn read_buffer(path: &Path) -> std::io::Result<EditorBuffer> {
+        let bytes = std::fs::read(path)?;
+        let (text, encoding) = detect_and_decode(&bytes);
+        let mut buf = EditorBuffer::from_text(&text);
+        buf.encoding = encoding;
+        Ok(buf)
+    }
+
+    /// 把剛開啟的檔案加成分頁並切換過去（內容可能還在背景載入）
+    fn add_file_tab(&mut self, mut buf: EditorBuffer, path: &Path, full: &str) {
+        buf.file_path = Some(full.to_string());
+        // 開啟第一個真正的檔案時，收掉未修改的歡迎頁 / 空白頁
+        if self.file_tabs().is_empty() {
+            self.tabs.retain(|b| b.modified);
+        }
+        self.tabs.push(buf);
+        self.active_tab_idx = self.tabs.len() - 1;
+        if Lang::from_path(full) == Lang::Markdown {
+            self.md_view.mode = MdViewMode::Typora;
+        }
+        // 沒有以「開啟資料夾」指定專案資料夾時，才跟著目前檔案走
+        if !self.root_pinned {
+            if let Some(parent) = path.parent() {
+                self.project_root = parent.to_path_buf();
+            }
+        }
+        self.push_recent(full);
+    }
+
     pub fn open_path(&mut self, path: &Path) {
         self.commit_md_edit();
         let full = path.to_string_lossy().to_string();
@@ -876,36 +932,93 @@ impl AlexCodeApp {
             self.active_tab_idx = i;
             return;
         }
-        match std::fs::read(path) {
-            Ok(bytes) => {
-                // 偵測編碼（UTF-8 / BOM / Big5 / GBK / Shift_JIS …）並記在分頁上，存檔時以同一編碼寫回
-                let (text, encoding) = detect_and_decode(&bytes);
-                let mut buf = EditorBuffer::from_text(&text);
-                buf.encoding = encoding;
-                buf.file_path = Some(full.clone());
-                let is_md = Lang::from_path(&full) == Lang::Markdown;
-                // 若目前只有未修改的歡迎頁 / 空白頁，直接取代
-                // 開啟第一個真正的檔案時，收掉未修改的歡迎頁 / 空白頁
-                if self.file_tabs().is_empty() {
-                    self.tabs.retain(|b| b.modified);
+        if Self::opens_in_background(path) {
+            // 大檔案 / 網路磁碟：分頁先出現並顯示「載入中」，讀檔交給背景執行緒，視窗不會凍結
+            let buf = EditorBuffer::new();
+            let id = buf.id;
+            self.add_file_tab(buf, path, &full);
+            let (tx, rx) = unbounded();
+            let (path, repaint) = (path.to_path_buf(), self.repaint.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(Self::read_buffer(&path).map_err(|e| e.to_string()));
+                if let Some(ctx) = repaint {
+                    ctx.request_repaint();
                 }
-                self.tabs.push(buf);
-                self.active_tab_idx = self.tabs.len() - 1;
-                if is_md {
-                    self.md_view.mode = MdViewMode::Typora;
-                }
-                // 沒有以「開啟資料夾」指定專案資料夾時，才跟著目前檔案走
-                if !self.root_pinned {
-                    if let Some(parent) = path.parent() {
-                        self.project_root = parent.to_path_buf();
-                    }
-                }
+            });
+            self.loading.insert(id, LoadJob { rx, goto_line: None });
+            self.status_message = format!("載入中… {}", full);
+            return;
+        }
+        match Self::read_buffer(path) {
+            Ok(buf) => {
+                self.add_file_tab(buf, path, &full);
                 self.note_disk_state(self.active_tab_idx);
                 self.request_git_head(self.active_tab_idx);
-                self.push_recent(&full);
                 self.status_message = format!("已開啟 {}", full);
             }
             Err(e) => self.status_message = format!("開啟失敗：{} ({})", full, e),
+        }
+    }
+
+    /// 這個分頁的內容是否還在背景載入
+    fn is_loading(&self, idx: usize) -> bool {
+        self.tabs.get(idx).is_some_and(|b| self.loading.contains_key(&b.id))
+    }
+
+    /// 收取背景讀檔的結果
+    fn poll_loading(&mut self, ctx: &egui::Context) {
+        use crossbeam_channel::TryRecvError;
+        let done: Vec<(u64, Result<EditorBuffer, String>)> = self
+            .loading
+            .iter()
+            .filter_map(|(id, job)| match job.rx.try_recv() {
+                Ok(res) => Some((*id, res)),
+                Err(TryRecvError::Empty) => None,
+                // 讀取執行緒沒有回報就結束了：當成失敗，不要永遠停在「載入中」
+                Err(TryRecvError::Disconnected) => Some((*id, Err("讀取中斷".to_string()))),
+            })
+            .collect();
+        for (id, res) in done {
+            let Some(job) = self.loading.remove(&id) else { continue };
+            // 載入中就被關掉的分頁：結果直接丟棄
+            let Some(idx) = self.tabs.iter().position(|b| b.id == id) else { continue };
+            let full = self.tabs[idx].file_path.clone().unwrap_or_default();
+            match res {
+                Ok(mut buf) => {
+                    // 換上讀好的內容，分頁的身分（id、路徑）不變
+                    buf.id = id;
+                    buf.file_path = Some(full.clone());
+                    self.tabs[idx] = buf;
+                    // 各種快取以 (分頁 id, 內容版本) 為鍵，而新內容的版本與空白的佔位內容相同：
+                    // 全部作廢，否則編輯區會拿到載入前的空白全文
+                    self.text_cache = ((0, 0), String::new());
+                    self.find_cache.0 = (0, 0, String::new());
+                    self.filter_cache.0 = None;
+                    self.git_marks.0 = (0, 0);
+                    self.sticky_key = None;
+                    self.note_disk_state(idx);
+                    self.request_git_head(idx);
+                    self.status_message = format!("已開啟 {}", full);
+                    if let Some(line) = job.goto_line {
+                        let line = line.min(self.tabs[idx].lines.len() - 1);
+                        self.tabs[idx].selections = vec![Selection::point(Position { line, col: 0 })];
+                    }
+                    if idx == self.active_tab_idx {
+                        // 把游標交給編輯區（它在載入期間沒有顯示）
+                        let head = self.tabs[idx].selections[0].head;
+                        let i = Self::char_index_of(&self.tabs[idx], head.line, head.col);
+                        self.pending_select = Some((i, i));
+                        self.scroll_to_cursor = job.goto_line.is_some();
+                        // 使用者正在別的輸入框打字（尋找列、命令面板…）時不搶走鍵盤焦點
+                        self.select_keeps_focus = ctx.memory(|m| m.focused().is_some());
+                    }
+                }
+                Err(e) => {
+                    // 與一般開檔失敗相同：不留下空白分頁
+                    self.finish_close(&[id], false);
+                    self.status_message = format!("開啟失敗：{} ({})", full, e);
+                }
+            }
         }
     }
 
@@ -975,6 +1088,11 @@ impl AlexCodeApp {
     /// 儲存指定分頁；回傳是否真的寫入成功（使用者取消對話框或寫入失敗都回傳 false）
     fn save_tab(&mut self, idx: usize, force_dialog: bool) -> bool {
         let Some(buf) = self.tabs.get(idx) else { return false };
+        if self.loading.contains_key(&buf.id) {
+            // 分頁裡還是空白的佔位內容：寫出去會蓋掉磁碟上真正的檔案
+            self.status_message = format!("「{}」還在載入中，尚未儲存", Self::tab_title(buf));
+            return false;
+        }
         let current = buf.file_path.clone().unwrap_or_default();
         let path = if !force_dialog && Path::new(&current).is_absolute() {
             Some(PathBuf::from(&current))
@@ -1029,6 +1147,10 @@ impl AlexCodeApp {
         };
         if buf.modified {
             self.status_message = "有未儲存的變更，請先儲存或復原後再以其他編碼重新讀取".to_string();
+            return;
+        }
+        if self.loading.contains_key(&buf.id) {
+            self.status_message = "檔案還在載入中，請等載入完成後再以其他編碼重新讀取".to_string();
             return;
         }
         match std::fs::read(&path) {
@@ -1768,7 +1890,10 @@ impl AlexCodeApp {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         for i in 0..self.tabs.len() {
                             let is_active = i == self.active_tab_idx;
-                            let title = Self::tab_title(&self.tabs[i]);
+                            let mut title = Self::tab_title(&self.tabs[i]);
+                            if self.is_loading(i) {
+                                title += "（載入中…）";
+                            }
                             let modified = self.tabs[i].modified;
                             let font = FontId::proportional(13.0);
                             let galley = ui.painter().layout_no_wrap(title.clone(), font.clone(), c.fg);
@@ -2678,6 +2803,22 @@ impl AlexCodeApp {
     }
 
     fn editor_area(&mut self, ctx: &egui::Context, c: &Colors) {
+        // 內容還在背景載入的分頁：只顯示「載入中」，沒有可以輸入的編輯區
+        if self.is_loading(self.active_tab_idx) {
+            self.editor_was_focused = false;
+            self.editor_focused = false;
+            let path = self.tabs[self.active_tab_idx].file_path.clone().unwrap_or_default();
+            egui::CentralPanel::default().frame(egui::Frame::none().fill(c.bg)).show(ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((ui.available_height() * 0.4).max(0.0));
+                    ui.spinner();
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("載入中…").color(c.fg_dim));
+                    ui.label(RichText::new(path).size(11.5).color(c.fg_dim2));
+                });
+            });
+            return;
+        }
         let pal = self.theme_mgr.current_palette().clone();
         let is_md = self.tab_lang(self.active_tab_idx) == Lang::Markdown;
         let filtering = self.filter_active && !self.filter_query.trim().is_empty();
@@ -3549,7 +3690,10 @@ impl AlexCodeApp {
             if let Some((p, line)) = to_open {
                 let full = if Path::new(&p).is_absolute() { PathBuf::from(&p) } else { self.project_root.join(&p) };
                 self.open_path(&full);
-                if let Some(buf) = self.active_buffer() {
+                let active_id = self.active_buffer().map(|b| b.id);
+                if let Some(job) = active_id.and_then(|id| self.loading.get_mut(&id)) {
+                    job.goto_line = Some(line.saturating_sub(1)); // 內容還沒到：載入完成後再跳到這一行
+                } else if let Some(buf) = self.active_buffer() {
                     let ci = Self::char_index_of(buf, line.saturating_sub(1), 0);
                     self.pending_select = Some((ci, ci));
                     self.scroll_to_cursor = true;
@@ -3949,6 +4093,7 @@ impl AlexCodeApp {
             };
             self.tree_cache.insert(dir, entry);
         }
+        self.poll_loading(ctx);
         let heads: Vec<_> = self.git_chan.1.try_iter().collect();
         for (id, lines) in heads {
             self.git_head.insert(id, lines.map(Arc::new));
@@ -4991,6 +5136,149 @@ mod tests {
         pump_until(&mut app, &ctx, "empty preview", |app| app.replace_job.is_none());
         assert!(app.replace_plan.is_none());
         assert!(app.replace_note.as_ref().is_some_and(|(e, m)| !e && m.contains("no such text")));
+    }
+
+    #[test]
+    fn large_files_open_in_the_background() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let small = write(&dir, "small.rs", "fn main() {}");
+        // 約 2.6 MB、CRLF 換行
+        let text = "0123456789 abcdefghij 0123456789 abcdefghi\r\n".repeat(60_000);
+        let big = write(&dir, "big.log", &text);
+        assert!(!AlexCodeApp::opens_in_background(&small));
+        assert!(AlexCodeApp::opens_in_background(&big));
+        #[cfg(windows)]
+        assert!(AlexCodeApp::opens_in_background(Path::new(r"\\server\share\notes.txt")), "network paths never block the window");
+
+        // 小檔案維持原本的行為：open_path 回來時內容已經在分頁裡
+        let mut app = app_with(&ctx, "x");
+        app.open_path(&small);
+        assert!(app.loading.is_empty());
+        assert_eq!(app.tabs[app.active_tab_idx].edit_text(), "fn main() {}");
+
+        // 大檔案：分頁立刻出現，內容稍後才到
+        app.open_path(&big);
+        let idx = app.active_tab_idx;
+        let id = app.tabs[idx].id;
+        assert!(app.loading.contains_key(&id), "the tab appears at once and is marked as loading");
+        assert_eq!(app.tabs[idx].file_path.as_deref(), Some(big.to_string_lossy().as_ref()));
+        assert_eq!(app.tabs[idx].lines.len(), 1, "open_path did not read the file on the UI thread");
+        assert!(app.recent_files.contains(&big.to_string_lossy().to_string()));
+
+        // 載入中的分頁不能存檔（否則會把空白內容寫回去蓋掉檔案）
+        assert!(!app.save_tab(idx, false));
+        assert_eq!(std::fs::metadata(&big).unwrap().len(), text.len() as u64);
+        // 再開一次同一個檔案不會多出分頁
+        let tabs = app.tabs.len();
+        app.open_path(&big);
+        assert_eq!(app.tabs.len(), tabs);
+
+        pump_until(&mut app, &ctx, "background load", |app| app.loading.is_empty());
+        assert_eq!(app.tabs[idx].id, id, "the tab keeps its identity");
+        assert_eq!(app.tabs[idx].lines.len(), 60_001);
+        assert_eq!(app.tabs[idx].line_ending, "\r\n");
+        assert!(!app.tabs[idx].modified);
+        assert!(app.status_message.starts_with("已開啟"), "{}", app.status_message);
+
+        // 之後與一般分頁相同：自己讀到的版本不算外部修改，存檔寫回原本的位元組
+        let rev = app.tabs[idx].revision();
+        app.handle_disk_events(vec![(big.clone(), stamp_of(&big))]);
+        assert_eq!(app.tabs[idx].revision(), rev);
+        assert!(app.save_tab(idx, false));
+        assert!(std::fs::read(&big).unwrap() == text.as_bytes(), "saving writes the same bytes back");
+    }
+
+    /// 加入一個內容「還在載入」的分頁；回傳 (分頁 id, 用來交付載入結果的通道)
+    fn loading_tab(app: &mut AlexCodeApp, dir: &tempfile::TempDir, name: &str) -> (u64, Sender<Result<EditorBuffer, String>>) {
+        let mut b = EditorBuffer::new();
+        b.file_path = Some(dir.path().join(name).to_string_lossy().to_string());
+        let id = b.id;
+        app.tabs.push(b);
+        app.active_tab_idx = app.tabs.len() - 1;
+        let (tx, rx) = unbounded();
+        app.loading.insert(id, LoadJob { rx, goto_line: None });
+        (id, tx)
+    }
+
+    #[test]
+    fn loading_tab_shows_a_placeholder_until_its_content_arrives() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&ctx, "x");
+        let (id, tx) = loading_tab(&mut app, &dir, "slow.rs");
+        app.loading.get_mut(&id).unwrap().goto_line = Some(2);
+
+        // 載入中：畫面照常繪製，但沒有可以輸入的編輯區
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(!app.editor_focused);
+        frame(&mut app, &ctx, vec![Event::Text("typed".into())]);
+        assert_eq!(app.tabs[1].edit_text(), "", "nothing can be typed into a tab that is still loading");
+        assert!(!app.tabs[1].modified);
+        // 外部變更偵測不會在載入中同步讀檔
+        let p = PathBuf::from(app.tabs[1].file_path.clone().unwrap());
+        std::fs::write(&p, "on disk").unwrap();
+        app.handle_disk_events(vec![(p.clone(), stamp_of(&p))]);
+        assert_eq!(app.tabs[1].edit_text(), "");
+        // 載入期間用過的快取（尋找、Log 篩選）不能留到內容到了之後
+        app.show_find_bar = true;
+        app.find_bar_text = "b".into();
+        app.filter_query = "c".into();
+        app.filter_engine.compile("c");
+        frame(&mut app, &ctx, vec![]);
+        app.filter_query.clear();
+        app.filter_engine.compile("");
+        app.show_find_bar = false;
+        frame(&mut app, &ctx, vec![]);
+
+        tx.send(Ok(EditorBuffer::from_text("a\nb\nc\nd"))).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.loading.is_empty());
+        assert_eq!(app.tabs[1].id, id);
+        assert_eq!(app.tabs[1].edit_text(), "a\nb\nc\nd");
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert!(app.editor_focused, "the editor is back once the content is there");
+        assert_eq!(app.tabs[1].selections[0].head.line, 2, "the line requested while loading is applied afterwards");
+
+        // 編輯區拿到的是載入後的全文：打字不會把內容換成載入前的空白
+        frame(&mut app, &ctx, vec![Event::Text("Z".into())]);
+        assert_eq!(app.tabs[1].edit_text(), "a\nb\nZc\nd");
+        app.show_find_bar = true;
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.find_cache.1.len(), 1, "find sees the loaded text");
+        assert!(app.save_tab(1, false), "a loaded tab can be saved again");
+        assert_eq!(read(&p), "a\nb\nZc\nd");
+    }
+
+    #[test]
+    fn failed_background_load_closes_the_tab_and_reports_it() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&ctx, "x");
+        let (id, tx) = loading_tab(&mut app, &dir, "gone.rs");
+        tx.send(Err("存取被拒".to_string())).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.loading.is_empty());
+        assert!(app.tabs.iter().all(|b| b.id != id), "a file that could not be read does not stay open as an empty tab");
+        assert!(app.status_message.contains("開啟失敗") && app.status_message.contains("存取被拒"), "{}", app.status_message);
+
+        // 讀取執行緒沒有回報就結束：同樣收掉，不會永遠停在「載入中」
+        let (id, tx) = loading_tab(&mut app, &dir, "dead.rs");
+        drop(tx);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.loading.is_empty() && app.tabs.iter().all(|b| b.id != id));
+
+        // 載入中就被關掉的分頁：結果到了也不會出錯
+        let (id, tx) = loading_tab(&mut app, &dir, "closed.rs");
+        let idx = app.tabs.iter().position(|b| b.id == id).unwrap();
+        app.close_tab(idx);
+        assert!(app.loading.is_empty());
+        let _ = tx.send(Ok(EditorBuffer::from_text("late")));
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.tabs.iter().all(|b| b.id != id));
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
