@@ -5,6 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LineInfo {
@@ -62,6 +65,38 @@ pub fn parse_porcelain(bytes: &[u8]) -> HashMap<usize, LineInfo> {
     }
 
     result
+}
+
+/// 對 `contents`（檔案目前的內容，可以是尚未存檔的版本）執行 `git blame`，回傳每一行（0-based）的資訊。
+/// 尚未提交的行會標為 `uncommitted`。會等 git 執行完才回傳：請在背景執行緒呼叫。
+/// 檔案不在 Git 儲存庫內、未被追蹤、或系統沒有安裝 git 時回傳 None。
+pub fn blame_contents(file: &Path, contents: &[u8]) -> Option<HashMap<usize, LineInfo>> {
+    let dir = file.parent()?;
+    let name = file.file_name()?.to_str()?;
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir)
+        .args(["blame", "--line-porcelain", "--contents", "-", "--", name])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW：不要閃出主控台視窗
+    }
+    let mut child = cmd.spawn().ok()?;
+    // 內容由另一條執行緒寫入 stdin：git 的輸出把管線塞滿時，兩邊才不會互相等待
+    let mut stdin = child.stdin.take()?;
+    let data = contents.to_vec();
+    let writer = std::thread::spawn(move || {
+        let _ = stdin.write_all(&data);
+    });
+    let out = child.wait_with_output().ok()?;
+    let _ = writer.join();
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_porcelain(&out.stdout))
 }
 
 /// 產生狀態列顯示的行內 blame 字串："⎇ abcd1234 作者 2026-07-09 · 摘要"；未提交顯示「⎇ 未提交變更」

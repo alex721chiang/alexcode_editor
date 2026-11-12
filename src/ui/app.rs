@@ -24,7 +24,7 @@ use crate::editor::{
 };
 use crate::core::config::{MAX_FONT_SIZE, MAX_TAB_SIZE, MIN_FONT_SIZE, MIN_TAB_SIZE};
 use crate::index::{extract_symbols, Symbol, SymbolLang};
-use crate::git::{diff_line_states, ADDED, DELETED_ABOVE, MODIFIED};
+use crate::git::{blame_contents, blame_status_text, diff_line_states, LineInfo, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
@@ -294,6 +294,16 @@ pub struct AlexCodeApp {
     /// 內容還在背景執行緒讀取的分頁（依 id）：分頁已經出現，但還不能編輯或存檔
     loading: HashMap<u64, LoadJob>,
 
+    // ---- Git blame ----
+    /// 各分頁（依 id）最近一次 blame 的結果：(當時的內容版本, 每一行的資訊)；
+    /// 資訊為 None = 不在 Git 儲存庫內 / 未追蹤 / 檔案太大而略過
+    blame: HashMap<u64, (u64, Option<BlameLines>)>,
+    blame_chan: (Sender<BlameResult>, Receiver<BlameResult>),
+    /// 背景執行中的 blame：(分頁 id, 內容版本)。一次只跑一個 git
+    blame_running: Option<(u64, u64)>,
+    /// 目前分頁的內容最後一次變動：(分頁 id, 內容版本, 發現變動的時間)
+    blame_seen: (u64, u64, std::time::Instant),
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -362,6 +372,18 @@ struct LoadJob {
     /// 載入完成後要跳到的行（從全專案搜尋的結果開檔時）
     goto_line: Option<usize>,
 }
+
+/// 一份文件每一行（0-based）的 blame 資訊
+type BlameLines = Arc<HashMap<usize, LineInfo>>;
+
+/// 背景 blame 的結果：(分頁 id, 當時的內容版本, 每一行的資訊)
+type BlameResult = (u64, u64, Option<HashMap<usize, LineInfo>>);
+
+/// 內容變動後要停頓這麼久才重新執行 blame（打字途中不反覆啟動 git）
+const BLAME_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// 狀態列上 blame 文字的長度上限（字元）；完整內容在滑鼠停留時顯示
+const BLAME_MAX_CHARS: usize = 70;
 
 /// 達到這個大小的檔案改在背景讀取（網路磁碟上的檔案不論大小一律在背景讀取）
 const BACKGROUND_OPEN_BYTES: u64 = 2 * 1024 * 1024;
@@ -480,6 +502,10 @@ impl AlexCodeApp {
             replace_plan: None,
             replace_note: None,
             loading: HashMap::new(),
+            blame: HashMap::new(),
+            blame_chan: unbounded(),
+            blame_running: None,
+            blame_seen: (0, 0, std::time::Instant::now()),
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -771,6 +797,7 @@ impl AlexCodeApp {
         self.disk_stamps.retain(|id, _| alive.contains(id));
         self.git_head.retain(|id, _| alive.contains(id));
         self.loading.retain(|id, _| alive.contains(id));
+        self.blame.retain(|id, _| alive.contains(id));
         if self.disk_conflict.map_or(false, |id| !alive.contains(&id)) {
             self.disk_conflict = None;
         }
@@ -2603,6 +2630,17 @@ impl AlexCodeApp {
                         ui.painter().circle_stroke(dot.center(), 5.5, Stroke::new(1.0_f32, c.glow));
                         ui.add_space(8.0);
                         ui.label(RichText::new(format!("{}%", (self.config.font_size / 14.0 * 100.0).round())).size(12.0).color(c.fg_dim2));
+                        // Git blame：游標所在行最後一次修改的提交（太長時截斷，完整內容在滑鼠停留時顯示）
+                        if let Some(full) = self.blame_text() {
+                            ui.add_space(14.0);
+                            let short = if full.chars().count() > BLAME_MAX_CHARS {
+                                full.chars().take(BLAME_MAX_CHARS).collect::<String>() + "…"
+                            } else {
+                                full.clone()
+                            };
+                            ui.add(egui::Label::new(RichText::new(short).size(12.0).color(c.fg_dim2)).truncate(true))
+                                .on_hover_text(full);
+                        }
                     });
                 });
                 if let Some((e, reload)) = enc_choice {
@@ -3838,6 +3876,71 @@ impl AlexCodeApp {
     }
 }
 
+/// Git blame：狀態列顯示游標所在行最後一次修改的提交
+impl AlexCodeApp {
+    /// 游標所在行的 blame 文字；沒有結果、或結果是針對舊內容算的（行號可能已經對不上）時回傳 None
+    fn blame_text(&self) -> Option<String> {
+        let buf = self.active_buffer()?;
+        let (rev, lines) = self.blame.get(&buf.id)?;
+        if *rev != buf.revision() {
+            return None;
+        }
+        let info = lines.as_ref()?.get(&buf.selections.first()?.head.line)?;
+        // `status_text` 開頭的「⎇」在內建字型中沒有字形（會畫成方框）：狀態列不顯示它
+        let text = blame_status_text(info);
+        Some(text.trim_start_matches('⎇').trim_start().to_string()).filter(|s| !s.is_empty())
+    }
+
+    /// 收取背景 blame 的結果；目前分頁的內容變了（且已停止輸入一會兒）就重新執行
+    fn update_blame(&mut self, ctx: &egui::Context) {
+        let results: Vec<BlameResult> = self.blame_chan.1.try_iter().collect();
+        for (id, rev, lines) in results {
+            if self.blame_running == Some((id, rev)) {
+                self.blame_running = None;
+            }
+            if self.tabs.iter().any(|b| b.id == id) {
+                self.blame.insert(id, (rev, lines.map(Arc::new)));
+            }
+        }
+
+        let idx = self.active_tab_idx;
+        if self.is_loading(idx) {
+            return;
+        }
+        let Some(buf) = self.tabs.get(idx) else { return };
+        let Some(path) = buf.file_path.as_deref().map(PathBuf::from).filter(|p| p.is_absolute()) else { return };
+        let key = (buf.id, buf.revision());
+        if (self.blame_seen.0, self.blame_seen.1) != key {
+            self.blame_seen = (key.0, key.1, std::time::Instant::now());
+        }
+        if self.blame.get(&key.0).is_some_and(|b| b.0 == key.1) || self.blame_running.is_some() {
+            return; // 已經是最新的，或上一個 git 還沒跑完
+        }
+        // 剛開啟的檔案立刻執行；編輯中的檔案等輸入停頓後再執行
+        if self.blame.contains_key(&key.0) {
+            let idle = self.blame_seen.2.elapsed();
+            if idle < BLAME_DELAY {
+                ctx.request_repaint_after(BLAME_DELAY - idle);
+                return;
+            }
+        }
+        // blame 的對象是分頁目前的內容（可能尚未存檔），以檔案的編碼送給 git。
+        // 太大的檔案、無法以該編碼表示的內容不做 blame。
+        let bytes: usize = buf.lines.iter().map(|l| l.len() + 1).sum();
+        let contents = if bytes > HIGHLIGHT_MAX_BYTES { None } else { buf.encoding.encode(&buf.text()).ok() };
+        let Some(contents) = contents else {
+            self.blame.insert(key.0, (key.1, None));
+            return;
+        };
+        let (tx, repaint) = (self.blame_chan.0.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send((key.0, key.1, blame_contents(&path, &contents)));
+            repaint.request_repaint();
+        });
+        self.blame_running = Some(key);
+    }
+}
+
 /// 全專案取代：預覽（只計數）→ 使用者確認 → 寫入。兩個步驟都在背景執行緒進行。
 impl AlexCodeApp {
     /// 預覽是否仍對應目前的搜尋字串、取代字串與資料夾
@@ -4094,6 +4197,7 @@ impl AlexCodeApp {
             self.tree_cache.insert(dir, entry);
         }
         self.poll_loading(ctx);
+        self.update_blame(ctx);
         let heads: Vec<_> = self.git_chan.1.try_iter().collect();
         for (id, lines) in heads {
             self.git_head.insert(id, lines.map(Arc::new));
@@ -5279,6 +5383,73 @@ mod tests {
         let _ = tx.send(Ok(EditorBuffer::from_text("late")));
         frame(&mut app, &ctx, vec![]);
         assert!(app.tabs.iter().all(|b| b.id != id));
+    }
+
+    fn set_cursor_line(app: &mut AlexCodeApp, line: usize) {
+        let idx = app.active_tab_idx;
+        app.tabs[idx].selections = vec![Selection::point(Position { line, col: 0 })];
+    }
+
+    #[test]
+    fn status_bar_shows_git_blame_for_the_cursor_line() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().is_ok_and(|o| o.status.success())
+        };
+        if !git(&["init", "-q"]) {
+            return; // 測試環境沒有 git
+        }
+        let f = write(&dir, "f.rs", "fn one() {}\nfn two() {}\n");
+        assert!(git(&["add", "."]));
+        assert!(git(&["-c", "user.name=Alice", "-c", "user.email=a@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "first commit"]));
+
+        let mut app = app_with(&ctx, "x");
+        assert_eq!(app.blame_text(), None, "a tab without a file has no blame");
+        app.open_path(&f);
+        let id = app.tabs[app.active_tab_idx].id;
+        pump_until(&mut app, &ctx, "git blame", |app| app.blame.contains_key(&id));
+        let text = app.blame_text().expect("blame for line 1");
+        assert!(text.contains("Alice") && text.contains("first commit"), "{text}");
+        set_cursor_line(&mut app, 1);
+        assert!(app.blame_text().unwrap().contains("Alice"));
+        frame(&mut app, &ctx, vec![]); // 狀態列含 blame 的一幀可正常繪製
+
+        // 編輯後（尚未存檔）：舊的結果對不上新的行號，先不顯示；停止輸入一會兒後重新計算
+        let idx = app.active_tab_idx;
+        app.tabs[idx].replace_all_text("// new first line\nfn one() {}\nfn two() {}\n");
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.blame_text(), None, "stale blame is not shown against shifted lines");
+        assert!(app.blame_running.is_none(), "blame waits until typing pauses");
+        app.blame_seen.2 -= std::time::Duration::from_secs(2);
+        let rev = app.tabs[idx].revision();
+        pump_until(&mut app, &ctx, "git blame after edit", |app| app.blame.get(&id).is_some_and(|b| b.0 == rev));
+        set_cursor_line(&mut app, 0);
+        assert!(app.blame_text().unwrap().contains("未提交"), "the unsaved new line is uncommitted");
+        set_cursor_line(&mut app, 2);
+        assert!(app.blame_text().unwrap().contains("first commit"), "committed lines keep their blame after moving down");
+        assert_eq!(read(&f), "fn one() {}\nfn two() {}\n", "blame reads the buffer, it never writes the file");
+
+        // 未追蹤的檔案：沒有 blame，也不會每一幀重跑 git
+        let g = write(&dir, "untracked.rs", "fn x() {}");
+        app.open_path(&g);
+        let gid = app.tabs[app.active_tab_idx].id;
+        pump_until(&mut app, &ctx, "blame of untracked file", |app| app.blame.contains_key(&gid));
+        assert_eq!(app.blame_text(), None);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.blame_running.is_none());
+
+        // 關閉分頁後不留下結果
+        let gidx = app.active_tab_idx;
+        app.close_tab(gidx);
+        assert!(!app.blame.contains_key(&gid));
+
+        // 狀態列顯示的文字每個字元在內建字型中都有字形（不會畫成方框）
+        for shown in [text.as_str(), "未提交變更"] {
+            assert!(!shown.contains('⎇'), "{shown}");
+            let has = ctx.fonts(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), shown));
+            assert!(has, "every character of `{shown}` must be drawable");
+        }
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
