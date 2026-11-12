@@ -39,16 +39,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: Windows x64, os: windows-latest }
-          - { name: Linux x86_64, os: ubuntu-latest }
-          - { name: macOS arm64, os: macos-latest }
+          - { name: Windows x64, os: windows-latest, toolchain: stable }
+          - { name: Linux x86_64, os: ubuntu-latest, toolchain: stable }
+          # macOS 暫時固定在 Rust 1.99.1：eframe 0.27 → winit 0.29 依賴的 objc2 0.4.1
+          # 無法以 Rust 1.100.0（2026-11-12 發佈）編譯。升級 egui / eframe 後改回 stable。
+          - { name: macOS arm64, os: macos-latest, toolchain: 1.99.1 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.toolchain }}
           components: clippy
 
       - name: Rust Cache

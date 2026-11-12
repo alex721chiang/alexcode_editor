@@ -22,7 +22,7 @@
 - [ ] 分割檢視：同一視窗並排顯示兩份文件
 - [ ] 分頁拖出成獨立視窗
 - [ ] AI 補全：接上 `src/ai`（本機補全先做，遠端 provider 需使用者自行設定金鑰）
-- [ ] 升級 egui / eframe 到最新穩定版，升級後實測中文輸入法
+- [ ] 升級 egui / eframe 到最新穩定版，升級後實測中文輸入法。升級後把 `.github/workflows/rust-release.yml` 的 macOS 工具鏈從 `1.99.1` 改回 `stable`（目前固定是因為 eframe 0.27 依賴的 objc2 0.4.1 無法以 Rust 1.100.0 編譯；在 macOS 上用 1.100 以後的 Rust 自行建置也會失敗）
 - [ ] macOS：包成 `.app`（含圖示與檔案關聯）並產生 universal（arm64 + x86_64）版本
 - [ ] 清理 clippy 警告（目前約 40 個），之後 CI 改為 `-D warnings`
 
