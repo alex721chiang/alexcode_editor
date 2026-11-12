@@ -7,7 +7,6 @@
 
 ## 待辦（依優先順序）
 
-- [ ] 全專案取代（Find in Files 加上取代）：使用 `src/search/find_in_files.rs` 已有的取代預檢與寫入，先預覽影響的檔案數再執行
 - [ ] 背景開檔：大檔案 / 網路磁碟上的檔案改在背景執行緒讀取，讀取中分頁顯示「載入中」，視窗不凍結
 - [ ] Git blame：狀態列顯示游標所在行的作者與提交訊息（接上 `src/git/git_blame.rs`，在背景執行 `git blame --porcelain`）
 - [ ] Git 差異檢視：與 HEAD 並排比較目前檔案（接上 `src/git/diff_calc.rs`；`show_diff_dialog` 欄位目前未使用）
@@ -30,6 +29,7 @@
 
 ## 已完成
 
+- [x] 全專案取代（Find in Files 加上取代）：「全專案搜尋」視窗輸入取代文字 →「預覽取代」列出會改寫的檔案與處數 →「執行取代」才寫入。`src/search/find_in_files.rs` 原本只有 `ReplaceHit` / `ReplaceResult` 型別，這次補上 `plan_replace`（預檢）與 `apply_replace`（寫入前重新比對命中數，預覽後有變動的檔案略過）。比對方式與搜尋相同（不分大小寫的純文字）；只改寫 UTF-8 文字檔（Big5 等其他編碼與二進位檔略過）；受影響的分頁有未儲存變更時拒絕執行；寫入後已開啟的分頁自動重新載入。寫入磁碟後無法用 Ctrl+Z 復原 — 2026-11-12
 - [x] 設定對話框（`Ctrl+,`）：Tab 寬度、自動換行、字型大小、是否還原工作階段；接上 `EditorConfig` 並存入 `state.json` 的 `config` 區塊。對話框、Tab 鍵插入空白、還原工作階段於 2026-11-11 完成（`f4c8ef2`）；自動換行（程式碼編輯區依視窗寬度折行，行號 / 書籤 / Git 標記 / Sticky Scroll 仍以檔案的行計算；預設關閉，Markdown 閱讀模式與 Log 篩選檢視不受影響）於 2026-11-12 完成 — 2026-11-12
 - [x] Sticky Scroll：捲動時把目前所在的函式 / 區塊標題固定在編輯區頂端（接上 `src/editor/sticky_scroll.rs`，符號來源用 `src/index/symbols.rs` 新增的 `extract_symbols`：以文字掃描擷取 Rust / C 家族 / JavaScript / Python 的區塊，非語法樹）— 2026-11-11
 - [x] v5.5.0-rust（2026-11-11）：編碼偵測、未儲存提示、單一套復原紀錄、分頁右鍵選單、效能快取、檔案總管、尋找與取代、工作階段還原、單一實例、外部變更偵測、Git 行號區標記、自動配對、三平台 CI 與發佈流程

@@ -29,6 +29,7 @@ use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
 use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, SearchStats};
+use crate::search::{apply_replace_in_files, plan_replace_in_files, ReplaceHit, ReplaceResult};
 use crate::snippets::SnippetsController;
 use crate::terminal::VtParser;
 use crate::theme::ThemeManager;
@@ -279,6 +280,16 @@ pub struct AlexCodeApp {
     /// 上一幀編輯區是否以自動換行排版（用來察覺設定剛被切換）
     wrap_applied: bool,
 
+    // ---- 全專案取代 ----
+    /// 「全專案搜尋」視窗中「取代為」欄位的內容
+    replace_in_files_text: String,
+    /// 背景執行中的取代預覽 / 寫入
+    replace_job: Option<ReplaceJob>,
+    /// 已預覽、等待使用者按「執行取代」確認的內容
+    replace_plan: Option<ReplacePlan>,
+    /// 顯示在視窗中的結果或錯誤：(是否為錯誤, 訊息)
+    replace_note: Option<(bool, String)>,
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -317,6 +328,33 @@ struct PendingClose {
 struct FindJob {
     rx: Receiver<(Vec<FileMatch>, SearchStats)>,
     cancel: Arc<AtomicBool>,
+}
+
+/// 全專案取代的預覽結果：只有搜尋字串、取代字串、資料夾都沒變時才能執行
+struct ReplacePlan {
+    root: PathBuf,
+    query: String,
+    replacement: String,
+    hits: Vec<ReplaceHit>,
+    /// 所有檔案合計會取代幾處
+    total: usize,
+}
+
+enum ReplaceMsg {
+    Planned(Vec<ReplaceHit>, SearchStats),
+    Applied(ReplaceResult),
+}
+
+struct ReplaceJob {
+    rx: Receiver<ReplaceMsg>,
+    cancel: Arc<AtomicBool>,
+    /// 這個工作所依據的預覽條件（寫入完成後用來找出要重新載入的分頁）
+    plan: ReplacePlan,
+}
+
+/// 兩個路徑字串是否指向同一個檔案（Windows 上不分大小寫與斜線方向）
+fn same_file(a: &str, b: &str) -> bool {
+    Path::new(a) == Path::new(b) || (cfg!(windows) && a.replace('/', "\\").eq_ignore_ascii_case(&b.replace('/', "\\")))
 }
 
 /// 分頁右鍵選單的動作
@@ -423,6 +461,10 @@ impl AlexCodeApp {
             sticky_below: 0,
             row_lines: Vec::new(),
             wrap_applied: false,
+            replace_in_files_text: String::new(),
+            replace_job: None,
+            replace_plan: None,
+            replace_note: None,
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -3360,6 +3402,7 @@ impl AlexCodeApp {
                 self.find_job = None;
             }
         }
+        self.poll_replace_job();
         if self.show_find_in_files {
             let mut open = true;
             let mut to_open: Option<(String, usize)> = None;
@@ -3396,6 +3439,62 @@ impl AlexCodeApp {
                             self.status_message = "搜尋中…".to_string();
                         }
                     });
+                    // 取代：先預覽會影響幾個檔案，使用者確認後才寫入
+                    ui.horizontal(|ui| {
+                        ui.add_space(18.0 + ui.spacing().item_spacing.x);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.replace_in_files_text)
+                                .hint_text("取代為…（留空 = 刪除）")
+                                .desired_width(ui.available_width() - 90.0),
+                        );
+                        let ready = !self.find_query.is_empty() && self.replace_job.is_none();
+                        let r = ui.add_enabled(ready, egui::Button::new("預覽取代"));
+                        self.mark("fif.preview", &r);
+                        if r.clicked() {
+                            self.start_replace_preview(ui.ctx());
+                        }
+                    });
+                    if let Some(job) = &self.replace_job {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            let label = if job.plan.hits.is_empty() { "計算取代預覽中…" } else { "取代中…" };
+                            ui.label(RichText::new(label).color(c.fg_dim));
+                            if ui.small_button("取消").clicked() {
+                                job.cancel.store(true, Ordering::Relaxed);
+                            }
+                        });
+                    }
+                    let mut apply: Option<egui::Response> = None;
+                    let mut discard = false;
+                    if let Some(plan) = &self.replace_plan {
+                        ui.label(
+                            RichText::new(format!(
+                                "將把 {} 處「{}」取代為「{}」，分佈於 {} 個檔案（不分大小寫）。",
+                                plan.total,
+                                plan.query,
+                                plan.replacement,
+                                plan.hits.len()
+                            ))
+                            .color(c.warn),
+                        );
+                        ui.label(RichText::new("會直接寫入磁碟上的檔案，無法用復原 (Ctrl+Z) 還原。").size(11.5).color(c.fg_dim2));
+                        ui.horizontal(|ui| {
+                            apply = Some(ui.button("執行取代"));
+                            discard = ui.button("放棄").clicked();
+                        });
+                    }
+                    if let Some(r) = apply {
+                        self.mark("fif.apply", &r);
+                        if r.clicked() {
+                            self.apply_replace_plan(ui.ctx());
+                        }
+                    }
+                    if discard {
+                        self.replace_plan = None;
+                    }
+                    if let Some((is_error, msg)) = &self.replace_note {
+                        ui.label(RichText::new(msg).color(if *is_error { c.warn } else { c.fg_dim }));
+                    }
                     if self.find_job.is_some() {
                         ui.horizontal(|ui| {
                             ui.spinner();
@@ -3415,7 +3514,21 @@ impl AlexCodeApp {
                     }
                     ui.separator();
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        for m in &self.find_results {
+                        // 有取代預覽時列出會被改寫的檔案與處數，否則列出搜尋結果
+                        if let Some(plan) = &self.replace_plan {
+                            for h in &plan.hits {
+                                let rel = Path::new(&h.path)
+                                    .strip_prefix(&plan.root)
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|_| h.path.clone());
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(rel).color(c.accent));
+                                    ui.label(RichText::new(format!("{} 處", h.count)).color(c.fg_dim));
+                                });
+                            }
+                        }
+                        let results: &[FileMatch] = if self.replace_plan.is_some() { &[] } else { &self.find_results };
+                        for m in results {
                             let name = Path::new(&m.file_path)
                                 .file_name()
                                 .map(|s| s.to_string_lossy().to_string())
@@ -3445,6 +3558,11 @@ impl AlexCodeApp {
             if !open {
                 self.show_find_in_files = false;
                 if let Some(job) = &self.find_job {
+                    job.cancel.store(true, Ordering::Relaxed);
+                }
+                // 關閉視窗 = 放棄預覽；已經開始寫入的取代則讓它做完（結果顯示在狀態列）
+                self.replace_plan = None;
+                if let Some(job) = self.replace_job.as_ref().filter(|j| j.plan.hits.is_empty()) {
                     job.cancel.store(true, Ordering::Relaxed);
                 }
             }
@@ -3572,6 +3690,132 @@ impl AlexCodeApp {
             });
         if !open || close {
             self.show_settings = false;
+        }
+    }
+}
+
+/// 全專案取代：預覽（只計數）→ 使用者確認 → 寫入。兩個步驟都在背景執行緒進行。
+impl AlexCodeApp {
+    /// 預覽是否仍對應目前的搜尋字串、取代字串與資料夾
+    fn plan_is_current(&self, plan: &ReplacePlan) -> bool {
+        plan.query == self.find_query && plan.replacement == self.replace_in_files_text && plan.root == self.project_root
+    }
+
+    /// 第一步：計算每個檔案會被取代幾處，不寫入任何東西
+    fn start_replace_preview(&mut self, ctx: &egui::Context) {
+        if self.find_query.is_empty() || self.replace_job.is_some() {
+            return;
+        }
+        self.replace_plan = None;
+        self.replace_note = None;
+        let plan = ReplacePlan {
+            root: self.project_root.clone(),
+            query: self.find_query.clone(),
+            replacement: self.replace_in_files_text.clone(),
+            hits: Vec::new(),
+            total: 0,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded();
+        let (root, query, flag, repaint) = (plan.root.clone(), plan.query.clone(), cancel.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let (hits, stats) = plan_replace_in_files(&root, &[], &query, &flag);
+            let _ = tx.send(ReplaceMsg::Planned(hits, stats));
+            repaint.request_repaint();
+        });
+        self.replace_job = Some(ReplaceJob { rx, cancel, plan });
+    }
+
+    /// 第二步：使用者看過預覽並確認後，把取代寫入磁碟
+    fn apply_replace_plan(&mut self, ctx: &egui::Context) {
+        if self.replace_job.is_some() {
+            return;
+        }
+        self.commit_md_edit();
+        let Some(plan) = self.replace_plan.take() else { return };
+        // 有未儲存修改的分頁：磁碟上的內容不是使用者正在看的內容，改寫它只會造成衝突。請使用者先存檔。
+        let dirty: Vec<String> = self
+            .tabs
+            .iter()
+            .filter(|b| b.modified)
+            .filter(|b| b.file_path.as_deref().is_some_and(|p| plan.hits.iter().any(|h| same_file(&h.path, p))))
+            .map(Self::tab_title)
+            .collect();
+        if !dirty.is_empty() {
+            let msg = format!("尚未取代：這些分頁有未儲存的變更，請先儲存再執行：{}", dirty.join("、"));
+            self.status_message = msg.clone();
+            self.replace_note = Some((true, msg));
+            self.replace_plan = Some(plan);
+            return;
+        }
+        self.replace_note = None;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = unbounded();
+        let (hits, query, replacement) = (plan.hits.clone(), plan.query.clone(), plan.replacement.clone());
+        let (flag, repaint) = (cancel.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(ReplaceMsg::Applied(apply_replace_in_files(&hits, &query, &replacement, &flag)));
+            repaint.request_repaint();
+        });
+        self.replace_job = Some(ReplaceJob { rx, cancel, plan });
+    }
+
+    /// 收取背景取代工作的結果
+    fn poll_replace_job(&mut self) {
+        // 預覽之後改了搜尋字串、取代字串或資料夾：預覽作廢，必須重新預覽才能執行
+        if self.replace_plan.as_ref().is_some_and(|p| !self.plan_is_current(p)) {
+            self.replace_plan = None;
+        }
+        let Some(msg) = self.replace_job.as_ref().and_then(|j| j.rx.try_recv().ok()) else { return };
+        let Some(job) = self.replace_job.take() else { return };
+        match msg {
+            ReplaceMsg::Planned(hits, stats) => {
+                if stats.canceled {
+                    self.replace_note = Some((false, "已取消預覽".to_string()));
+                } else if hits.is_empty() {
+                    let msg = format!("沒有可取代的內容：找不到「{}」（掃描 {} 個檔案）", job.plan.query, stats.files_scanned);
+                    self.replace_note = Some((false, msg));
+                } else if self.plan_is_current(&job.plan) {
+                    self.replace_plan = Some(ReplacePlan { hits, total: stats.matches, ..job.plan });
+                }
+            }
+            ReplaceMsg::Applied(res) => {
+                // 已開啟、且剛被改寫的檔案：重新載入分頁。
+                // 取代進行中又被使用者修改的分頁不動它，之後由外部變更偵測詢問使用者。
+                for hit in &job.plan.hits {
+                    if res.skipped.iter().any(|(p, _)| p == &hit.path) {
+                        continue;
+                    }
+                    let open = self.tabs.iter().position(|b| b.file_path.as_deref().is_some_and(|p| same_file(p, &hit.path)));
+                    let Some(idx) = open.filter(|&i| !self.tabs[i].modified) else { continue };
+                    let Ok(bytes) = std::fs::read(&hit.path) else { continue };
+                    let (text, _) = self.tabs[idx].encoding.decode(&bytes);
+                    if EditorBuffer::from_text(&text).lines != self.tabs[idx].lines {
+                        self.reload_tab_from(idx, &text);
+                    }
+                    self.note_disk_state(idx);
+                }
+                let mut msg = format!("已取代 {} 處（{} 個檔案）", res.replacements, res.files_written);
+                if res.canceled {
+                    msg += "；已取消，其餘檔案沒有更動";
+                }
+                if !res.skipped.is_empty() {
+                    let names: Vec<String> = res
+                        .skipped
+                        .iter()
+                        .take(5)
+                        .map(|(p, why)| {
+                            let name = Path::new(p).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| p.clone());
+                            format!("{name}（{why}）")
+                        })
+                        .collect();
+                    let more = if res.skipped.len() > names.len() { "…" } else { "" };
+                    msg += &format!("；略過 {} 個檔案：{}{}", res.skipped.len(), names.join("、"), more);
+                }
+                self.find_results.clear(); // 取代前的搜尋結果已經過時
+                self.status_message = msg.clone();
+                self.replace_note = Some((!res.skipped.is_empty(), msg));
+            }
         }
     }
 }
@@ -4637,6 +4881,116 @@ mod tests {
         let mut app3 = AlexCodeApp::new();
         app3.apply_state(AppState::load(&old).unwrap());
         assert!(!app3.config.word_wrap);
+    }
+
+    /// 一幀一幀跑到背景工作完成為止
+    fn pump_until(app: &mut AlexCodeApp, ctx: &egui::Context, what: &str, done: impl Fn(&AlexCodeApp) -> bool) {
+        let t = std::time::Instant::now();
+        while !done(app) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(10), "{what} never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            frame(app, ctx, vec![]);
+        }
+    }
+
+    /// a.rs（3 處，CRLF）、sub/b.txt（1 處）、c.rs（沒有命中）；回傳 (資料夾, a, b, c)
+    fn replace_project() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(&dir, "a.rs", "foo foo\r\nbar Foo\r\n");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        let b = write(&dir, "sub/b.txt", "x foo");
+        let c = write(&dir, "c.rs", "nothing here");
+        (dir, a, b, c)
+    }
+
+    fn read(p: &Path) -> String {
+        String::from_utf8(std::fs::read(p).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn replace_in_files_previews_then_writes_and_reloads_open_tabs() {
+        let ctx = ctx();
+        let (dir, a, b, c) = replace_project();
+        let mut app = app_with(&ctx, "x");
+        app.set_folder(dir.path().to_path_buf());
+        app.open_path(&a);
+        let a_key = a.to_string_lossy().to_string();
+        app.run_cmd(Cmd::FindInFiles);
+        app.find_query = "foo".into();
+        app.replace_in_files_text = "qux".into();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(!app.probe.contains_key("fif.apply"), "nothing can be written before a preview");
+
+        // 預覽：只計數，不寫入
+        let pos = app.probe["fif.preview"].center();
+        click(&mut app, &ctx, pos);
+        pump_until(&mut app, &ctx, "replace preview", |app| app.replace_plan.is_some());
+        let plan = app.replace_plan.as_ref().unwrap();
+        assert_eq!((plan.total, plan.hits.len()), (4, 2), "4 matches in 2 files");
+        assert_eq!(read(&a), "foo foo\r\nbar Foo\r\n", "the preview writes nothing");
+        assert_eq!(read(&b), "x foo");
+
+        // 確認後才寫入；已開啟的分頁跟著更新
+        frame(&mut app, &ctx, vec![]);
+        let pos = app.probe["fif.apply"].center();
+        click(&mut app, &ctx, pos);
+        pump_until(&mut app, &ctx, "replace", |app| app.replace_job.is_none() && app.replace_plan.is_none());
+        assert_eq!(read(&a), "qux qux\r\nbar qux\r\n", "line endings are kept");
+        assert_eq!(read(&b), "x qux");
+        assert_eq!(read(&c), "nothing here");
+        let tab = app.tabs.iter().find(|t| t.file_path.as_deref() == Some(a_key.as_str())).unwrap();
+        assert_eq!(tab.edit_text(), "qux qux\nbar qux\n", "the open tab shows the new content");
+        assert!(!tab.modified);
+        assert!(app.status_message.contains("已取代 4 處（2 個檔案）"), "{}", app.status_message);
+        assert!(app.find_results.is_empty());
+
+        // 自己寫入的版本不會被當成外部修改
+        app.handle_disk_events(vec![(a.clone(), stamp_of(&a))]);
+        assert!(app.disk_conflict.is_none());
+        frame(&mut app, &ctx, vec![]);
+    }
+
+    #[test]
+    fn replace_in_files_refuses_unsaved_tabs_and_stale_previews() {
+        let ctx = ctx();
+        let (dir, a, b, _c) = replace_project();
+        let mut app = app_with(&ctx, "x");
+        app.set_folder(dir.path().to_path_buf());
+        app.open_path(&a);
+        let idx = app.active_tab_idx;
+        app.tabs[idx].replace_all_text("foo, edited but not saved");
+        assert!(app.tabs[idx].modified);
+        app.run_cmd(Cmd::FindInFiles);
+        app.find_query = "foo".into();
+        app.replace_in_files_text = "qux".into();
+
+        app.start_replace_preview(&ctx);
+        pump_until(&mut app, &ctx, "replace preview", |app| app.replace_plan.is_some());
+        app.apply_replace_plan(&ctx);
+        assert!(app.replace_job.is_none(), "nothing is written while an affected tab has unsaved changes");
+        let (is_error, msg) = app.replace_note.clone().unwrap();
+        assert!(is_error && msg.contains("a.rs"), "{msg}");
+        assert!(app.replace_plan.is_some(), "the preview is kept so the user can save and retry");
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(read(&a), "foo foo\r\nbar Foo\r\n");
+        assert_eq!(read(&b), "x foo");
+        assert_eq!(app.tabs[idx].edit_text(), "foo, edited but not saved");
+
+        // 預覽之後改了取代字串：預覽作廢，不能直接執行
+        app.replace_in_files_text = "other".into();
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.replace_plan.is_none());
+        app.apply_replace_plan(&ctx);
+        assert!(app.replace_job.is_none());
+        assert_eq!(read(&b), "x foo");
+
+        // 找不到任何命中：沒有預覽可以執行
+        app.find_query = "no such text".into();
+        app.start_replace_preview(&ctx);
+        pump_until(&mut app, &ctx, "empty preview", |app| app.replace_job.is_none());
+        assert!(app.replace_plan.is_none());
+        assert!(app.replace_note.as_ref().is_some_and(|(e, m)| !e && m.contains("no such text")));
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
