@@ -7,7 +7,6 @@
 
 ## 待辦（依優先順序）
 
-- [ ] 設定對話框：Tab 寬度、自動換行、字型大小、是否還原工作階段；接上目前未使用的 `EditorConfig` 並存入 `state.json`
 - [ ] 全專案取代（Find in Files 加上取代）：使用 `src/search/find_in_files.rs` 已有的取代預檢與寫入，先預覽影響的檔案數再執行
 - [ ] 背景開檔：大檔案 / 網路磁碟上的檔案改在背景執行緒讀取，讀取中分頁顯示「載入中」，視窗不凍結
 - [ ] Git blame：狀態列顯示游標所在行的作者與提交訊息（接上 `src/git/git_blame.rs`，在背景執行 `git blame --porcelain`）
@@ -31,5 +30,6 @@
 
 ## 已完成
 
+- [x] 設定對話框（`Ctrl+,`）：Tab 寬度、自動換行、字型大小、是否還原工作階段；接上 `EditorConfig` 並存入 `state.json` 的 `config` 區塊。對話框、Tab 鍵插入空白、還原工作階段於 2026-11-11 完成（`f4c8ef2`）；自動換行（程式碼編輯區依視窗寬度折行，行號 / 書籤 / Git 標記 / Sticky Scroll 仍以檔案的行計算；預設關閉，Markdown 閱讀模式與 Log 篩選檢視不受影響）於 2026-11-12 完成 — 2026-11-12
 - [x] Sticky Scroll：捲動時把目前所在的函式 / 區塊標題固定在編輯區頂端（接上 `src/editor/sticky_scroll.rs`，符號來源用 `src/index/symbols.rs` 新增的 `extract_symbols`：以文字掃描擷取 Rust / C 家族 / JavaScript / Python 的區塊，非語法樹）— 2026-11-11
 - [x] v5.5.0-rust（2026-11-11）：編碼偵測、未儲存提示、單一套復原紀錄、分頁右鍵選單、效能快取、檔案總管、尋找與取代、工作階段還原、單一實例、外部變更偵測、Git 行號區標記、自動配對、三平台 CI 與發佈流程

@@ -273,6 +273,12 @@ pub struct AlexCodeApp {
     /// 上一幀沒有被固定標頭蓋住的第一行
     sticky_below: usize,
 
+    // ---- 自動換行 ----
+    /// 上一幀編輯區每一列（換行後畫面上的一列）所屬的行號；沒有開啟自動換行時為空
+    row_lines: Vec<usize>,
+    /// 上一幀編輯區是否以自動換行排版（用來察覺設定剛被切換）
+    wrap_applied: bool,
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -415,6 +421,8 @@ impl AlexCodeApp {
             sticky_syms: Arc::new(Vec::new()),
             sticky_rows: Vec::new(),
             sticky_below: 0,
+            row_lines: Vec::new(),
+            wrap_applied: false,
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -1513,6 +1521,9 @@ impl AlexCodeApp {
                             ui.close_menu();
                         }
                         if ui.checkbox(&mut self.config.sticky_scroll, "固定目前的函式標題 (Sticky Scroll)").clicked() {
+                            ui.close_menu();
+                        }
+                        if ui.checkbox(&mut self.config.word_wrap, "自動換行 (Word Wrap)").clicked() {
                             ui.close_menu();
                         }
                         if ui.checkbox(&mut self.md_view.show_outline, "Markdown 大綱側邊欄 (Outline)").clicked() {
@@ -2820,9 +2831,16 @@ impl AlexCodeApp {
         let font_c = font.clone();
         let theme = self.theme_mgr.current_theme_name().to_string();
         let fopts = self.find_opts;
+        // 自動換行：以編輯區的可用寬度折行。行號區要在排版之前配置，高度沿用上一幀的排版結果。
+        let wrap = self.config.word_wrap;
+        let wrapped_h = self.highlight_cache.as_ref().map_or(0.0, |(_, g, _)| g.size().y);
+        if std::mem::replace(&mut self.wrap_applied, wrap) != wrap {
+            self.scroll_to_cursor = true; // 切換後每一行的位置都變了：讓游標留在畫面上
+        }
         let mut hl_cache = self.highlight_cache.take();
-        let mut layouter = |ui: &egui::Ui, s: &str, _wrap: f32| {
+        let mut layouter = |ui: &egui::Ui, s: &str, wrap_width: f32| {
             use std::hash::{Hash, Hasher};
+            let max_width = if wrap { wrap_width.max(char_w * 20.0) } else { f32::INFINITY };
             let mut h = std::collections::hash_map::DefaultHasher::new();
             s.hash(&mut h);
             lang.display_name().hash(&mut h);
@@ -2830,6 +2848,7 @@ impl AlexCodeApp {
             font_c.size.to_bits().hash(&mut h);
             find.hash(&mut h);
             fopts.hash(&mut h);
+            max_width.to_bits().hash(&mut h);
             let key = h.finish();
             let atlas = ui.fonts(|f| f.texture_atlas());
             match &hl_cache {
@@ -2837,7 +2856,10 @@ impl AlexCodeApp {
                 _ => {
                     let l = if s.len() > HIGHLIGHT_MAX_BYTES { Lang::Plain } else { lang };
                     let hits = find_all(s, &find, &fopts).unwrap_or_default();
-                    let job = highlight_ranges(s, l, &pal_c, font_c.clone(), &hits);
+                    let mut job = highlight_ranges(s, l, &pal_c, font_c.clone(), &hits);
+                    if wrap {
+                        job.wrap.max_width = max_width;
+                    }
                     let galley = ui.fonts(|f| f.layout_job(job));
                     hl_cache = Some((key, galley.clone(), atlas));
                     galley
@@ -2875,13 +2897,22 @@ impl AlexCodeApp {
             (head.line, head.col)
         };
 
-        let scroll = egui::ScrollArea::both()
-            .id_source(("editor-scroll", idx))
+        // 自動換行時每一列（畫面上的一列）所屬的行號；沒有換行時列 = 行，不需要這張表
+        let mut row_lines = std::mem::take(&mut self.row_lines);
+        row_lines.clear();
+        // 自動換行時不需要水平捲動；兩種模式各自記住捲動位置
+        let scroll_area = if wrap {
+            egui::ScrollArea::vertical().id_source(("editor-scroll-wrap", idx))
+        } else {
+            egui::ScrollArea::both().id_source(("editor-scroll", idx))
+        };
+        let scroll = scroll_area
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing = Vec2::ZERO;
-                    let min_h = ui.available_height().max(line_count as f32 * row_h + 40.0);
+                    let text_h = if wrap { wrapped_h } else { line_count as f32 * row_h };
+                    let min_h = ui.available_height().max(text_h + 40.0);
                     let (gutter_rect, gutter_resp) =
                         ui.allocate_exact_size(egui::vec2(gutter_w, min_h), Sense::click());
                     let line_bg_idx = ui.painter().add(Shape::Noop);
@@ -2920,8 +2951,27 @@ impl AlexCodeApp {
                     let galley = &output.galley;
                     let gpos = output.galley_pos;
 
-                    // 目前游標所在行
-                    let cur_row = output.cursor_range.map(|cr| (cr.primary.rcursor.row, cr.primary.rcursor.column));
+                    if wrap {
+                        let mut line = 0;
+                        row_lines.extend(galley.rows.iter().map(|row| {
+                            let l = line;
+                            line += row.ends_with_newline as usize;
+                            l
+                        }));
+                        // 行號區的高度是照上一幀的排版配置的：排版剛改變（切換分頁、視窗寬度改變）時再畫一幀
+                        if (galley.size().y - wrapped_h).abs() > 0.5 {
+                            ui.ctx().request_repaint();
+                        }
+                    }
+
+                    // 目前游標所在的 (行, 欄)。自動換行時畫面上的列不等於行，改用段落座標。
+                    let cur_row = output.cursor_range.map(|cr| {
+                        if wrap {
+                            (cr.primary.pcursor.paragraph, cr.primary.pcursor.offset)
+                        } else {
+                            (cr.primary.rcursor.row, cr.primary.rcursor.column)
+                        }
+                    });
                     if let Some((r, col)) = cur_row {
                         new_cursor = Some((r, col));
                     }
@@ -2939,11 +2989,19 @@ impl AlexCodeApp {
 
                     // 目前行底色（畫在文字下方）
                     let clip = ui.clip_rect();
-                    if let Some(row) = galley.rows.get(active_line) {
+                    // 自動換行時一行可能佔好幾列：整行都上底色
+                    let (row_a, row_b) = if wrap {
+                        let a = row_lines.partition_point(|&l| l < active_line);
+                        (a, row_lines.partition_point(|&l| l <= active_line).saturating_sub(1).max(a))
+                    } else {
+                        (active_line, active_line)
+                    };
+                    if let (Some(row), Some(last)) = (galley.rows.get(row_a), galley.rows.get(row_b)) {
                         let y0 = gpos.y + row.rect.top();
+                        let y1 = gpos.y + last.rect.top() + last.rect.height().max(row_h);
                         let r = Rect::from_min_max(
                             Pos2::new(gutter_rect.right(), y0),
-                            Pos2::new(clip.right().max(output.response.rect.right()), y0 + row.rect.height().max(row_h)),
+                            Pos2::new(clip.right().max(output.response.rect.right()), y1),
                         );
                         ui.painter().set(
                             line_bg_idx,
@@ -2952,10 +3010,15 @@ impl AlexCodeApp {
                     }
 
                     // 行號 gutter
+                    // 文字比預留的高度還高時（自動換行剛重新排版），行號區的底色跟著延伸到文字底端
+                    let gutter_bg = Rect::from_min_max(
+                        gutter_rect.min,
+                        Pos2::new(gutter_rect.right(), gutter_rect.bottom().max(output.response.rect.bottom())),
+                    );
                     let mut shapes = vec![
-                        Shape::rect_filled(gutter_rect, 0.0, c.panel),
+                        Shape::rect_filled(gutter_bg, 0.0, c.panel),
                         Shape::line_segment(
-                            [gutter_rect.right_top(), gutter_rect.right_bottom()],
+                            [gutter_bg.right_top(), gutter_bg.right_bottom()],
                             Stroke::new(1.0_f32, c.border),
                         ),
                     ];
@@ -2966,14 +3029,19 @@ impl AlexCodeApp {
                             if y + row_h < clip.top() || y > clip.bottom() {
                                 continue;
                             }
-                            let active = i == active_line;
+                            // 自動換行時 i 是畫面上的列、line 是它所屬的行：行號、書籤只畫在每一行的第一列
+                            let line = if wrap { row_lines[i] } else { i };
+                            let line_start = !wrap || i == 0 || row_lines[i - 1] != line;
+                            let active = line == active_line;
                             let col = if active { c.accent } else { c.faint };
-                            let g = f.layout_no_wrap(format!("{}", i + 1), num_font.clone(), col);
-                            let pos = Pos2::new(
-                                gutter_rect.right() - 10.0 - g.size().x,
-                                y + (row.rect.height().max(row_h) - g.size().y) * 0.5,
-                            );
-                            shapes.push(Shape::galley(pos, g, col));
+                            if line_start {
+                                let g = f.layout_no_wrap(format!("{}", line + 1), num_font.clone(), col);
+                                let pos = Pos2::new(
+                                    gutter_rect.right() - 10.0 - g.size().x,
+                                    y + (row.rect.height().max(row_h) - g.size().y) * 0.5,
+                                );
+                                shapes.push(Shape::galley(pos, g, col));
+                            }
                             if active {
                                 shapes.push(Shape::rect_filled(
                                     Rect::from_min_size(Pos2::new(gutter_rect.left(), y), egui::vec2(2.0, row_h)),
@@ -2982,7 +3050,7 @@ impl AlexCodeApp {
                                 ));
                             }
                             // Git：新增（強調色條）/ 修改（黃色條）/ 此行上方有刪除（洋紅三角）
-                            if let Some(&st) = git_marks.get(&i) {
+                            if let Some(&st) = git_marks.get(&line) {
                                 let x = gutter_rect.right() - 4.0;
                                 if st & (ADDED | MODIFIED) != 0 {
                                     let col = if st & MODIFIED != 0 { c.warn } else { c.accent };
@@ -2992,7 +3060,7 @@ impl AlexCodeApp {
                                         col,
                                     ));
                                 }
-                                if st & DELETED_ABOVE != 0 {
+                                if st & DELETED_ABOVE != 0 && line_start {
                                     shapes.push(Shape::convex_polygon(
                                         vec![Pos2::new(x - 3.0, y - 3.0), Pos2::new(x + 3.0, y), Pos2::new(x - 3.0, y + 3.0)],
                                         c.accent2,
@@ -3000,7 +3068,7 @@ impl AlexCodeApp {
                                     ));
                                 }
                             }
-                            if bookmarks.contains(&i) {
+                            if line_start && bookmarks.contains(&line) {
                                 shapes.push(Shape::circle_filled(
                                     Pos2::new(gutter_rect.left() + 9.0, y + row_h * 0.5),
                                     3.5,
@@ -3014,7 +3082,8 @@ impl AlexCodeApp {
                     // 點擊 gutter 切換書籤
                     if gutter_resp.clicked() {
                         if let Some(pp) = gutter_resp.interact_pointer_pos() {
-                            let line = ((pp.y - gpos.y) / row_h).floor().max(0.0) as usize;
+                            let row = ((pp.y - gpos.y) / row_h).floor().max(0.0) as usize;
+                            let line = if wrap { row_lines.get(row).copied().unwrap_or(line_count) } else { row };
                             if line < line_count {
                                 self.tabs[idx].toggle_bookmark(line);
                             }
@@ -3054,17 +3123,24 @@ impl AlexCodeApp {
             let offset = scroll.state.offset;
             // 第一個完整可見的行（文字上方有 4px 邊界）
             let first = ((offset.y - 4.0) / row_h - 0.01).ceil().max(0.0) as usize;
+            // 畫面上第 row 列起第一個完整可見的行。自動換行時一行佔好幾列：
+            // 落在某一行中間（它的第一列已捲出畫面）就算下一行。
+            let line_at = |row: usize| match row_lines.get(row) {
+                _ if !wrap => row,
+                Some(&line) => line + (row > 0 && row_lines[row - 1] == line) as usize,
+                None => row_lines.last().map_or(0, |l| l + 1),
+            };
             // 固定的標頭本身會蓋住幾行：以「標頭底下的第一行」為準反覆計算到穩定
             let mut rows = 0;
             for _ in 0..=STICKY_MAX_ROWS {
-                let n = sticky_headers(&sticky_syms, first + rows, STICKY_MAX_ROWS).len();
+                let n = sticky_headers(&sticky_syms, line_at(first + rows), STICKY_MAX_ROWS).len();
                 if n == rows {
                     break;
                 }
                 rows = n;
             }
-            let headers = sticky_headers(&sticky_syms, first + rows, STICKY_MAX_ROWS);
-            self.sticky_below = first + headers.len();
+            let headers = sticky_headers(&sticky_syms, line_at(first + rows), STICKY_MAX_ROWS);
+            self.sticky_below = line_at(first + headers.len());
 
             let painter = ui.painter_at(view);
             let area = Rect::from_min_size(view.min, egui::vec2(view.width(), headers.len() as f32 * row_h));
@@ -3111,6 +3187,7 @@ impl AlexCodeApp {
 
         self.highlight_cache = hl_cache;
         self.git_marks.1 = git_marks;
+        self.row_lines = row_lines;
         if changed {
             self.tabs[idx].apply_typed_text(&text);
         }
@@ -3464,6 +3541,11 @@ impl AlexCodeApp {
                     });
                 });
                 note(ui, "Tab 寬度決定按 Tab 鍵時對齊到的定位點；檔案中既有的 Tab 字元固定以 4 格顯示。");
+
+                ui.separator();
+                let r = ui.checkbox(&mut self.config.word_wrap, "自動換行：過長的行折到下一列顯示");
+                self.mark("settings.word_wrap", &r);
+                note(ui, "只影響程式碼編輯區的顯示，不會在檔案中插入換行；行號仍以檔案中的行計算。");
 
                 ui.separator();
                 let r = ui.checkbox(&mut self.config.restore_session, "啟動時還原上次開啟的檔案與資料夾");
@@ -4449,6 +4531,112 @@ mod tests {
         // 命令面板 / 選單共用的命令
         app.run_cmd(Cmd::Settings);
         assert!(app.show_settings);
+    }
+
+    /// 0: 短行、1: 很長的一行（自動換行後佔好幾列）、2: 短行、3: 結尾的空行
+    fn wrap_source() -> String {
+        format!("fn a() {{}}\n// {}\nfn b() {{}}\n", "word ".repeat(200))
+    }
+
+    fn cursor(app: &AlexCodeApp) -> (usize, usize) {
+        let head = app.tabs[0].selections[0].head;
+        (head.line, head.col)
+    }
+
+    #[test]
+    fn word_wrap_wraps_long_lines_and_keeps_logical_line_numbers() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, &wrap_source());
+        assert!(!app.config.word_wrap, "word wrap is off by default");
+        assert!(app.row_lines.is_empty(), "without word wrap every row is one line");
+
+        app.config.word_wrap = true;
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        let rows = app.row_lines.clone();
+        assert!(rows.len() >= 4 + 3, "the 1000-character line must take several rows, got {rows:?}");
+        assert_eq!((rows[0], rows[1]), (0, 1));
+        assert_eq!(rows[rows.len() - 2..], [2, 3], "the lines after the wrapped one keep their numbers");
+        assert!(rows.windows(2).all(|w| w[1] == w[0] || w[1] == w[0] + 1));
+
+        // 游標位置以「行」回報，不是畫面上的列
+        let i = AlexCodeApp::char_index_of(&app.tabs[0], 2, 3);
+        app.pending_select = Some((i, i));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (2, 3));
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!(app.tabs[0].lines[2], "fn Xb() {}", "typing lands on the logical line");
+        assert_eq!(cursor(&app), (2, 4));
+
+        // 在換行後的長行裡往下一列：仍在同一行，欄位往後移
+        let i = AlexCodeApp::char_index_of(&app.tabs[0], 1, 0);
+        app.pending_select = Some((i, i));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        let (line, col) = cursor(&app);
+        assert_eq!(line, 1, "arrow down inside a wrapped line stays on that line");
+        assert!(col > 20, "the cursor moved one row down, i.e. far to the right within the line (col {col})");
+
+        // 文字內容不因換行顯示而改變
+        assert_eq!(app.tabs[0].lines.len(), 4);
+        assert_eq!(app.tabs[0].lines[1].chars().count(), 3 + 200 * 5);
+
+        app.config.word_wrap = false;
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.row_lines.is_empty());
+    }
+
+    #[test]
+    fn sticky_scroll_follows_wrapped_lines() {
+        let ctx = ctx();
+        // 與 sticky_source 相同的結構，但每個敘述都長到換行後佔好幾列
+        let long = format!("; // {}\n", "long comment ".repeat(30));
+        let src = sticky_source().replace(";\n", &long);
+        let mut app = app_with(&ctx, &src);
+        app.config.word_wrap = true;
+        settle(&mut app, &ctx);
+        assert!(app.row_lines.len() > app.tabs[0].lines.len() * 2, "the statements wrap");
+        assert_eq!(app.sticky_lines(), Vec::<usize>::new());
+
+        goto_line(&mut app, &ctx, 60);
+        assert_eq!(cursor_line(&app), 60);
+        assert_eq!(app.sticky_lines(), vec![0, 1]);
+        assert!(cursor_line(&app) >= app.sticky_below);
+        goto_line(&mut app, &ctx, 200);
+        assert_eq!(cursor_line(&app), 200);
+        assert_eq!(app.sticky_lines(), vec![0, 124]);
+        assert!(app.sticky_below > 124 && app.sticky_below <= 200, "first uncovered line {}", app.sticky_below);
+    }
+
+    #[test]
+    fn word_wrap_is_a_saved_setting() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("state.json");
+        let mut app = app_with(&ctx, "fn main() {}");
+        app.state_path = Some(state_file.clone());
+        app.run_cmd(Cmd::Settings);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        let pos = app.probe["settings.word_wrap"].center();
+        click(&mut app, &ctx, pos);
+        assert!(app.config.word_wrap, "clicking the checkbox turns word wrap on");
+        app.persist_state();
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        assert_eq!(json["config"]["word_wrap"], true);
+
+        let mut app2 = AlexCodeApp::new();
+        app2.apply_state(AppState::load(&state_file).unwrap());
+        assert!(app2.config.word_wrap);
+
+        // v5.5.0 的 state.json（沒有 config 區塊）：維持原本不換行的行為
+        let old = write(&dir, "old.json", r#"{"theme":"Matrix","font_size":17.0}"#);
+        let mut app3 = AlexCodeApp::new();
+        app3.apply_state(AppState::load(&old).unwrap());
+        assert!(!app3.config.word_wrap);
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
