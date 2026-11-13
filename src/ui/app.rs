@@ -5444,12 +5444,11 @@ mod tests {
         app.close_tab(gidx);
         assert!(!app.blame.contains_key(&gid));
 
-        // 狀態列顯示的文字每個字元在內建字型中都有字形（不會畫成方框）
-        for shown in [text.as_str(), "未提交變更"] {
-            assert!(!shown.contains('⎇'), "{shown}");
-            let has = ctx.fonts(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), shown));
-            assert!(has, "every character of `{shown}` must be drawable");
-        }
+        // 狀態列顯示的文字（短 SHA、作者、日期、「·」、摘要）每個字元在內建字型中都有字形，不會畫成方框。
+        // 中文訊息用的是系統的中文字型（CI 的 Linux / macOS 機器上沒有），不在這裡檢查。
+        assert!(!text.contains('⎇'), "{text}");
+        let has = ctx.fonts(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), &text));
+        assert!(has, "every character of `{text}` must be drawable");
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
