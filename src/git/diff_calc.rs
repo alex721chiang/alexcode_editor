@@ -101,6 +101,39 @@ pub fn align(a: &[String], b: &[String]) -> Vec<Row> {
     rows
 }
 
+/// 同 [`align`]，但先去掉兩邊相同的開頭與結尾，只對中間不同的部分做 LCS：
+/// 大檔案裡改幾行不需要為整份檔案建表。
+/// 中間部分的 (左側行數 × 右側行數) 超過 `max_cells` 時回傳 None（LCS 的表格會佔用太多記憶體）。
+pub fn align_trimmed(a: &[String], b: &[String], max_cells: usize) -> Option<Vec<Row>> {
+    let prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let suffix = a[prefix..].iter().rev().zip(b[prefix..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (mid_a, mid_b) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
+    if mid_a.len().saturating_mul(mid_b.len()) > max_cells {
+        return None;
+    }
+    let same = |left: usize, right: usize| Row { left: left as i32, right: right as i32, row_type: RowType::Same };
+    let mut rows = Vec::with_capacity(a.len().max(b.len()));
+    rows.extend((0..prefix).map(|i| same(i, i)));
+    rows.extend(align(mid_a, mid_b).into_iter().map(|mut row| {
+        if row.left >= 0 {
+            row.left += prefix as i32;
+        }
+        if row.right >= 0 {
+            row.right += prefix as i32;
+        }
+        row
+    }));
+    rows.extend((0..suffix).map(|k| same(a.len() - suffix + k, b.len() - suffix + k)));
+    Some(rows)
+}
+
+/// 每一段連續變更（非 Same 的列）第一列的索引
+pub fn change_starts(rows: &[Row]) -> Vec<usize> {
+    (0..rows.len())
+        .filter(|&i| rows[i].row_type != RowType::Same && (i == 0 || rows[i - 1].row_type == RowType::Same))
+        .collect()
+}
+
 /// 計算非 Same 的變更列數
 pub fn change_count(rows: &[Row]) -> usize {
     rows.iter().filter(|r| r.row_type != RowType::Same).count()

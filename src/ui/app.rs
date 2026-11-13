@@ -25,6 +25,7 @@ use crate::editor::{
 use crate::core::config::{MAX_FONT_SIZE, MAX_TAB_SIZE, MIN_FONT_SIZE, MIN_TAB_SIZE};
 use crate::index::{extract_symbols, Symbol, SymbolLang};
 use crate::git::{blame_contents, blame_status_text, diff_line_states, LineInfo, ADDED, DELETED_ABOVE, MODIFIED};
+use crate::git::{align_trimmed, change_starts, Row as DiffRow, RowType as DiffRowType};
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
@@ -137,6 +138,7 @@ pub enum Cmd {
     GotoLine,
     FindInFiles,
     CommandPalette,
+    DiffHead,
     ToggleTerminal,
     ToggleGraph,
     ToggleFilterBar,
@@ -304,6 +306,14 @@ pub struct AlexCodeApp {
     /// 目前分頁的內容最後一次變動：(分頁 id, 內容版本, 發現變動的時間)
     blame_seen: (u64, u64, std::time::Instant),
 
+    // ---- Git 差異檢視 ----
+    /// 目前分頁與 HEAD 的對齊結果
+    diff_cache: Option<DiffCache>,
+    /// 目前選取的是第幾段變更
+    diff_focus: usize,
+    /// 下一幀把選取的那段變更捲到畫面上
+    diff_scroll_focus: bool,
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -372,6 +382,19 @@ struct LoadJob {
     /// 載入完成後要跳到的行（從全專案搜尋的結果開檔時）
     goto_line: Option<usize>,
 }
+
+/// 差異檢視的對齊結果，以及它是針對哪一份內容算的
+struct DiffCache {
+    tab_id: u64,
+    revision: u64,
+    /// 當時的 HEAD 內容（握著它，位址才不會被之後的版本重複使用）
+    head: Arc<Vec<String>>,
+    /// None = 差異太大，沒有對齊
+    rows: Option<Arc<Vec<DiffRow>>>,
+}
+
+/// 差異檢視的比對表格上限（HEAD 與目前內容中間不同部分的行數相乘）：約 2000 × 2000 行，佔 16 MB
+const DIFF_MAX_CELLS: usize = 4_000_000;
 
 /// 一份文件每一行（0-based）的 blame 資訊
 type BlameLines = Arc<HashMap<usize, LineInfo>>;
@@ -506,6 +529,9 @@ impl AlexCodeApp {
             blame_chan: unbounded(),
             blame_running: None,
             blame_seen: (0, 0, std::time::Instant::now()),
+            diff_cache: None,
+            diff_focus: 0,
+            diff_scroll_focus: false,
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -1247,6 +1273,7 @@ impl AlexCodeApp {
             ("檢視：切換 Markdown 大綱側邊欄 (Outline)".into(), Cmd::ToggleMarkdownOutline),
             ("檢視：終端機 (Terminal)".into(), Cmd::ToggleTerminal),
             ("檢視：Markdown 關聯圖 (Graph)".into(), Cmd::ToggleGraph),
+            ("檢視：與 Git HEAD 比較 (Diff)".into(), Cmd::DiffHead),
             ("檢視：Log 篩選工具列 (Filter Bar)".into(), Cmd::ToggleFilterBar),
             ("檢視：放大字型 (Zoom In)".into(), Cmd::ZoomIn),
             ("檢視：縮小字型 (Zoom Out)".into(), Cmd::ZoomOut),
@@ -1377,6 +1404,14 @@ impl AlexCodeApp {
                 self.show_command_palette = true;
                 self.palette_focus = true;
                 self.command_query.clear();
+            }
+            Cmd::DiffHead => {
+                self.commit_md_edit();
+                self.show_diff_dialog = true;
+                self.diff_focus = 0;
+                self.diff_scroll_focus = true;
+                // HEAD 可能在開檔之後變了（在終端機提交）：重新讀取
+                self.request_git_head(self.active_tab_idx);
             }
             Cmd::ToggleTerminal => self.show_terminal = !self.show_terminal,
             Cmd::ToggleGraph => {
@@ -1577,6 +1612,7 @@ impl AlexCodeApp {
             self.show_find_bar = false;
             self.show_goto = false;
             self.show_settings = false;
+            self.show_diff_dialog = false;
             self.show_command_palette = false;
             self.pending_close = None;
         }
@@ -1702,6 +1738,9 @@ impl AlexCodeApp {
                         ui.set_min_width(260.0);
                         if mi(ui, "切換 Typora Markdown 模式", "Ctrl+Shift+M") {
                             cmd = Some(Cmd::CycleMarkdownMode);
+                        }
+                        if mi(ui, "與 Git HEAD 比較 (Diff)", "") {
+                            cmd = Some(Cmd::DiffHead);
                         }
                         let mut ex = self.show_explorer;
                         if ui.checkbox(&mut ex, "檔案總管側邊欄 (Explorer)  Ctrl+B").clicked() {
@@ -3796,6 +3835,7 @@ impl AlexCodeApp {
         }
 
         self.settings_dialog(ctx, c);
+        self.diff_dialog(ctx, c);
     }
 
     /// 記下具名控制項的位置（只在測試中有作用）
@@ -3872,6 +3912,190 @@ impl AlexCodeApp {
             });
         if !open || close {
             self.show_settings = false;
+        }
+    }
+}
+
+/// Git 差異檢視：目前分頁的內容與 HEAD 版本並排比較
+impl AlexCodeApp {
+    /// 目前分頁與 HEAD 的對齊結果；只在內容或 HEAD 內容改變時重算。
+    /// 外層 None = 沒有 HEAD 版本可比（不在 Git 內、未追蹤、還在讀取）；內層 None = 差異太大。
+    fn diff_rows(&mut self) -> Option<Option<Arc<Vec<DiffRow>>>> {
+        let buf = self.tabs.get(self.active_tab_idx)?;
+        let head = self.git_head.get(&buf.id)?.clone()?;
+        let fresh = self
+            .diff_cache
+            .as_ref()
+            .is_some_and(|c| c.tab_id == buf.id && c.revision == buf.revision() && Arc::ptr_eq(&c.head, &head));
+        if !fresh {
+            let rows = align_trimmed(&head, &buf.lines, DIFF_MAX_CELLS).map(Arc::new);
+            self.diff_cache = Some(DiffCache { tab_id: buf.id, revision: buf.revision(), head, rows });
+        }
+        self.diff_cache.as_ref().map(|c| c.rows.clone())
+    }
+
+    /// 記下一塊區域的位置（只在測試中有作用）
+    #[allow(unused_variables)]
+    fn mark_rect(&mut self, name: &'static str, rect: Rect) {
+        #[cfg(test)]
+        self.probe.insert(name, rect);
+    }
+
+    fn diff_dialog(&mut self, ctx: &egui::Context, c: &Colors) {
+        if !self.show_diff_dialog {
+            return;
+        }
+        let idx = self.active_tab_idx;
+        let Some(buf) = self.tabs.get(idx) else { return };
+        let (id, title) = (buf.id, Self::tab_title(buf));
+        let saved_file = buf.file_path.as_deref().is_some_and(|p| Path::new(p).is_absolute());
+        // None = 還沒有結果；Some(None) = 不在 Git 內 / 未追蹤
+        let head = self.git_head.get(&id).cloned();
+        let rows = self.diff_rows().flatten();
+        let starts = rows.as_deref().map(|r| change_starts(r)).unwrap_or_default();
+        if self.diff_focus >= starts.len() {
+            self.diff_focus = 0;
+        }
+        let focus_row = starts.get(self.diff_focus).copied();
+        let scroll_to = if focus_row.is_some() && std::mem::take(&mut self.diff_scroll_focus) { focus_row } else { None };
+        let message = match (&head, &rows) {
+            (None, _) if !saved_file => Some("這個分頁還沒有存成檔案，沒有 HEAD 版本可以比較。"),
+            (None, _) => Some("讀取 HEAD 版本中…"),
+            (Some(None), _) => Some("這個檔案不在 Git 儲存庫內，或尚未加入追蹤。"),
+            (Some(Some(_)), None) => Some("與 HEAD 的差異太大，無法並排顯示。"),
+            (Some(Some(_)), Some(_)) if starts.is_empty() => Some("與 HEAD 相同，沒有變更。"),
+            _ => None,
+        };
+        let font = FontId::monospace(self.config.font_size);
+        let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
+        let lines = &self.tabs[idx].lines;
+
+        let mut open = true;
+        let mut step: Option<bool> = None; // Some(true) = 下一段、Some(false) = 上一段
+        let mut jump: Option<usize> = None;
+        let mut marks: Vec<(&'static str, Rect)> = Vec::new();
+        egui::Window::new(RichText::new("DIFF · HEAD").font(FontId::new(12.0, FontFamily::Name(ORBITRON.into()))).color(c.accent))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([920.0, 560.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&title).color(c.accent));
+                    if !starts.is_empty() {
+                        ui.label(RichText::new(format!("{} 段變更", starts.len())).color(c.fg_dim));
+                        if ui.button("上一個").clicked() {
+                            step = Some(false);
+                        }
+                        let r = ui.button("下一個");
+                        marks.push(("diff.next", r.rect));
+                        if r.clicked() {
+                            step = Some(true);
+                        }
+                        ui.label(RichText::new("點右側的一列可跳到該行").size(11.5).color(c.fg_dim2));
+                    }
+                });
+                ui.separator();
+                if let Some(text) = message {
+                    ui.label(RichText::new(text).color(c.fg_dim));
+                }
+                let (Some(rows), Some(Some(head))) = (&rows, &head) else { return };
+                if starts.is_empty() {
+                    return;
+                }
+                ui.columns(2, |cols| {
+                    cols[0].label(RichText::new("HEAD（最後一次提交）").size(11.5).color(c.fg_dim2));
+                    cols[1].label(RichText::new("目前內容（含尚未存檔的修改）").size(11.5).color(c.fg_dim2));
+                });
+
+                let row_h = ui.fonts(|f| f.row_height(&font));
+                let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
+                let num_w = head.len().max(lines.len()).to_string().len().max(3) as f32 * char_w + 16.0;
+                ui.spacing_mut().item_spacing.y = 0.0; // 每一列緊貼：捲動位置才能用「列號 × 列高」計算
+                let mut area = egui::ScrollArea::vertical().id_source("diff-scroll").auto_shrink([false, false]);
+                if let Some(row) = scroll_to {
+                    // 選取的那段變更上方留三列；內容比視窗短時不捲動
+                    let max_offset = (rows.len() as f32 * row_h - ui.available_height()).max(0.0);
+                    area = area.vertical_scroll_offset(((row as f32 - 3.0).max(0.0) * row_h).min(max_offset));
+                }
+                area.show_rows(ui, row_h, rows.len(), |ui, range| {
+                    for i in range {
+                        let row = &rows[i];
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), Sense::click());
+                        let mid = rect.center().x;
+                        let left = Rect::from_min_max(rect.min, Pos2::new(mid, rect.bottom()));
+                        let right = Rect::from_min_max(Pos2::new(mid, rect.top()), rect.max);
+                        // 左：刪除（洋紅）/ 修改（黃）；右：新增（強調色）/ 修改（黃）；沒有對應行的一側留空
+                        let (left_bg, right_bg) = match row.row_type {
+                            DiffRowType::Same => (None, None),
+                            DiffRowType::Removed => (Some(with_alpha(c.accent2, 50)), Some(c.panel)),
+                            DiffRowType::Added => (Some(c.panel), Some(with_alpha(c.accent, 50))),
+                            DiffRowType::Modified => (Some(with_alpha(c.warn, 50)), Some(with_alpha(c.warn, 50))),
+                        };
+                        let p = ui.painter();
+                        if let Some(bg) = left_bg {
+                            p.rect_filled(left, 0.0, bg);
+                        }
+                        if let Some(bg) = right_bg {
+                            p.rect_filled(right, 0.0, bg);
+                        }
+                        let mut clipped = false;
+                        for (side, line_idx, source) in [(left, row.left, head.as_slice()), (right, row.right, lines.as_slice())] {
+                            let Some(text) = usize::try_from(line_idx).ok().and_then(|l| source.get(l)) else { continue };
+                            p.text(
+                                Pos2::new(side.left() + num_w - 8.0, side.top()),
+                                Align2::RIGHT_TOP,
+                                line_idx + 1,
+                                num_font.clone(),
+                                c.faint,
+                            );
+                            let area = Rect::from_min_max(Pos2::new(side.left() + num_w, side.top()), side.max);
+                            clipped |= text.chars().count() as f32 * char_w > area.width();
+                            p.with_clip_rect(area.intersect(ui.clip_rect())).text(
+                                area.min + egui::vec2(2.0, 0.0),
+                                Align2::LEFT_TOP,
+                                text,
+                                font.clone(),
+                                c.fg,
+                            );
+                        }
+                        p.vline(mid, rect.y_range(), Stroke::new(1.0_f32, c.border));
+                        if Some(i) == focus_row {
+                            p.rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, c.accent));
+                            marks.push(("diff.focus_row", rect));
+                        }
+                        if resp.clicked() {
+                            jump = usize::try_from(row.right).ok();
+                        }
+                        // 太長而被截掉的行：滑鼠停留時顯示兩邊的全文
+                        if clipped {
+                            resp.on_hover_ui(|ui| {
+                                for (label, line_idx, source) in [("HEAD", row.left, head.as_slice()), ("目前", row.right, lines.as_slice())] {
+                                    if let Some(text) = usize::try_from(line_idx).ok().and_then(|l| source.get(l)) {
+                                        ui.label(RichText::new(format!("{label}：{text}")).monospace());
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+            });
+
+        for (name, rect) in marks {
+            self.mark_rect(name, rect);
+        }
+        if let Some(forward) = step.filter(|_| !starts.is_empty()) {
+            let n = starts.len();
+            self.diff_focus = if forward { (self.diff_focus + 1) % n } else { (self.diff_focus + n - 1) % n };
+            self.diff_scroll_focus = true;
+        }
+        if let Some(line) = jump {
+            let i = Self::char_index_of(&self.tabs[idx], line, 0);
+            self.pending_select = Some((i, i));
+            self.scroll_to_cursor = true;
+        }
+        if !open {
+            self.show_diff_dialog = false;
         }
     }
 }
@@ -5449,6 +5673,104 @@ mod tests {
         assert!(!text.contains('⎇'), "{text}");
         let has = ctx.fonts(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), &text));
         assert!(has, "every character of `{text}` must be drawable");
+    }
+
+    #[test]
+    fn diff_view_compares_the_buffer_with_head() {
+        use crate::git::RowType::{Added, Modified, Same};
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "a\nb CHANGED\nc\nd\nnew");
+        let id = app.tabs[0].id;
+        let lines = |list: &[&str]| Arc::new(list.iter().map(|s| s.to_string()).collect::<Vec<String>>());
+
+        // 沒有 HEAD 版本可比：視窗照常開啟，只是沒有比較結果
+        app.run_cmd(Cmd::DiffHead);
+        assert!(app.show_diff_dialog);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.diff_rows().is_none());
+        assert!(!app.probe.contains_key("diff.next"));
+
+        app.git_head.insert(id, Some(lines(&["a", "b", "c", "d"])));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        let rows = app.diff_rows().unwrap().expect("small diff");
+        assert_eq!(rows.iter().map(|r| r.row_type).collect::<Vec<_>>(), [Same, Modified, Same, Same, Added]);
+        assert_eq!(app.diff_focus, 0, "the first change is selected when the view opens");
+
+        // 點右側（目前內容）的一列：游標跳到那一行
+        let right_side = |app: &AlexCodeApp| app.probe["diff.focus_row"].right_center() - egui::vec2(40.0, 0.0);
+        let pos = right_side(&app);
+        click(&mut app, &ctx, pos);
+        assert_eq!(cursor_line(&app), 1);
+
+        // 「下一個」移到下一段變更，到底後繞回第一段
+        let next = app.probe["diff.next"].center();
+        click(&mut app, &ctx, next);
+        assert_eq!(app.diff_focus, 1);
+        let pos = right_side(&app);
+        click(&mut app, &ctx, pos);
+        assert_eq!(cursor_line(&app), 4, "the second change is the added last line");
+        click(&mut app, &ctx, next);
+        assert_eq!(app.diff_focus, 0);
+
+        // 比較的是分頁目前的內容：編輯後（不必存檔）結果跟著變
+        app.tabs[0].replace_all_text("a\nb\nc\nd");
+        frame(&mut app, &ctx, vec![]);
+        let rows = app.diff_rows().unwrap().unwrap();
+        assert_eq!(crate::git::change_count(&rows), 0);
+        frame(&mut app, &ctx, vec![]);
+
+        // 不在 Git 內的檔案
+        app.git_head.insert(id, None);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.diff_rows().is_none());
+
+        // Esc 關閉
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+        assert!(!app.show_diff_dialog);
+
+        // 差異太大：不建立龐大的比對表格，視窗顯示說明
+        let old: Vec<String> = (0..3000).map(|i| format!("old {i}")).collect();
+        let new: String = (0..3000).map(|i| format!("new {i}\n")).collect();
+        app.git_head.insert(id, Some(Arc::new(old)));
+        app.tabs[0].replace_all_text(&new);
+        app.run_cmd(Cmd::DiffHead);
+        frame(&mut app, &ctx, vec![]);
+        assert!(matches!(app.diff_rows(), Some(None)));
+        frame(&mut app, &ctx, vec![]);
+    }
+
+    #[test]
+    fn diff_view_scrolls_to_changes_far_down_the_file() {
+        let ctx = ctx();
+        let head: Vec<String> = (0..600).map(|i| format!("line {i}")).collect();
+        let mut text = head.clone();
+        text[300] = "changed 300".to_string();
+        text[550] = "changed 550".to_string();
+        let mut app = app_with(&ctx, &text.join("\n"));
+        let id = app.tabs[0].id;
+        app.git_head.insert(id, Some(Arc::new(head)));
+
+        // 開啟時第一段變更（第 301 行）已經捲到畫面上，點它會跳到那一行
+        app.run_cmd(Cmd::DiffHead);
+        settle(&mut app, &ctx);
+        let window = Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let row = app.probe["diff.focus_row"];
+        assert!(window.contains_rect(row), "the selected change is on screen: {row:?}");
+        click(&mut app, &ctx, row.right_center() - egui::vec2(40.0, 0.0));
+        settle(&mut app, &ctx);
+        assert_eq!(cursor_line(&app), 300);
+
+        // 下一段變更在更下面：同樣捲過去
+        let next = app.probe["diff.next"].center();
+        click(&mut app, &ctx, next);
+        settle(&mut app, &ctx);
+        let row = app.probe["diff.focus_row"];
+        assert!(window.contains_rect(row), "{row:?}");
+        click(&mut app, &ctx, row.right_center() - egui::vec2(40.0, 0.0));
+        settle(&mut app, &ctx);
+        assert_eq!(cursor_line(&app), 550);
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
