@@ -119,6 +119,21 @@ fn open_and_measure(ctx: &egui::Context, path: &std::path::Path, file_lines: usi
     (live().saturating_sub(base), PEAK.load(Relaxed).saturating_sub(base), app)
 }
 
+/// 在游標處逐字輸入 `n` 個字元（每一幀一個）；回傳平均每一幀花的毫秒
+fn type_chars(app: &mut AlexCodeApp, ctx: &egui::Context, n: usize) -> f64 {
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+            focused: true,
+            events: vec![egui::Event::Text("x".into())],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| app.ui_frame(ctx));
+    }
+    t.elapsed().as_secs_f64() * 1000.0 / n as f64
+}
+
 /// 每次 `cargo test` 都會跑的回歸測試：5 MB 的檔案（超過大檔案檢視的門檻）開啟後，
 /// 程式多用的記憶體不得超過檔案大小的 4 倍。改用大檔案檢視之前約是 200 倍。
 #[test]
@@ -133,11 +148,22 @@ fn opening_a_large_file_stays_within_a_few_times_its_size() {
 
     let ctx = egui::Context::default();
     alexcode::ui::style::setup_fonts(&ctx);
-    let (settled, peak, _app) = open_and_measure(&ctx, &path, file_lines);
+    let (settled, peak, mut app) = open_and_measure(&ctx, &path, file_lines);
     let ratio = settled as f64 / file_bytes as f64;
     println!("MEM 5 MB file: settled {:.1} MB ({ratio:.1}x), peak {:.1} MB", mb(settled), mb(peak));
     assert!(ratio <= 4.0, "memory after opening is {ratio:.1}x the file size ({:.1} MB)", mb(settled));
     assert!(peak as f64 <= 8.0 * file_bytes as f64, "peak while opening is {:.1} MB", mb(peak));
+
+    // 直接在大檔案裡打字：內容真的改了，而且不會因此排版或複製整份文件
+    let before = live();
+    reset_peak();
+    type_chars(&mut app, &ctx, 20);
+    let tab = &app.tabs[app.active_tab_idx];
+    assert!(tab.lines[0].starts_with(&"x".repeat(20)), "typed text is in the document: {:?}", &tab.lines[0][..30]);
+    assert_eq!(tab.lines.len(), file_lines + 1);
+    let grew = PEAK.load(Relaxed).saturating_sub(before);
+    println!("MEM typing 20 characters: peak +{:.2} MB", mb(grew));
+    assert!(grew < file_bytes / 2, "typing 20 characters needed {:.1} MB more at its peak", mb(grew));
 }
 
 #[test]
@@ -207,6 +233,12 @@ fn large_file_memory_report() {
         frame(&mut app, &ctx);
     }
     println!("MEM idle frame                            = {:8.2} ms", t.elapsed().as_secs_f64() * 1000.0 / 10.0);
+
+    // 逐字輸入一個字元（含那一幀的繪製）的成本
+    let before = live();
+    reset_peak();
+    let ms = type_chars(&mut app, &ctx, 50);
+    println!("MEM typing one character                  = {:8.2} ms  (peak +{:.2} MB)", ms, mb(PEAK.load(Relaxed).saturating_sub(before)));
 
     if let Some(limit) = budget {
         assert!(ratio <= limit, "memory after opening is {ratio:.1}x the file size, budget is {limit}x");

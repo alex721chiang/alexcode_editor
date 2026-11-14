@@ -241,6 +241,44 @@ impl EditorBuffer {
             .count();
         let removed = old[prefix..old.len() - suffix].to_vec();
         let inserted = new[prefix..new.len() - suffix].to_vec();
+        self.record_edit(prefix, removed, inserted, typing);
+    }
+
+    /// 把 `a`..`b` 之間的文字換成 `text`（順序不拘，超出範圍的位置會修正），游標放在換上的文字結尾。
+    /// 只複製受影響的那幾行；`insert_text` 與各種行操作會先複製整份文件，大檔案逐字輸入要用這個。
+    pub fn replace_range(&mut self, a: Position, b: Position, text: &str, typing: bool) {
+        let last = self.lines.len().saturating_sub(1);
+        let clamp = |p: Position| {
+            let line = p.line.min(last);
+            Position { line, col: p.col.min(self.line_len(line)) }
+        };
+        let sel = Selection { anchor: clamp(a), head: clamp(b) };
+        let (start, end) = (sel.start(), sel.end());
+        let byte_at = |line: &str, col: usize| line.char_indices().nth(col).map_or(line.len(), |(i, _)| i);
+        let first = &self.lines[start.line];
+        let tail_line = &self.lines[end.line];
+        let (head, tail) = (&first[..byte_at(first, start.col)], &tail_line[byte_at(tail_line, end.col)..]);
+
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut inserted: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        let n = inserted.len();
+        let last_len = inserted[n - 1].chars().count();
+        let cursor = Position { line: start.line + n - 1, col: if n == 1 { start.col + last_len } else { last_len } };
+        inserted[0].insert_str(0, head);
+        inserted[n - 1].push_str(tail);
+
+        let removed = self.lines[start.line..=end.line].to_vec();
+        self.selections = vec![Selection::point(cursor)];
+        if removed == inserted {
+            return;
+        }
+        self.lines.splice(start.line..=end.line, inserted.iter().cloned());
+        self.record_edit(start.line, removed, inserted, typing);
+    }
+
+    /// 把一筆修改（`start` 起的 `removed` 換成了 `inserted`，`self.lines` 已經是修改後的內容）記進復原紀錄
+    fn record_edit(&mut self, start: usize, removed: Vec<String>, inserted: Vec<String>, typing: bool) {
+        let prefix = start;
         let bytes = removed.iter().chain(inserted.iter()).map(|l| l.len() + 24).sum::<usize>() + 96;
         let id = self.next_edit_id;
         self.next_edit_id += 1;

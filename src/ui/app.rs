@@ -323,6 +323,8 @@ pub struct AlexCodeApp {
     /// 目前分頁的大小統計快取：鍵為 (分頁 id, 內容版本)，值為 (位元組數, 最寬一行的欄數)。
     /// 欄數只在文件達到門檻時才計算。
     large_stats: ((u64, u64), (usize, usize)),
+    /// 大檔案檢視中輸入法正在組字的文字（還沒寫進文件）
+    large_preedit: String,
 
     // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
     /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
@@ -477,6 +479,52 @@ fn shown_part(line: &str) -> (&str, bool) {
     }
 }
 
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// 往左一個字元（`word` 為 true 時一個字）的位置；在行首時是上一行的行尾
+fn step_left(buf: &EditorBuffer, p: Position, word: bool) -> Position {
+    if p.col == 0 {
+        return match p.line {
+            0 => p,
+            line => Position { line: line - 1, col: buf.line_len(line - 1) },
+        };
+    }
+    if !word {
+        return Position { col: p.col - 1, ..p };
+    }
+    let chars: Vec<char> = buf.lines[p.line].chars().take(p.col).collect();
+    let mut col = chars.len();
+    while col > 0 && !is_word_char(chars[col - 1]) {
+        col -= 1;
+    }
+    while col > 0 && is_word_char(chars[col - 1]) {
+        col -= 1;
+    }
+    Position { col, ..p }
+}
+
+/// 往右一個字元（`word` 為 true 時一個字）的位置；在行尾時是下一行的行首
+fn step_right(buf: &EditorBuffer, p: Position, word: bool) -> Position {
+    let len = buf.line_len(p.line);
+    if p.col >= len {
+        return if p.line + 1 < buf.lines.len() { Position { line: p.line + 1, col: 0 } } else { p };
+    }
+    if !word {
+        return Position { col: p.col + 1, ..p };
+    }
+    let mut rest = buf.lines[p.line].chars().skip(p.col).peekable();
+    let mut col = p.col;
+    while rest.next_if(|c| !is_word_char(*c)).is_some() {
+        col += 1;
+    }
+    while rest.next_if(|c| is_word_char(*c)).is_some() {
+        col += 1;
+    }
+    Position { col, ..p }
+}
+
 impl Default for AlexCodeApp {
     fn default() -> Self {
         Self::new()
@@ -581,6 +629,7 @@ impl AlexCodeApp {
             large_view_bytes: LARGE_VIEW_BYTES,
             large_edit: HashSet::new(),
             large_stats: ((0, 0), (0, 0)),
+            large_preedit: String::new(),
             hot_exit_key: Vec::new(),
             hot_exit_written: (std::time::Instant::now(), 0),
             hot_restore: HashMap::new(),
@@ -4505,32 +4554,30 @@ impl AlexCodeApp {
     }
 
     /// 大檔案檢視：只排版畫面上看得到的行，記憶體用量與檔案大小同一個量級。
-    /// 可以捲動、移動游標、選取、複製、尋找、跳至行、設書籤；不能直接打字（選單的行操作與取代仍然有效）。
+    /// 可以捲動、移動游標、選取、複製、尋找、跳至行、設書籤，也可以直接輸入、刪除、貼上（含輸入法）；
+    /// 沒有自動換行、自動配對、Git 行號區標記。
     fn large_view(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
         use egui::Event;
         let idx = self.active_tab_idx;
         let tab_id = self.tabs[idx].id;
-        let (bytes, max_cols) = self.large_stats.1;
+        let (bytes, mut max_cols) = self.large_stats.1;
         let view_id = egui::Id::new(("alexcode-large-view", tab_id));
         let font = FontId::monospace(self.config.font_size);
         let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
         let row_h = ui.fonts(|f| f.row_height(&font));
         let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
-        let line_count = self.tabs[idx].lines.len();
-        let last_line = line_count.saturating_sub(1);
-        let gutter_w = line_count.to_string().len().max(3) as f32 * char_w + 30.0;
         // 一般編輯區為其他分頁留下的排版結果已經用不到了
         self.highlight_cache = None;
         self.sticky_rows.clear();
         self.sticky_below = 0;
 
-        // 說明列：為什麼不能打字，以及怎麼換回一般編輯區
+        // 說明列：這個檢視少了什麼，以及怎麼換回一般編輯區
         let mut switch = false;
         egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 4.0)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 let size = bytes as f64 / (1024.0 * 1024.0);
                 ui.label(
-                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體，不能直接打字"))
+                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體；沒有自動換行與自動配對"))
                         .size(12.0)
                         .color(c.fg_dim),
                 );
@@ -4565,10 +4612,17 @@ impl AlexCodeApp {
         let scroll_to_cursor = std::mem::take(&mut self.scroll_to_cursor);
         let find = if self.show_find_bar { self.find_bar_text.clone() } else { String::new() };
         let fopts = self.find_opts;
+        // 文件在一般編輯區裡長到超過門檻（貼上一大段）：鍵盤焦點還在那個已經不顯示的編輯區上，接過來
+        let path_key = self.tabs[idx].file_path.clone().unwrap_or_default();
+        let editor_id = egui::Id::new(("alexcode-editor", idx, path_key));
+        if ui.memory(|m| m.focused()) == Some(editor_id) {
+            ui.memory_mut(|m| m.request_focus(view_id));
+        }
         let has_focus = ui.memory(|m| m.has_focus(view_id));
         self.editor_focused = has_focus;
 
-        // ---- 鍵盤：移動游標、選取、複製 ----
+        // ---- 鍵盤：移動游標、選取、複製、輸入 ----
+        // 輸入直接改緩衝區裡受影響的那幾行（`replace_range`），不經過整份文字
         let mut sel = self.tabs[idx].selections[0];
         let mut moved = false;
         if has_focus {
@@ -4580,16 +4634,40 @@ impl AlexCodeApp {
             });
             let page = ((ui.available_height() / row_h) as usize).max(2) - 1;
             let events = ui.input(|i| i.events.clone());
-            let (mut copy, mut typed) = (false, false);
-            let buf = &self.tabs[idx];
+            let (insert_spaces, tab_size) = (self.config.insert_spaces, self.config.tab_size.max(1));
+            let mut preedit = std::mem::take(&mut self.large_preedit);
+            let buf = &mut self.tabs[idx];
+            let rev = buf.revision();
+            // 只有單行的逐字輸入時，大小統計可以就地更新，不必重新掃過整份文件
+            let mut small_edits = true;
             for ev in &events {
+                let last_line = buf.lines.len().saturating_sub(1); // 前一個事件可能增減了行數
+                // 這個事件要做的修改：(範圍的兩端, 換上的文字, 是否算逐字輸入)
+                let mut edit: Option<(Position, Position, String, bool)> = None;
                 match ev {
-                    Event::Copy => copy = true,
-                    Event::Cut | Event::Paste(_) => typed = true,
-                    Event::Text(t) if !t.is_empty() => typed = true,
-                    Event::Key { key, pressed: true, modifiers, .. } if !modifiers.alt => {
+                    Event::Copy if !sel.is_empty() => ui.ctx().copy_text(Self::selection_text(buf, sel)),
+                    Event::Cut if !sel.is_empty() => {
+                        ui.ctx().copy_text(Self::selection_text(buf, sel));
+                        edit = Some((sel.start(), sel.end(), String::new(), false));
+                    }
+                    Event::Paste(t) if !t.is_empty() => edit = Some((sel.start(), sel.end(), t.clone(), false)),
+                    Event::Text(t) if !t.is_empty() && t != "\n" && t != "\r" => {
+                        edit = Some((sel.start(), sel.end(), t.clone(), true));
+                    }
+                    // 輸入法：組字中的文字只顯示在游標處，選定之後才寫進文件
+                    Event::CompositionStart => preedit.clear(),
+                    Event::CompositionUpdate(t) => preedit = t.clone(),
+                    Event::CompositionEnd(t) => {
+                        preedit.clear();
+                        if !t.is_empty() {
+                            edit = Some((sel.start(), sel.end(), t.clone(), true));
+                        }
+                    }
+                    // 組字期間的按鍵屬於輸入法
+                    Event::Key { key, pressed: true, modifiers, .. } if !modifiers.alt && preedit.is_empty() => {
                         let mut head = sel.head;
                         let mut all = false;
+                        let word = modifiers.command;
                         let handled = match key {
                             Key::ArrowUp => {
                                 head.line = head.line.saturating_sub(1);
@@ -4608,21 +4686,11 @@ impl AlexCodeApp {
                                 true
                             }
                             Key::ArrowLeft => {
-                                if head.col > 0 {
-                                    head.col -= 1;
-                                } else if head.line > 0 {
-                                    head.line -= 1;
-                                    head.col = buf.line_len(head.line);
-                                }
+                                head = step_left(buf, head, word);
                                 true
                             }
                             Key::ArrowRight => {
-                                if head.col < buf.line_len(head.line) {
-                                    head.col += 1;
-                                } else if head.line < last_line {
-                                    head.line += 1;
-                                    head.col = 0;
-                                }
+                                head = step_right(buf, head, word);
                                 true
                             }
                             Key::Home => {
@@ -4645,8 +4713,31 @@ impl AlexCodeApp {
                                 all = true;
                                 true
                             }
-                            Key::Enter | Key::Backspace | Key::Delete | Key::Tab => {
-                                typed = true;
+                            Key::Enter => {
+                                edit = Some((sel.start(), sel.end(), "\n".to_string(), true));
+                                false
+                            }
+                            Key::Tab if !modifiers.shift => {
+                                let text = if insert_spaces {
+                                    " ".repeat(tab_size - sel.start().col % tab_size)
+                                } else {
+                                    "\t".to_string()
+                                };
+                                edit = Some((sel.start(), sel.end(), text, true));
+                                false
+                            }
+                            // 有選取時刪掉選取的文字；否則刪掉游標前（Backspace）或後（Delete）的一個字元，按住 Ctrl 則是一個字
+                            Key::Backspace | Key::Delete => {
+                                let (a, b) = if !sel.is_empty() {
+                                    (sel.start(), sel.end())
+                                } else if *key == Key::Backspace {
+                                    (step_left(buf, sel.head, word), sel.head)
+                                } else {
+                                    (sel.head, step_right(buf, sel.head, word))
+                                };
+                                if a != b {
+                                    edit = Some((a, b, String::new(), true));
+                                }
                                 false
                             }
                             _ => false,
@@ -4662,14 +4753,30 @@ impl AlexCodeApp {
                     }
                     _ => {}
                 }
+                if let Some((a, b, text, typing)) = edit {
+                    small_edits &= typing && a.line == b.line && !text.contains('\n');
+                    buf.replace_range(a, b, &text, typing);
+                    sel = buf.selections[0];
+                    moved = true;
+                }
             }
-            if copy && !sel.is_empty() {
-                ui.ctx().copy_text(Self::selection_text(buf, sel));
+            let edited = buf.revision() != rev;
+            if edited && small_edits {
+                let bytes = buf.lines.iter().map(|l| l.len() + 1).sum::<usize>();
+                max_cols = max_cols.max(display_cols(&buf.lines[sel.head.line]));
+                self.large_stats = ((tab_id, buf.revision()), (bytes, max_cols));
             }
-            if typed {
-                self.status_message = "大檔案檢視不能直接輸入：按編輯區上方的「改用一般編輯區」後再編輯".to_string();
+            self.large_preedit = preedit;
+            if edited && !self.uses_large_view(idx) {
+                // 刪到小於門檻了：下一幀起換回一般編輯區，游標與鍵盤焦點一併交給它
+                self.sync_cursor_to_editor();
             }
+            max_cols = self.large_stats.1 .1;
         }
+        // 輸入可能增減了行數
+        let line_count = self.tabs[idx].lines.len();
+        let last_line = line_count.saturating_sub(1);
+        let gutter_w = line_count.to_string().len().max(3) as f32 * char_w + 30.0;
 
         let mut toggle_bookmark = None;
         let scroll = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]).show_viewport(
@@ -4761,11 +4868,22 @@ impl AlexCodeApp {
                             c.faint,
                         );
                     }
-                    if active && has_focus {
-                        let x = text_x + x_of(&galley, sel.head.col);
-                        painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), egui::vec2(1.5, row_h)), 0.0, c.accent);
-                    }
+                    let caret_x = text_x + x_of(&galley, sel.head.col);
                     painter.galley(Pos2::new(text_x, y), galley, c.fg);
+                    if active && has_focus {
+                        let caret = Rect::from_min_size(Pos2::new(caret_x, y), egui::vec2(1.5, row_h));
+                        painter.rect_filled(caret, 0.0, c.accent);
+                        // 告訴作業系統游標在哪裡：輸入法的候選字視窗會跟著它，沒有這個輸入法也不會啟用
+                        ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: clip, cursor_rect: caret }));
+                        // 組字中的文字畫在游標處（蓋在後面的文字上，選定後才真的插入）
+                        if !self.large_preedit.is_empty() {
+                            let g = painter.layout_no_wrap(self.large_preedit.clone(), font.clone(), c.fg);
+                            let r = Rect::from_min_size(Pos2::new(caret_x, y), egui::vec2(g.size().x, row_h));
+                            painter.rect_filled(r, 0.0, c.panel);
+                            painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, c.accent));
+                            painter.galley(r.min, g, c.fg);
+                        }
+                    }
                     // 行號區：行號、目前行標記、書籤
                     painter.text(
                         Pos2::new(gutter.right() - 10.0, y + row_h * 0.5),
@@ -4803,6 +4921,7 @@ impl AlexCodeApp {
         self.mark_rect("large-text", scroll.inner);
         let buf = &mut self.tabs[idx];
         buf.selections = vec![sel];
+        buf.clamp_cursors();
         if let Some(line) = toggle_bookmark {
             buf.toggle_bookmark(line);
         }
@@ -6557,13 +6676,6 @@ mod tests {
         frame(&mut small, &small_ctx, vec![]);
         assert!(small.highlight_cache.is_some());
 
-        // 打字不會改動內容，狀態列說明原因
-        frame(&mut app, &ctx, vec![Event::Text("x".into())]);
-        frame(&mut app, &ctx, vec![key(Key::Backspace, Modifiers::NONE)]);
-        assert_eq!(app.tabs[0].lines[0], "line 00000 some text here");
-        assert!(!app.tabs[0].modified);
-        assert!(app.status_message.contains("大檔案檢視"), "{}", app.status_message);
-
         // 點一下把游標放到那一行
         let area = app.probe["large-text"];
         let row_h = row_height(&app, &ctx);
@@ -6592,6 +6704,105 @@ mod tests {
         frame(&mut app, &ctx, vec![key(Key::A, Modifiers::COMMAND)]);
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
         assert_eq!(out.platform_output.copied_text, app.tabs[0].edit_text());
+    }
+
+    #[test]
+    fn large_view_accepts_typing_paste_delete_and_ime() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 5000);
+        let none = Modifiers::NONE;
+        let line0 = |app: &AlexCodeApp| app.tabs[0].lines[0].clone();
+
+        frame(&mut app, &ctx, vec![Event::Text("ab".into())]);
+        assert_eq!(line0(&app), "abline 00000 some text here");
+        assert_eq!(cursor(&app), (0, 2));
+        assert!(app.tabs[0].modified);
+        frame(&mut app, &ctx, vec![key(Key::Enter, none)]);
+        assert_eq!((line0(&app).as_str(), app.tabs[0].lines[1].as_str()), ("ab", "line 00000 some text here"));
+        assert_eq!((cursor(&app), app.tabs[0].lines.len()), ((1, 0), 5002));
+        // Backspace 在行首把兩行接回來；一幀裡的多個按鍵依序處理
+        frame(&mut app, &ctx, vec![key(Key::Backspace, none)]);
+        assert_eq!((cursor(&app), app.tabs[0].lines.len()), ((0, 2), 5001));
+        frame(&mut app, &ctx, vec![key(Key::Backspace, none), key(Key::Backspace, none), key(Key::Delete, none)]);
+        assert_eq!(line0(&app), "ine 00000 some text here");
+
+        // 有選取時輸入會取代選取的文字
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::SHIFT)]);
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("X", (0, 1)));
+
+        // 貼上多行（CRLF 也可以）；Ctrl+Z 只復原這次貼上
+        frame(&mut app, &ctx, vec![Event::Paste("p1\r\np2".into())]);
+        assert_eq!((line0(&app).as_str(), app.tabs[0].lines[1].as_str(), cursor(&app)), ("Xp1", "p2", (1, 2)));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!((line0(&app).as_str(), app.tabs[0].lines.len()), ("X", 5001));
+
+        // Tab：預設插入 Tab 字元；設定成插入空白時對齊到下一個定位點
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::COMMAND), key(Key::End, none), key(Key::Tab, none)]);
+        assert_eq!(line0(&app), "X\t");
+        app.config.insert_spaces = true;
+        frame(&mut app, &ctx, vec![key(Key::Tab, none)]);
+        assert_eq!(line0(&app), "X\t  ");
+        assert!(app.editor_focused, "Tab must not move keyboard focus away");
+        // Ctrl+Backspace 刪掉前面的空白與一個字
+        frame(&mut app, &ctx, vec![key(Key::Backspace, Modifiers::COMMAND)]);
+        assert_eq!(line0(&app), "");
+
+        // 輸入法：組字期間文件不變、按鍵歸輸入法；選定後才插入
+        frame(&mut app, &ctx, vec![Event::CompositionStart, Event::CompositionUpdate("zhong".into())]);
+        frame(&mut app, &ctx, vec![key(Key::Backspace, none), key(Key::ArrowDown, none)]);
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("", (0, 0)));
+        let out = frame(&mut app, &ctx, vec![Event::CompositionEnd("中文".into())]);
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("中文", (0, 2)));
+        assert!(out.platform_output.ime.is_some(), "the IME is told where the cursor is");
+
+        // 剪下
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::SHIFT)]);
+        let out = frame(&mut app, &ctx, vec![Event::Cut]);
+        assert_eq!(out.platform_output.copied_text, "中文");
+        assert_eq!(line0(&app), "");
+
+        // Ctrl+左右鍵一次移動一個字
+        frame(&mut app, &ctx, vec![key(Key::ArrowDown, none), key(Key::ArrowRight, Modifiers::COMMAND)]);
+        assert_eq!(cursor(&app), (1, 4));
+        frame(&mut app, &ctx, vec![key(Key::ArrowRight, Modifiers::COMMAND)]);
+        assert_eq!(cursor(&app), (1, 10));
+        frame(&mut app, &ctx, vec![key(Key::ArrowLeft, Modifiers::COMMAND)]);
+        assert_eq!(cursor(&app), (1, 5));
+
+        // 從頭到尾都沒有排版整份文字，也沒有串接出全文
+        assert!(app.highlight_cache.is_none());
+        assert!(app.text_cache.1.is_empty());
+        assert_eq!(app.tabs[0].lines.len(), 5001);
+    }
+
+    #[test]
+    fn large_view_hands_over_to_the_normal_editor_when_the_document_shrinks() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 200);
+        // 全選後輸入：文件剩下一個字，小於門檻
+        frame(&mut app, &ctx, vec![key(Key::A, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![Event::Text("a".into())]);
+        assert_eq!(app.tabs[0].edit_text(), "a");
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.highlight_cache.is_some(), "the normal editor is back");
+        assert!(app.editor_focused, "and it has the keyboard focus");
+        frame(&mut app, &ctx, vec![Event::Text("b".into())]);
+        assert_eq!(app.tabs[0].edit_text(), "ab", "typing continues at the same place");
+
+        // 反過來：在一般編輯區貼上一大段，超過門檻後換成大檔案檢視，可以接著打字
+        let big: String = (0..200).map(|i| format!("pasted {i:05}\n")).collect();
+        frame(&mut app, &ctx, vec![Event::Paste(big.clone())]);
+        assert_eq!(app.tabs[0].edit_text(), format!("ab{big}"));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.highlight_cache.is_none(), "the large-file view took over");
+        assert!(app.editor_focused);
+        frame(&mut app, &ctx, vec![Event::Text("c".into())]);
+        assert_eq!(app.tabs[0].lines[200], "c", "typing continues at the end of the pasted text");
     }
 
     #[test]

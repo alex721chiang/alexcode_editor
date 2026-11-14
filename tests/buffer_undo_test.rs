@@ -112,3 +112,59 @@ fn revision_changes_only_when_text_changes() {
     b.replace_all_text("b");
     assert_ne!(b.revision(), r0);
 }
+
+fn pos(line: usize, col: usize) -> Position {
+    Position { line, col }
+}
+
+#[test]
+fn replace_range_edits_in_place_and_can_be_undone() {
+    let mut b = buf("one\ntw\u{4e2d}o\nthree");
+    // insert inside a line (after a multi-byte character)
+    b.replace_range(pos(1, 3), pos(1, 3), "X", true);
+    assert_eq!(b.edit_text(), "one\ntw\u{4e2d}Xo\nthree");
+    assert_eq!(b.selections[0].head, pos(1, 4));
+    assert!(b.modified);
+    // replace a selection that spans lines; the arguments may come in either order
+    b.replace_range(pos(2, 2), pos(0, 1), "A\r\nB\nC", false);
+    assert_eq!(b.edit_text(), "oA\nB\nCree");
+    assert_eq!(b.selections[0].head, pos(2, 1));
+    // delete: join two lines
+    b.replace_range(pos(0, 2), pos(1, 0), "", false);
+    assert_eq!(b.edit_text(), "oAB\nCree");
+    assert_eq!(b.selections[0].head, pos(0, 2));
+    // out-of-range positions are clamped; replacing text with itself records nothing
+    let rev = b.revision();
+    b.replace_range(pos(9, 9), pos(9, 9), "", false);
+    b.replace_range(pos(0, 0), pos(0, 1), "o", false);
+    assert_eq!(b.revision(), rev);
+    b.replace_range(pos(9, 9), pos(9, 9), "!", false);
+    assert_eq!(b.edit_text(), "oAB\nCree!");
+
+    assert!(b.undo());
+    assert!(b.undo());
+    assert_eq!(b.edit_text(), "oA\nB\nCree");
+    assert!(b.undo());
+    assert!(b.undo());
+    assert_eq!(b.edit_text(), "one\ntw\u{4e2d}o\nthree");
+    assert!(!b.modified);
+    assert!(b.redo());
+    assert_eq!(b.edit_text(), "one\ntw\u{4e2d}Xo\nthree");
+}
+
+#[test]
+fn replace_range_stores_only_the_lines_it_touched() {
+    let text: String = (0..100_000).map(|i| format!("line {i}\n")).collect();
+    let mut b = buf(&text);
+    b.replace_range(pos(50_000, 4), pos(50_000, 4), "Z", true);
+    b.replace_range(pos(50_000, 5), pos(50_000, 5), "\n", true);
+    assert_eq!(b.lines.len(), 100_002);
+    assert_eq!(b.lines[50_000], "lineZ");
+    assert_eq!(b.lines[50_001], " 50000");
+    assert!(b.undo_bytes() < 1024, "undo keeps {} bytes", b.undo_bytes());
+    // typing in quick succession is undone as one step
+    assert!(b.undo());
+    assert_eq!(b.lines[50_000], "line 50000");
+    assert_eq!(b.lines.len(), 100_001);
+    assert!(!b.undo());
+}
