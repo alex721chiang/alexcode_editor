@@ -2,6 +2,7 @@ pub mod app_state;
 pub mod config;
 pub mod dir_listing;
 pub mod file_watch;
+pub mod hot_exit;
 pub mod single_instance;
 pub mod path_kind;
 pub mod shell_open;
@@ -12,3 +13,4 @@ pub use shell_open::{available_shells, open_terminal, reveal_in_file_manager, Sh
 pub use app_state::{config_dir, AppState};
 pub use dir_listing::{list_dir, DirEntryInfo};
 pub use file_watch::{stamp_of, FileWatcher, Stamp};
+pub use hot_exit::{disk_signature, HotExit, UnsavedTab};

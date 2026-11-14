@@ -18,6 +18,7 @@ use crate::core::{
     available_shells, list_dir, open_terminal, reveal_in_file_manager, stamp_of, AppState, DirEntryInfo, EditorConfig,
     FileWatcher, ShellKind, Stamp,
 };
+use crate::core::{disk_signature, HotExit, UnsavedTab};
 use crate::editor::{
     decide as pair_decide, detect_and_decode, is_relevant as pair_relevant, should_delete_pair, Action as PairAction,
     sticky_headers, EditorBuffer, FileEncoding, Position, Selection,
@@ -323,6 +324,14 @@ pub struct AlexCodeApp {
     /// 欄數只在文件達到門檻時才計算。
     large_stats: ((u64, u64), (usize, usize)),
 
+    // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
+    /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
+    hot_exit_key: Vec<(u64, u64, &'static str, Option<String>)>,
+    /// 上次寫入備份檔的時間與內容大小（位元組）：內容很大時降低寫入頻率
+    hot_exit_written: (std::time::Instant, usize),
+    /// 等背景載入完成後要套回分頁的未存檔內容（依分頁 id）
+    hot_restore: HashMap<u64, UnsavedTab>,
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -572,6 +581,9 @@ impl AlexCodeApp {
             large_view_bytes: LARGE_VIEW_BYTES,
             large_edit: HashSet::new(),
             large_stats: ((0, 0), (0, 0)),
+            hot_exit_key: Vec::new(),
+            hot_exit_written: (std::time::Instant::now(), 0),
+            hot_restore: HashMap::new(),
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -598,11 +610,9 @@ impl AlexCodeApp {
         // 背景檢查已開啟的檔案是否被其他程式修改
         let ctx = cc.egui_ctx.clone();
         app.watcher = Some(FileWatcher::new(std::time::Duration::from_millis(1000), move || ctx.request_repaint()));
-        // 還原上次的主題、字型、資料夾與開啟的檔案
+        // 還原上次的主題、字型、資料夾、開啟的檔案，以及尚未存檔的內容
         app.state_path = crate::core::config_dir().map(|d| d.join("state.json"));
-        if let Some(st) = app.state_path.as_deref().and_then(AppState::load) {
-            app.apply_state(st);
-        }
+        app.restore_saved_session();
         // 命令列參數：直接開啟檔案
         for arg in std::env::args().skip(1) {
             let p = PathBuf::from(&arg);
@@ -689,6 +699,7 @@ impl AlexCodeApp {
     /// 狀態有變就寫回 `state.json`（測試中 `state_path` 為 None，不寫）
     fn persist_state(&mut self) {
         self.last_persist = std::time::Instant::now();
+        self.save_hot_exit(false);
         let Some(path) = self.state_path.clone() else { return };
         let st = self.snapshot_state();
         if st != self.saved_state && st.save(&path).is_ok() {
@@ -1093,6 +1104,14 @@ impl AlexCodeApp {
                     self.note_disk_state(idx);
                     self.request_git_head(idx);
                     self.status_message = format!("已開啟 {}", full);
+                    // 上次結束時這個檔案有未存檔的內容：檔案讀好了，現在套回去
+                    if let Some(tab) = self.hot_restore.remove(&id) {
+                        self.status_message = if self.apply_unsaved(idx, &tab) {
+                            format!("已還原未存檔的內容；注意：{} 在磁碟上已被修改，存檔會蓋掉磁碟上的版本", full)
+                        } else {
+                            format!("已開啟 {}（已還原未存檔的內容）", full)
+                        };
+                    }
                     if let Some(line) = job.goto_line {
                         let line = line.min(self.tabs[idx].lines.len() - 1);
                         self.tabs[idx].selections = vec![Selection::point(Position { line, col: 0 })];
@@ -1107,11 +1126,18 @@ impl AlexCodeApp {
                         self.select_keeps_focus = ctx.memory(|m| m.focused().is_some());
                     }
                 }
-                Err(e) => {
-                    // 與一般開檔失敗相同：不留下空白分頁
-                    self.finish_close(&[id], false);
-                    self.status_message = format!("開啟失敗：{} ({})", full, e);
-                }
+                Err(e) => match self.hot_restore.remove(&id) {
+                    // 檔案讀不到了，但上次未存檔的內容還在：留下分頁並把內容還原進去
+                    Some(tab) => {
+                        self.apply_unsaved(idx, &tab);
+                        self.status_message = format!("讀取失敗：{} ({})；已還原上次未存檔的內容", full, e);
+                    }
+                    None => {
+                        // 與一般開檔失敗相同：不留下空白分頁
+                        self.finish_close(&[id], false);
+                        self.status_message = format!("開啟失敗：{} ({})", full, e);
+                    }
+                },
             }
         }
     }
@@ -3933,7 +3959,7 @@ impl AlexCodeApp {
                 note(ui, "只影響程式碼編輯區的顯示，不會在檔案中插入換行；行號仍以檔案中的行計算。");
 
                 ui.separator();
-                let r = ui.checkbox(&mut self.config.restore_session, "啟動時還原上次開啟的檔案與資料夾");
+                let r = ui.checkbox(&mut self.config.restore_session, "啟動時還原上次開啟的檔案、資料夾與尚未存檔的內容");
                 self.mark("settings.restore_session", &r);
                 let r = ui.checkbox(&mut self.config.auto_pair, "自動配對括號與引號");
                 self.mark("settings.auto_pair", &r);
@@ -4783,12 +4809,167 @@ impl AlexCodeApp {
     }
 }
 
+/// 未存檔的內容合計超過這個大小時，備份檔最多每隔 `HOT_EXIT_SLOW_INTERVAL` 重寫一次（結束時一定會寫）
+const HOT_EXIT_SLOW_BYTES: usize = 4 * 1024 * 1024;
+const HOT_EXIT_SLOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl AlexCodeApp {
+    /// 熱結束備份檔的位置（與 `state.json` 同一個資料夾）。
+    /// 不保存狀態（測試）或關閉「啟動時還原」時為 None：既然下次不會還原，結束時就照舊詢問。
+    fn hot_exit_path(&self) -> Option<PathBuf> {
+        let state = self.state_path.as_ref()?;
+        self.config.restore_session.then(|| state.with_file_name("hot_exit.json"))
+    }
+
+    /// 把尚未存檔的分頁內容寫進備份檔。回傳 true 表示目前所有未存檔的內容都在備份裡
+    /// （結束程式時可以不必詢問）。`force` 為 false 時內容沒變就不重寫，內容很大時降低寫入頻率。
+    fn save_hot_exit(&mut self, force: bool) -> bool {
+        let Some(path) = self.hot_exit_path() else {
+            // 這次執行中才關掉「啟動時還原」：先前寫的備份不會再被還原，一併移除
+            if !self.hot_exit_key.is_empty() {
+                if let Some(state) = &self.state_path {
+                    let _ = std::fs::remove_file(state.with_file_name("hot_exit.json"));
+                }
+                self.hot_exit_key.clear();
+            }
+            return false;
+        };
+        // 還在等背景載入的還原內容也要留在備份裡，否則載入完成前結束程式就會遺失
+        let mut waiting: Vec<u64> = self.hot_restore.keys().copied().collect();
+        waiting.sort_unstable();
+        let mut key: Vec<_> = self
+            .tabs
+            .iter()
+            .filter(|b| b.modified)
+            .map(|b| (b.id, b.revision(), b.encoding.label(), b.file_path.clone()))
+            .collect();
+        key.extend(waiting.iter().map(|id| (*id, u64::MAX, "", None)));
+        if !force {
+            if key == self.hot_exit_key {
+                return true;
+            }
+            let (at, size) = self.hot_exit_written;
+            if size > HOT_EXIT_SLOW_BYTES && at.elapsed() < HOT_EXIT_SLOW_INTERVAL {
+                return false;
+            }
+        }
+        let active_id = self.tabs.get(self.active_tab_idx).map(|b| b.id);
+        let mut tabs: Vec<UnsavedTab> = self
+            .tabs
+            .iter()
+            .filter(|b| b.modified)
+            .map(|b| {
+                let head = b.selections[0].head;
+                UnsavedTab {
+                    path: b.file_path.clone(),
+                    text: b.edit_text(),
+                    crlf: b.line_ending == "\r\n",
+                    encoding: b.encoding.label().to_string(),
+                    cursor_line: head.line,
+                    cursor_col: head.col,
+                    active: Some(b.id) == active_id,
+                    // 這份內容是以磁碟上的哪個版本為基礎（上次讀寫時記下的，不另外查詢磁碟）
+                    disk: disk_signature(self.disk_stamps.get(&b.id).copied().flatten()),
+                }
+            })
+            .collect();
+        tabs.extend(waiting.iter().filter_map(|id| self.hot_restore.get(id).cloned()));
+        let size = tabs.iter().map(|t| t.text.len()).sum();
+        match (HotExit { tabs }).save(&path) {
+            Ok(()) => {
+                self.hot_exit_key = key;
+                self.hot_exit_written = (std::time::Instant::now(), size);
+                true
+            }
+            Err(e) => {
+                self.status_message = format!("未存檔內容的備份寫入失敗：{}", e);
+                false
+            }
+        }
+    }
+
+    /// 啟動時還原上次的狀態：主題、設定、資料夾、開啟的檔案，以及尚未存檔的內容
+    fn restore_saved_session(&mut self) {
+        if let Some(st) = self.state_path.as_deref().and_then(AppState::load) {
+            self.apply_state(st);
+        }
+        if let Some(saved) = self.hot_exit_path().as_deref().and_then(HotExit::load) {
+            self.restore_hot_exit(saved);
+        }
+    }
+
+    /// 還原上次結束時尚未存檔的內容（在 `apply_state` 重新開啟檔案之後呼叫）
+    fn restore_hot_exit(&mut self, saved: HotExit) {
+        let recent = self.recent_files.clone(); // 還原不該改變「最近開啟」的順序
+        let (mut active, mut count, mut changed) = (None, 0, Vec::new());
+        for tab in saved.tabs {
+            let idx = match tab.path.as_deref().filter(|p| Path::new(p).is_absolute()) {
+                Some(p) => {
+                    let find = |app: &Self| app.tabs.iter().position(|b| b.file_path.as_deref().is_some_and(|f| same_file(f, p)));
+                    if find(self).is_none() {
+                        self.open_path(Path::new(p)); // 檔案已經不在磁碟上時不會多出分頁
+                    }
+                    find(self)
+                }
+                // 未命名的分頁每次都另開一個；歡迎頁這類有名字但不在磁碟上的分頁套回原本那一個
+                None => tab.path.as_ref().and_then(|p| self.tabs.iter().position(|b| !b.modified && b.file_path.as_ref() == Some(p))),
+            };
+            let idx = idx.unwrap_or_else(|| {
+                let mut b = EditorBuffer::new();
+                b.file_path = tab.path.clone();
+                self.tabs.push(b);
+                self.tabs.len() - 1
+            });
+            let id = self.tabs[idx].id;
+            if tab.active {
+                active = Some(id);
+            }
+            count += 1;
+            if self.loading.contains_key(&id) {
+                self.hot_restore.insert(id, tab); // 內容還在背景載入：載入完成後由 poll_loading 套回去
+            } else if self.apply_unsaved(idx, &tab) {
+                changed.push(Self::tab_title(&self.tabs[idx]));
+            }
+        }
+        self.recent_files = recent;
+        if count == 0 {
+            return;
+        }
+        if let Some(i) = active.and_then(|id| self.tabs.iter().position(|b| b.id == id)) {
+            self.active_tab_idx = i;
+            self.sync_cursor_to_editor();
+            self.scroll_to_cursor = true;
+        }
+        self.status_message = format!("已還原上次未存檔的內容（{} 個分頁）", count);
+        if !changed.is_empty() {
+            self.status_message +=
+                &format!("；注意：{} 在磁碟上已被修改或刪除，存檔會蓋掉磁碟上的版本", changed.join("、"));
+        }
+    }
+
+    /// 把保存的未存檔內容套到分頁上（成為一筆可以復原的修改）。
+    /// 回傳磁碟上的檔案是否已經不是保存當時的那個版本。
+    fn apply_unsaved(&mut self, idx: usize, tab: &UnsavedTab) -> bool {
+        let buf = &mut self.tabs[idx];
+        buf.replace_all_text(&tab.text);
+        if let Some(e) = FileEncoding::ALL.into_iter().find(|e| e.label() == tab.encoding) {
+            buf.set_encoding(e);
+        }
+        buf.line_ending = if tab.crlf { "\r\n" } else { "\n" };
+        buf.selections = vec![Selection::point(Position { line: tab.cursor_line, col: tab.cursor_col })];
+        buf.clamp_cursors();
+        let now = disk_signature(self.disk_stamps.get(&buf.id).copied().flatten());
+        tab.disk.is_some() && now != tab.disk
+    }
+}
+
 impl eframe::App for AlexCodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui_frame(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_hot_exit(true);
         self.persist_state();
     }
 }
@@ -4869,7 +5050,9 @@ impl AlexCodeApp {
         // 結束程式（視窗 X、Alt+F4、選單「結束」）：有未儲存的變更時攔下並詢問
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
             self.commit_md_edit();
-            if self.tabs.iter().any(|b| b.modified) {
+            // 熱結束：未存檔的內容已經寫進備份、下次啟動會還原時，直接結束不必詢問。
+            // 備份寫不進去或功能關閉（不還原工作階段）時照舊詢問。
+            if self.tabs.iter().any(|b| b.modified) && !self.save_hot_exit(true) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 let ids = self.tabs.iter().map(|b| b.id).collect();
                 self.request_close(ids, true);
@@ -6171,6 +6354,169 @@ mod tests {
         click(&mut app, &ctx, row.right_center() - egui::vec2(40.0, 0.0));
         settle(&mut app, &ctx);
         assert_eq!(cursor_line(&app), 550);
+    }
+
+    /// 送出「關閉視窗」並跑一幀；回傳程式是否攔下了這次關閉（跳出詢問）
+    fn close_window(app: &mut AlexCodeApp, ctx: &egui::Context) -> bool {
+        let out = frame_with(app, ctx, |i| {
+            i.viewports.entry(ViewportId::ROOT).or_default().events.push(ViewportEvent::Close);
+        });
+        out.viewport_output[&ViewportId::ROOT].commands.contains(&ViewportCommand::CancelClose)
+    }
+
+    /// 「重新啟動」：新的 App 從同一個設定資料夾還原
+    fn restart(state_file: &Path) -> AlexCodeApp {
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.to_path_buf());
+        app.restore_saved_session();
+        app
+    }
+
+    fn tab_of<'a>(app: &'a AlexCodeApp, path: &Path) -> &'a EditorBuffer {
+        let full = path.to_string_lossy();
+        app.tabs.iter().find(|b| b.file_path.as_deref() == Some(full.as_ref())).expect("the file's tab is open")
+    }
+
+    #[test]
+    fn hot_exit_keeps_unsaved_tabs_across_restarts() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(&dir, "a.rs", "fn a() {}\r\n");
+        let clean = write(&dir, "clean.rs", "fn clean() {}");
+        let state_file = dir.path().join("cfg").join("state.json");
+        let backup = dir.path().join("cfg").join("hot_exit.json");
+
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.open_path(&a);
+        app.open_path(&clean);
+        app.tabs[0].replace_all_text("fn a() { edited }\n");
+        app.new_tab();
+        let untitled = app.active_tab_idx;
+        app.tabs[untitled].replace_all_text("scratch notes\n第二行");
+        app.tabs[untitled].selections = vec![Selection::point(Position { line: 1, col: 2 })];
+
+        // 關閉視窗：不詢問，未存檔的內容寫進備份；磁碟上的檔案不動
+        assert!(!close_window(&mut app, &ctx), "exit is not interrupted");
+        assert!(app.pending_close.is_none());
+        app.save_hot_exit(true); // eframe 結束時呼叫的 on_exit
+        app.persist_state();
+        assert!(backup.exists());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "fn a() {}\r\n");
+
+        let mut app2 = restart(&state_file);
+        assert_eq!(app2.tabs.len(), 3, "two files and the untitled tab");
+        let ra = tab_of(&app2, &a);
+        assert_eq!(ra.edit_text(), "fn a() { edited }\n");
+        assert!(ra.modified, "the restored content is still unsaved");
+        assert_eq!(ra.line_ending, "\r\n");
+        assert!(!tab_of(&app2, &clean).modified);
+        let ru = &app2.tabs[app2.active_tab_idx];
+        assert_eq!(ru.file_path.as_deref(), Some("untitled_3.txt"), "the untitled tab was the active one");
+        assert_eq!(ru.edit_text(), "scratch notes\n第二行");
+        assert!(ru.modified);
+        assert_eq!((ru.selections[0].head.line, ru.selections[0].head.col), (1, 2));
+        assert!(app2.status_message.contains("已還原") && !app2.status_message.contains("注意"), "{}", app2.status_message);
+
+        // 復原會回到磁碟上的內容，並且不再算是有修改
+        let ia = app2.tabs.iter().position(|b| b.file_path.as_deref() == Some(a.to_string_lossy().as_ref())).unwrap();
+        assert!(app2.tabs[ia].undo());
+        assert_eq!(app2.tabs[ia].edit_text(), "fn a() {}\n");
+        assert!(!app2.tabs[ia].modified);
+        assert!(app2.tabs[ia].redo());
+
+        // 存檔之後那個分頁就不在備份裡了；全部存檔 / 關掉之後備份檔消失
+        assert!(app2.save_tab(ia, false));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "fn a() { edited }\r\n");
+        app2.persist_state();
+        let left = HotExit::load(&backup).unwrap();
+        assert_eq!(left.tabs.len(), 1);
+        assert_eq!(left.tabs[0].path.as_deref(), Some("untitled_3.txt"));
+        let id = app2.tabs[app2.active_tab_idx].id;
+        app2.finish_close(&[id], false); // 相當於在詢問視窗選「不儲存」
+        app2.persist_state();
+        assert!(!backup.exists(), "nothing unsaved is left");
+        assert_eq!(restart(&state_file).tabs.len(), 2);
+    }
+
+    #[test]
+    fn exit_still_asks_when_unsaved_content_would_not_be_restored() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("cfg").join("state.json");
+        let backup = dir.path().join("cfg").join("hot_exit.json");
+
+        // 關閉「啟動時還原」：下次不會還原，所以結束時照舊詢問，也不留下備份
+        let mut app = app_with(&ctx, "fn main() {}");
+        app.state_path = Some(state_file.clone());
+        app.tabs[0].replace_all_text("changed");
+        app.persist_state();
+        assert!(backup.exists());
+        app.config.restore_session = false;
+        app.persist_state();
+        assert!(!backup.exists(), "the backup written earlier in this session is removed");
+        assert!(close_window(&mut app, &ctx), "close must be cancelled");
+        assert!(app.pending_close.as_ref().is_some_and(|p| p.exit));
+
+        // 備份寫不進去（設定資料夾的位置被一個檔案佔住）：同樣詢問，並在狀態列說明
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, "not a folder").unwrap();
+        let mut app = app_with(&ctx, "fn main() {}");
+        app.state_path = Some(blocked.join("state.json"));
+        app.tabs[0].replace_all_text("changed");
+        assert!(close_window(&mut app, &ctx));
+        assert!(app.status_message.contains("備份寫入失敗"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn hot_exit_restores_into_background_loads_and_missing_files() {
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let state_file = dir.path().join("cfg").join("state.json");
+        // 約 2.6 MB：會在背景載入
+        let big = write(&dir, "big.log", &"0123456789 abcdefghij 0123456789 abcdefghi\n".repeat(60_000));
+        let gone = write(&dir, "gone.txt", "on disk");
+        let touched = write(&dir, "touched.txt", "old");
+
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.open_path(&big);
+        pump_until(&mut app, &ctx, "background load", |app| app.loading.is_empty());
+        app.open_path(&gone);
+        app.open_path(&touched);
+        for b in &mut app.tabs {
+            b.insert_text("EDIT ");
+        }
+        app.save_hot_exit(true);
+        app.persist_state();
+
+        // 兩次啟動之間：一個檔案被刪掉，一個被其他程式改過
+        std::fs::remove_file(&gone).unwrap();
+        std::fs::write(&touched, "changed by another program").unwrap();
+
+        let mut app2 = restart(&state_file);
+        assert_eq!(app2.tabs.len(), 3);
+        // 不在磁碟上的檔案：分頁與內容都還在，存檔會重新建立它
+        let g = tab_of(&app2, &gone);
+        assert_eq!(g.edit_text(), "EDIT on disk");
+        assert!(g.modified);
+        assert_eq!(tab_of(&app2, &touched).edit_text(), "EDIT old");
+        assert!(app2.status_message.contains("注意") && app2.status_message.contains("touched.txt"), "{}", app2.status_message);
+
+        // 大檔案還在背景載入：這時結束，備份裡仍然有它
+        assert!(!app2.loading.is_empty());
+        assert!(!tab_of(&app2, &big).modified);
+        app2.save_hot_exit(true);
+        let kept = HotExit::load(&state_file.with_file_name("hot_exit.json")).unwrap();
+        assert!(kept.tabs.iter().any(|t| t.path.as_deref() == Some(big.to_string_lossy().as_ref()) && t.text.starts_with("EDIT 0123")));
+
+        // 載入完成後內容套回去
+        pump_until(&mut app2, &ctx, "background load", |app| app.loading.is_empty());
+        let b = tab_of(&app2, &big);
+        assert!(b.edit_text().starts_with("EDIT 0123456789"));
+        assert_eq!(b.lines.len(), 60_001);
+        assert!(b.modified);
+        assert!(app2.hot_restore.is_empty());
     }
 
     /// 開一個超過大檔案門檻（測試中調低）的分頁：每行都是 "line NNNNN some text here"，最後有一個空行
