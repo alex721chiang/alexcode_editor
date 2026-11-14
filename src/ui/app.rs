@@ -314,6 +314,15 @@ pub struct AlexCodeApp {
     /// 下一幀把選取的那段變更捲到畫面上
     diff_scroll_focus: bool,
 
+    // ---- 大檔案檢視 ----
+    /// 文件達到幾個位元組就改用大檔案檢視（測試會調低）
+    large_view_bytes: usize,
+    /// 使用者選擇改用一般編輯區的大檔案分頁（依 id）
+    large_edit: HashSet<u64>,
+    /// 目前分頁的大小統計快取：鍵為 (分頁 id, 內容版本)，值為 (位元組數, 最寬一行的欄數)。
+    /// 欄數只在文件達到門檻時才計算。
+    large_stats: ((u64, u64), (usize, usize)),
+
     // ---- 設定對話框 ----
     show_settings: bool,
     /// 測試用：上一幀具名控制項在畫面上的位置（讓無視窗測試能點到它們）
@@ -431,6 +440,34 @@ enum TabAction {
 /// 超過此大小的文件不做語法高亮（仍可編輯與搜尋）
 const HIGHLIGHT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// 達到這個大小的文件改用大檔案檢視（只排版畫面上看得到的行）。
+/// 一般編輯區把整份文字交給 egui 排成一個 Galley，每個位元組的文字約佔 200 位元組記憶體
+/// （`tests/memory_report.rs` 的量測：4 MB 的檔案約 790 MB、29 MB 約 5.7 GB）。
+const LARGE_VIEW_BYTES: usize = 4 * 1024 * 1024;
+
+/// 大檔案檢視中一行最多顯示幾個字元：更長的行只顯示開頭，避免單獨一行就排出巨大的版面
+const LARGE_VIEW_MAX_COLS: usize = 20_000;
+
+/// 一行在等寬字型下大約佔幾欄（全形字算 2 欄、Tab 算 4 欄）；只看前 `LARGE_VIEW_MAX_COLS` 個字元
+fn display_cols(line: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    if line.len() <= LARGE_VIEW_MAX_COLS && line.is_ascii() && !line.contains('\t') {
+        return line.len();
+    }
+    line.chars().take(LARGE_VIEW_MAX_COLS).map(|ch| if ch == '\t' { 4 } else { ch.width().unwrap_or(1).max(1) }).sum()
+}
+
+/// 一行在大檔案檢視中實際顯示的部分，以及它是否被截短
+fn shown_part(line: &str) -> (&str, bool) {
+    if line.len() <= LARGE_VIEW_MAX_COLS {
+        return (line, false);
+    }
+    match line.char_indices().nth(LARGE_VIEW_MAX_COLS) {
+        Some((byte, _)) => (&line[..byte], true),
+        None => (line, false),
+    }
+}
+
 impl Default for AlexCodeApp {
     fn default() -> Self {
         Self::new()
@@ -532,6 +569,9 @@ impl AlexCodeApp {
             diff_cache: None,
             diff_focus: 0,
             diff_scroll_focus: false,
+            large_view_bytes: LARGE_VIEW_BYTES,
+            large_edit: HashSet::new(),
+            large_stats: ((0, 0), (0, 0)),
             show_settings: false,
             #[cfg(test)]
             probe: HashMap::new(),
@@ -1049,6 +1089,7 @@ impl AlexCodeApp {
                     self.filter_cache.0 = None;
                     self.git_marks.0 = (0, 0);
                     self.sticky_key = None;
+                    self.large_stats.0 = (0, 0);
                     self.note_disk_state(idx);
                     self.request_git_head(idx);
                     self.status_message = format!("已開啟 {}", full);
@@ -3049,6 +3090,10 @@ impl AlexCodeApp {
         if idx >= self.tabs.len() {
             return;
         }
+        if self.uses_large_view(idx) {
+            self.large_view(ui, c, pal);
+            return;
+        }
         let lang = self.tab_lang(idx);
         let font = FontId::monospace(self.config.font_size);
         let find = if self.show_find_bar { self.find_bar_text.clone() } else { String::new() };
@@ -4379,6 +4424,361 @@ impl AlexCodeApp {
                 self.finish_close(&p.ids, p.exit);
             }
             None => {}
+        }
+    }
+}
+
+impl AlexCodeApp {
+    /// 這個分頁是否以大檔案檢視顯示（順便更新它的大小統計）
+    fn uses_large_view(&mut self, idx: usize) -> bool {
+        let Some(buf) = self.tabs.get(idx) else { return false };
+        let key = (buf.id, buf.revision());
+        if self.large_stats.0 != key {
+            let bytes = buf.lines.iter().map(|l| l.len() + 1).sum::<usize>();
+            let large = bytes >= self.large_view_bytes && !self.large_edit.contains(&buf.id);
+            let cols = if large { buf.lines.iter().map(|l| display_cols(l)).max().unwrap_or(0) } else { 0 };
+            self.large_stats = (key, (bytes, cols));
+        }
+        self.large_stats.1 .0 >= self.large_view_bytes && !self.large_edit.contains(&buf.id)
+    }
+
+    /// TextEdit 字元索引 → (行, 列)（`char_index_of` 的反向）
+    fn position_of(buf: &EditorBuffer, mut index: usize) -> Position {
+        for (line, l) in buf.lines.iter().enumerate() {
+            let n = l.chars().count();
+            if index <= n {
+                return Position { line, col: index };
+            }
+            index -= n + 1;
+        }
+        let line = buf.lines.len().saturating_sub(1);
+        Position { line, col: buf.line_len(line) }
+    }
+
+    /// 選取範圍內的文字（行與行之間以 `\n` 連接）
+    fn selection_text(buf: &EditorBuffer, sel: Selection) -> String {
+        let (a, b) = (sel.start(), sel.end());
+        let piece = |line: usize, from: usize, to: Option<usize>| -> String {
+            let l = buf.lines.get(line).map_or("", |s| s.as_str());
+            match to {
+                Some(to) => l.chars().skip(from).take(to.saturating_sub(from)).collect(),
+                None => l.chars().skip(from).collect(),
+            }
+        };
+        if a.line == b.line {
+            return piece(a.line, a.col, Some(b.col));
+        }
+        let mut out = piece(a.line, a.col, None);
+        for l in &buf.lines[a.line + 1..b.line] {
+            out.push('\n');
+            out.push_str(l);
+        }
+        out.push('\n');
+        out.push_str(&piece(b.line, 0, Some(b.col)));
+        out
+    }
+
+    /// 大檔案檢視：只排版畫面上看得到的行，記憶體用量與檔案大小同一個量級。
+    /// 可以捲動、移動游標、選取、複製、尋找、跳至行、設書籤；不能直接打字（選單的行操作與取代仍然有效）。
+    fn large_view(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
+        use egui::Event;
+        let idx = self.active_tab_idx;
+        let tab_id = self.tabs[idx].id;
+        let (bytes, max_cols) = self.large_stats.1;
+        let view_id = egui::Id::new(("alexcode-large-view", tab_id));
+        let font = FontId::monospace(self.config.font_size);
+        let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
+        let row_h = ui.fonts(|f| f.row_height(&font));
+        let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
+        let line_count = self.tabs[idx].lines.len();
+        let last_line = line_count.saturating_sub(1);
+        let gutter_w = line_count.to_string().len().max(3) as f32 * char_w + 30.0;
+        // 一般編輯區為其他分頁留下的排版結果已經用不到了
+        self.highlight_cache = None;
+        self.sticky_rows.clear();
+        self.sticky_below = 0;
+
+        // 說明列：為什麼不能打字，以及怎麼換回一般編輯區
+        let mut switch = false;
+        egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 4.0)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let size = bytes as f64 / (1024.0 * 1024.0);
+                ui.label(
+                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體，不能直接打字"))
+                        .size(12.0)
+                        .color(c.fg_dim),
+                );
+                let need = size * 200.0;
+                let need = if need >= 1024.0 { format!("{:.1} GB", need / 1024.0) } else { format!("{need:.0} MB") };
+                let resp = ui.button(RichText::new(format!("改用一般編輯區（約需 {need} 記憶體）")).size(12.0));
+                switch = resp.clicked();
+                self.mark("large-edit", &resp);
+                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+            });
+        });
+        if switch {
+            self.large_edit.insert(tab_id);
+            self.sync_cursor_to_editor();
+            self.scroll_to_cursor = true;
+            ui.ctx().request_repaint();
+            return;
+        }
+
+        // 套用待定的游標選取（尋找 / 跳至行 / 行操作）：字元索引換算成 (行, 列)
+        if let Some((a, b)) = self.pending_select.take() {
+            let buf = &mut self.tabs[idx];
+            let (anchor, head) = (Self::position_of(buf, a), Self::position_of(buf, b));
+            buf.selections = vec![Selection { anchor, head }];
+            if !std::mem::take(&mut self.select_keeps_focus) {
+                ui.memory_mut(|m| m.request_focus(view_id));
+            }
+        }
+        if std::mem::take(&mut self.focus_editor) {
+            ui.memory_mut(|m| m.request_focus(view_id));
+        }
+        let scroll_to_cursor = std::mem::take(&mut self.scroll_to_cursor);
+        let find = if self.show_find_bar { self.find_bar_text.clone() } else { String::new() };
+        let fopts = self.find_opts;
+        let has_focus = ui.memory(|m| m.has_focus(view_id));
+        self.editor_focused = has_focus;
+
+        // ---- 鍵盤：移動游標、選取、複製 ----
+        let mut sel = self.tabs[idx].selections[0];
+        let mut moved = false;
+        if has_focus {
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    view_id,
+                    egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false },
+                )
+            });
+            let page = ((ui.available_height() / row_h) as usize).max(2) - 1;
+            let events = ui.input(|i| i.events.clone());
+            let (mut copy, mut typed) = (false, false);
+            let buf = &self.tabs[idx];
+            for ev in &events {
+                match ev {
+                    Event::Copy => copy = true,
+                    Event::Cut | Event::Paste(_) => typed = true,
+                    Event::Text(t) if !t.is_empty() => typed = true,
+                    Event::Key { key, pressed: true, modifiers, .. } if !modifiers.alt => {
+                        let mut head = sel.head;
+                        let mut all = false;
+                        let handled = match key {
+                            Key::ArrowUp => {
+                                head.line = head.line.saturating_sub(1);
+                                true
+                            }
+                            Key::ArrowDown => {
+                                head.line = (head.line + 1).min(last_line);
+                                true
+                            }
+                            Key::PageUp => {
+                                head.line = head.line.saturating_sub(page);
+                                true
+                            }
+                            Key::PageDown => {
+                                head.line = (head.line + page).min(last_line);
+                                true
+                            }
+                            Key::ArrowLeft => {
+                                if head.col > 0 {
+                                    head.col -= 1;
+                                } else if head.line > 0 {
+                                    head.line -= 1;
+                                    head.col = buf.line_len(head.line);
+                                }
+                                true
+                            }
+                            Key::ArrowRight => {
+                                if head.col < buf.line_len(head.line) {
+                                    head.col += 1;
+                                } else if head.line < last_line {
+                                    head.line += 1;
+                                    head.col = 0;
+                                }
+                                true
+                            }
+                            Key::Home => {
+                                if modifiers.command {
+                                    head.line = 0;
+                                }
+                                head.col = 0;
+                                true
+                            }
+                            Key::End => {
+                                if modifiers.command {
+                                    head.line = last_line;
+                                }
+                                head.col = buf.line_len(head.line);
+                                true
+                            }
+                            Key::A if modifiers.command => {
+                                sel.anchor = Position { line: 0, col: 0 };
+                                head = Position { line: last_line, col: buf.line_len(last_line) };
+                                all = true;
+                                true
+                            }
+                            Key::Enter | Key::Backspace | Key::Delete | Key::Tab => {
+                                typed = true;
+                                false
+                            }
+                            _ => false,
+                        };
+                        if handled {
+                            head.col = head.col.min(buf.line_len(head.line));
+                            sel.head = head;
+                            if !(modifiers.shift || all) {
+                                sel.anchor = head;
+                            }
+                            moved = !all;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if copy && !sel.is_empty() {
+                ui.ctx().copy_text(Self::selection_text(buf, sel));
+            }
+            if typed {
+                self.status_message = "大檔案檢視不能直接輸入：按編輯區上方的「改用一般編輯區」後再編輯".to_string();
+            }
+        }
+
+        let mut toggle_bookmark = None;
+        let scroll = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]).show_viewport(
+            ui,
+            |ui, viewport| {
+                let buf = &self.tabs[idx];
+                let text_w = (max_cols.min(LARGE_VIEW_MAX_COLS) + 8) as f32 * char_w;
+                let size = egui::vec2(
+                    (gutter_w + 10.0 + text_w).max(viewport.width()),
+                    (line_count as f32 * row_h + 44.0).max(viewport.height()),
+                );
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                let resp = ui.interact(rect, view_id, Sense::click_and_drag());
+                let text_x = rect.left() + gutter_w + 10.0;
+                let y_of = |line: usize| rect.top() + 4.0 + line as f32 * row_h;
+                let plain = |ui: &egui::Ui, line: usize, hits: &[(usize, usize)]| {
+                    let (shown, _) = shown_part(buf.lines.get(line).map_or("", |s| s.as_str()));
+                    ui.fonts(|f| f.layout_job(highlight_ranges(shown, Lang::Plain, pal, font.clone(), hits)))
+                };
+                let x_of = |galley: &egui::Galley, col: usize| galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(col))).left();
+                let pos_at = |ui: &egui::Ui, p: Pos2| {
+                    let line = (((p.y - rect.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line);
+                    let col = plain(ui, line, &[]).cursor_from_pos(egui::vec2(p.x - text_x, 0.0)).ccursor.index;
+                    Position { line, col }
+                };
+
+                // ---- 滑鼠：點一下放游標（Shift 延伸選取）、拖曳選取、點行號區切換書籤 ----
+                let in_gutter = |p: Pos2| p.x < rect.left() + gutter_w;
+                let mut dragging = false;
+                if resp.clicked() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        if in_gutter(p) {
+                            toggle_bookmark = Some((((p.y - rect.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line));
+                        } else {
+                            sel.head = pos_at(ui, p);
+                            if !ui.input(|i| i.modifiers.shift) {
+                                sel.anchor = sel.head;
+                            }
+                        }
+                    }
+                    ui.memory_mut(|m| m.request_focus(view_id));
+                }
+                if resp.drag_started() {
+                    if let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|p| !in_gutter(*p)) {
+                        sel.anchor = pos_at(ui, origin);
+                        sel.head = sel.anchor;
+                    }
+                    ui.memory_mut(|m| m.request_focus(view_id));
+                }
+                if resp.dragged() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        sel.head = pos_at(ui, p);
+                        dragging = true;
+                    }
+                }
+
+                // ---- 只畫看得到的行 ----
+                let clip = ui.clip_rect();
+                let painter = ui.painter();
+                let first = (((viewport.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line);
+                let last = (((viewport.bottom() - 4.0) / row_h).ceil().max(0.0) as usize).min(line_count);
+                let gutter = Rect::from_min_max(Pos2::new(rect.left(), clip.top()), Pos2::new(rect.left() + gutter_w, clip.bottom()));
+                painter.rect_filled(gutter, 0.0, c.panel);
+                painter.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0_f32, c.border));
+                let (s0, s1) = (sel.start(), sel.end());
+                for line in first..last {
+                    let y = y_of(line);
+                    let (shown, cut) = shown_part(&buf.lines[line]);
+                    let hits = if find.is_empty() { Vec::new() } else { find_all(shown, &find, &fopts).unwrap_or_default() };
+                    let galley = plain(ui, line, &hits);
+                    let active = line == sel.head.line;
+                    if active {
+                        let r = Rect::from_min_max(Pos2::new(gutter.right(), y), Pos2::new(clip.right().max(rect.right()), y + row_h));
+                        painter.rect_filled(r, 0.0, c.current_line);
+                    }
+                    if !sel.is_empty() && (s0.line..=s1.line).contains(&line) {
+                        let a = if line == s0.line { x_of(&galley, s0.col) } else { 0.0 };
+                        // 選到下一行時，把這一行的換行也標出來
+                        let b = if line == s1.line { x_of(&galley, s1.col) } else { galley.size().x + char_w * 0.5 };
+                        let r = Rect::from_min_max(Pos2::new(text_x + a, y), Pos2::new(text_x + b, y + row_h));
+                        painter.rect_filled(r, 0.0, c.sel_bg);
+                    }
+                    if cut {
+                        painter.text(
+                            Pos2::new(text_x + galley.size().x + char_w, y + row_h * 0.5),
+                            Align2::LEFT_CENTER,
+                            format!("…（這一行共 {} 個字元，只顯示前 {}）", buf.line_len(line), LARGE_VIEW_MAX_COLS),
+                            num_font.clone(),
+                            c.faint,
+                        );
+                    }
+                    if active && has_focus {
+                        let x = text_x + x_of(&galley, sel.head.col);
+                        painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), egui::vec2(1.5, row_h)), 0.0, c.accent);
+                    }
+                    painter.galley(Pos2::new(text_x, y), galley, c.fg);
+                    // 行號區：行號、目前行標記、書籤
+                    painter.text(
+                        Pos2::new(gutter.right() - 10.0, y + row_h * 0.5),
+                        Align2::RIGHT_CENTER,
+                        (line + 1).to_string(),
+                        num_font.clone(),
+                        if active { c.accent } else { c.faint },
+                    );
+                    if active {
+                        painter.rect_filled(Rect::from_min_size(Pos2::new(gutter.left(), y), egui::vec2(2.0, row_h)), 0.0, c.accent);
+                    }
+                    if buf.bookmarks.contains(&line) {
+                        painter.circle_filled(Pos2::new(gutter.left() + 9.0, y + row_h * 0.5), 3.5, c.accent2);
+                    }
+                }
+
+                // 游標移動後讓它留在畫面上；尋找 / 跳至行則把那一行帶到畫面中央
+                if scroll_to_cursor || moved || dragging {
+                    let x = text_x + x_of(&plain(ui, sel.head.line, &[]), sel.head.col);
+                    let r = Rect::from_min_size(Pos2::new(x, y_of(sel.head.line)), egui::vec2(char_w, row_h));
+                    if scroll_to_cursor {
+                        ui.scroll_to_rect(r.expand2(egui::vec2(40.0, row_h * 2.0)), Some(Align::Center));
+                    } else {
+                        // 行號區佔掉左邊一段：往左多留一點，游標才不會被它蓋住
+                        let r = Rect::from_min_max(Pos2::new(r.left() - gutter_w - 10.0 - char_w * 4.0, r.top()), Pos2::new(r.right() + char_w * 4.0, r.bottom()));
+                        ui.scroll_to_rect(r, None);
+                    }
+                    if dragging {
+                        ui.ctx().request_repaint();
+                    }
+                }
+                Rect::from_min_max(Pos2::new(text_x, rect.top() + 4.0), rect.max)
+            },
+        );
+        self.mark_rect("large-text", scroll.inner);
+        let buf = &mut self.tabs[idx];
+        buf.selections = vec![sel];
+        if let Some(line) = toggle_bookmark {
+            buf.toggle_bookmark(line);
         }
     }
 }
@@ -5771,6 +6171,177 @@ mod tests {
         click(&mut app, &ctx, row.right_center() - egui::vec2(40.0, 0.0));
         settle(&mut app, &ctx);
         assert_eq!(cursor_line(&app), 550);
+    }
+
+    /// 開一個超過大檔案門檻（測試中調低）的分頁：每行都是 "line NNNNN some text here"，最後有一個空行
+    fn large_app(ctx: &egui::Context, lines: usize) -> AlexCodeApp {
+        let mut app = AlexCodeApp::new();
+        app.large_view_bytes = 1000;
+        let text: String = (0..lines).map(|i| format!("line {i:05} some text here\n")).collect();
+        let mut b = EditorBuffer::from_text(&text);
+        b.file_path = Some("big.log".into());
+        app.tabs = vec![b];
+        app.active_tab_idx = 0;
+        app.pending_select = Some((0, 0));
+        frame(&mut app, ctx, vec![]);
+        frame(&mut app, ctx, vec![]);
+        app
+    }
+
+    fn row_height(app: &AlexCodeApp, ctx: &egui::Context) -> f32 {
+        ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)))
+    }
+
+    /// 大檔案檢視中某一行目前在畫面上的 y 座標（行的上緣）
+    fn large_row_y(app: &AlexCodeApp, ctx: &egui::Context, line: usize) -> f32 {
+        app.probe["large-text"].top() + line as f32 * row_height(app, ctx)
+    }
+
+    #[test]
+    fn large_files_use_a_view_that_only_lays_out_visible_lines() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 5000);
+        assert!(app.highlight_cache.is_none(), "the whole text is never laid out");
+        assert!(app.text_cache.1.is_empty(), "no joined copy of the text is kept");
+        assert!(app.editor_focused, "the view takes keyboard focus like the editor does");
+
+        // 小於門檻的文件仍然用一般編輯區
+        let small_ctx = self::ctx();
+        let mut small = app_with(&small_ctx, "fn main() {}");
+        frame(&mut small, &small_ctx, vec![]);
+        assert!(small.highlight_cache.is_some());
+
+        // 打字不會改動內容，狀態列說明原因
+        frame(&mut app, &ctx, vec![Event::Text("x".into())]);
+        frame(&mut app, &ctx, vec![key(Key::Backspace, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].lines[0], "line 00000 some text here");
+        assert!(!app.tabs[0].modified);
+        assert!(app.status_message.contains("大檔案檢視"), "{}", app.status_message);
+
+        // 點一下把游標放到那一行
+        let area = app.probe["large-text"];
+        let row_h = row_height(&app, &ctx);
+        click(&mut app, &ctx, Pos2::new(area.left() + 1.0, area.top() + row_h * 2.5));
+        assert_eq!(cursor(&app), (2, 0));
+
+        // 鍵盤移動游標；Shift 延伸選取，Ctrl+C 複製選取的文字
+        frame(&mut app, &ctx, vec![key(Key::ArrowDown, Modifiers::NONE), key(Key::End, Modifiers::NONE)]);
+        assert_eq!(cursor(&app), (3, 25));
+        frame(&mut app, &ctx, vec![key(Key::ArrowLeft, Modifiers::SHIFT), key(Key::ArrowLeft, Modifiers::SHIFT)]);
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, "re");
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::NONE), key(Key::ArrowDown, Modifiers::SHIFT)]);
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, "line 00003 some text here\n");
+
+        // Ctrl+End 到檔尾，畫面跟著捲過去
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::COMMAND)]);
+        settle(&mut app, &ctx);
+        assert_eq!(cursor(&app), (5000, 0));
+        let y = large_row_y(&app, &ctx, 5000);
+        assert!(y > 0.0 && y < 800.0, "the last line is on screen (y = {y})");
+        assert!(app.highlight_cache.is_none());
+
+        // 全選後複製得到整份文字
+        frame(&mut app, &ctx, vec![key(Key::A, Modifiers::COMMAND)]);
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, app.tabs[0].edit_text());
+    }
+
+    #[test]
+    fn large_view_follows_find_goto_and_bookmarks() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 5000);
+
+        // 尋找：選取命中並把它捲到畫面上
+        app.show_find_bar = true;
+        app.find_bar_text = "line 02500".into();
+        app.find_step(true);
+        settle(&mut app, &ctx);
+        let sel = app.tabs[0].selections[0];
+        assert_eq!((sel.anchor.line, sel.anchor.col, sel.head.line, sel.head.col), (2500, 0, 2500, 10));
+        let y = large_row_y(&app, &ctx, 2500);
+        assert!(y > 100.0 && y < 700.0, "the match is scrolled into view (y = {y})");
+        // 下一個命中從目前的命中之後找起，到底後繞回來
+        app.find_step(true);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (2500, 10), "the only match is found again after wrapping around");
+
+        // 跳至行（與「跳至行」對話框相同的路徑：字元索引 + 捲動）
+        let i = AlexCodeApp::char_index_of(&app.tabs[0], 4000, 3);
+        assert_eq!(AlexCodeApp::position_of(&app.tabs[0], i), Position { line: 4000, col: 3 });
+        app.pending_select = Some((i, i));
+        app.scroll_to_cursor = true;
+        settle(&mut app, &ctx);
+        assert_eq!(cursor(&app), (4000, 3));
+        let y = large_row_y(&app, &ctx, 4000);
+        assert!(y > 100.0 && y < 700.0, "the line is scrolled into view (y = {y})");
+
+        // 點行號區切換書籤
+        let area = app.probe["large-text"];
+        click(&mut app, &ctx, Pos2::new(area.left() - 30.0, y + 2.0));
+        assert_eq!(app.tabs[0].bookmarks, vec![4000]);
+
+        // 選單的行操作仍然有效（可以復原）
+        app.run_cmd(Cmd::DeleteLine);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines.len(), 5000);
+        assert_eq!(app.tabs[0].lines[4000], "line 04001 some text here");
+        app.run_cmd(Cmd::Undo);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[4000], "line 04000 some text here");
+    }
+
+    #[test]
+    fn large_view_can_be_switched_to_the_normal_editor() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 200);
+        let i = AlexCodeApp::char_index_of(&app.tabs[0], 3, 4);
+        app.pending_select = Some((i, i));
+        frame(&mut app, &ctx, vec![]);
+
+        let button = app.probe["large-edit"].center();
+        click(&mut app, &ctx, button);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.highlight_cache.is_some(), "the normal editor lays out the text");
+        assert!(app.editor_focused, "and takes the keyboard focus");
+        frame(&mut app, &ctx, vec![Event::Text("Z".into())]);
+        assert_eq!(app.tabs[0].lines[3], "lineZ 00003 some text here", "typing works again, at the same cursor position");
+
+        // 只影響這一個分頁：另一個大檔案分頁仍然是大檔案檢視
+        let text: String = (0..200).map(|i| format!("other {i:05} some text here\n")).collect();
+        let mut b = EditorBuffer::from_text(&text);
+        b.file_path = Some("other.log".into());
+        app.tabs.push(b);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.highlight_cache.is_none());
+    }
+
+    #[test]
+    fn very_long_lines_are_cut_in_the_large_view() {
+        let long = "x".repeat(LARGE_VIEW_MAX_COLS + 500);
+        assert_eq!(shown_part(&long), (&long[..LARGE_VIEW_MAX_COLS], true));
+        assert_eq!(shown_part("short"), ("short", false));
+        let wide = "中".repeat(LARGE_VIEW_MAX_COLS + 1);
+        let (shown, cut) = shown_part(&wide);
+        assert!(cut);
+        assert_eq!(shown.chars().count(), LARGE_VIEW_MAX_COLS);
+        assert_eq!(display_cols("ab\tc"), 7);
+        assert_eq!(display_cols("中文"), 4);
+
+        // 一行就超過門檻的檔案也能開，而且只排版那一行的開頭
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        app.large_view_bytes = 1000;
+        let mut b = EditorBuffer::from_text(&format!("{long}\nsecond"));
+        b.file_path = Some("one-line.json".into());
+        app.tabs = vec![b];
+        app.active_tab_idx = 0;
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::NONE)]);
+        assert!(app.highlight_cache.is_none());
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
