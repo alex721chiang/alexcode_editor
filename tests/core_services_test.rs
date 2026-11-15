@@ -54,10 +54,15 @@ fn watcher_reports_external_modification_and_deletion() {
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    let ev = wait(&w);
-    assert_eq!(ev.len(), 1);
-    assert_eq!(ev[0].0, path);
-    assert_eq!(ev[0].1, stamp_of(&path));
+    // 寫入不是一步完成的：監看執行緒可能先看到剛被清空的檔案（大小 0），下一輪才看到寫完的內容，
+    // 所以等到回報的版本與磁碟上的一致為止（macOS 的 CI 上遇過先回報大小 0 的那一次）
+    let mut ev = wait(&w);
+    let t = Instant::now();
+    while ev.last().map(|e| e.1) != Some(stamp_of(&path)) && t.elapsed() < Duration::from_secs(5) {
+        ev.extend(wait(&w));
+    }
+    assert!(!ev.is_empty() && ev.iter().all(|e| e.0 == path));
+    assert_eq!(ev.last().unwrap().1, stamp_of(&path));
 
     std::fs::remove_file(&path).unwrap();
     let ev = wait(&w);
