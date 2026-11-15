@@ -325,6 +325,8 @@ pub struct AlexCodeApp {
     large_stats: ((u64, u64), (usize, usize)),
     /// 大檔案檢視中輸入法正在組字的文字（還沒寫進文件）
     large_preedit: String,
+    /// 大檔案檢視中內容最後一次變動：((分頁 id, 內容版本), 發現變動的時間)；Git 標記等內容停下來才重算
+    large_marks_seen: ((u64, u64), std::time::Instant),
 
     // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
     /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
@@ -458,6 +460,10 @@ const LARGE_VIEW_BYTES: usize = 4 * 1024 * 1024;
 
 /// 大檔案檢視中一行最多顯示幾個字元：更長的行只顯示開頭，避免單獨一行就排出巨大的版面
 const LARGE_VIEW_MAX_COLS: usize = 20_000;
+
+/// 大檔案檢視中，內容停止變動這麼久之後才重算 Git 行號區標記
+/// （比對要掃過整份文件與 HEAD 內容，每按一個鍵就算一次會拖慢輸入）
+const LARGE_GIT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// 一行在等寬字型下大約佔幾欄（全形字算 2 欄、Tab 算 4 欄）；只看前 `LARGE_VIEW_MAX_COLS` 個字元
 fn display_cols(line: &str) -> usize {
@@ -630,6 +636,7 @@ impl AlexCodeApp {
             large_edit: HashSet::new(),
             large_stats: ((0, 0), (0, 0)),
             large_preedit: String::new(),
+            large_marks_seen: ((0, 0), std::time::Instant::now()),
             hot_exit_key: Vec::new(),
             hot_exit_written: (std::time::Instant::now(), 0),
             hot_restore: HashMap::new(),
@@ -4554,8 +4561,8 @@ impl AlexCodeApp {
     }
 
     /// 大檔案檢視：只排版畫面上看得到的行，記憶體用量與檔案大小同一個量級。
-    /// 可以捲動、移動游標、選取、複製、尋找、跳至行、設書籤，也可以直接輸入、刪除、貼上（含輸入法）；
-    /// 沒有自動換行、自動配對、Git 行號區標記。
+    /// 可以捲動、移動游標、選取、複製、尋找、跳至行、設書籤，也可以直接輸入、刪除、貼上（含輸入法），
+    /// 有自動配對與 Git 行號區標記；沒有自動換行。
     fn large_view(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
         use egui::Event;
         let idx = self.active_tab_idx;
@@ -4577,7 +4584,7 @@ impl AlexCodeApp {
             ui.horizontal(|ui| {
                 let size = bytes as f64 / (1024.0 * 1024.0);
                 ui.label(
-                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體；沒有自動換行與自動配對"))
+                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體；沒有自動換行"))
                         .size(12.0)
                         .color(c.fg_dim),
                 );
@@ -4635,6 +4642,8 @@ impl AlexCodeApp {
             let page = ((ui.available_height() / row_h) as usize).max(2) - 1;
             let events = ui.input(|i| i.events.clone());
             let (insert_spaces, tab_size) = (self.config.insert_spaces, self.config.tab_size.max(1));
+            // 自動配對的條件與一般編輯區相同：設定開啟，且不是純文字 / Markdown
+            let pair_enabled = self.config.auto_pair && !matches!(self.tab_lang(idx), Lang::Plain | Lang::Markdown);
             let mut preedit = std::mem::take(&mut self.large_preedit);
             let buf = &mut self.tabs[idx];
             let rev = buf.revision();
@@ -4644,6 +4653,14 @@ impl AlexCodeApp {
                 let last_line = buf.lines.len().saturating_sub(1); // 前一個事件可能增減了行數
                 // 這個事件要做的修改：(範圍的兩端, 換上的文字, 是否算逐字輸入)
                 let mut edit: Option<(Position, Position, String, bool)> = None;
+                // 自動配對補上右括號 / 引號之後，游標要退回那一對的中間
+                let mut pair_back = false;
+                // 選取範圍（或游標）前後緊鄰的字元：自動配對用
+                let around = |buf: &EditorBuffer, sel: Selection| {
+                    let (a, b) = (sel.start(), sel.end());
+                    let ch = |p: Position| buf.lines.get(p.line).and_then(|l| l.chars().nth(p.col));
+                    (if a.col > 0 { ch(Position { line: a.line, col: a.col - 1 }) } else { None }, ch(b))
+                };
                 match ev {
                     Event::Copy if !sel.is_empty() => ui.ctx().copy_text(Self::selection_text(buf, sel)),
                     Event::Cut if !sel.is_empty() => {
@@ -4652,7 +4669,34 @@ impl AlexCodeApp {
                     }
                     Event::Paste(t) if !t.is_empty() => edit = Some((sel.start(), sel.end(), t.clone(), false)),
                     Event::Text(t) if !t.is_empty() && t != "\n" && t != "\r" => {
-                        edit = Some((sel.start(), sel.end(), t.clone(), true));
+                        let mut text = t.clone();
+                        let mut skip = false;
+                        let mut chars = t.chars();
+                        // 自動配對只看單獨輸入的一個括號 / 引號（與一般編輯區相同的規則：`pair_decide`）
+                        if let (true, Some(ch), None) = (pair_enabled, chars.next(), chars.next()) {
+                            if pair_relevant(ch) {
+                                let (before, after) = around(buf, sel);
+                                let d = pair_decide(ch, before, after, !sel.is_empty());
+                                match (d.action, d.open, d.close) {
+                                    (PairAction::AutoClose, _, Some(close)) => {
+                                        text = format!("{ch}{close}");
+                                        pair_back = true;
+                                    }
+                                    // 右邊已經是同一個符號：不輸入，游標直接跨過去
+                                    (PairAction::SkipOver, ..) => skip = true,
+                                    (PairAction::Surround, Some(open), Some(close)) => {
+                                        text = format!("{open}{}{close}", Self::selection_text(buf, sel));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if skip {
+                            sel = Selection::point(Position { line: sel.head.line, col: sel.head.col + 1 });
+                            moved = true;
+                        } else {
+                            edit = Some((sel.start(), sel.end(), text, true));
+                        }
                     }
                     // 輸入法：組字中的文字只顯示在游標處，選定之後才寫進文件
                     Event::CompositionStart => preedit.clear(),
@@ -4728,8 +4772,13 @@ impl AlexCodeApp {
                             }
                             // 有選取時刪掉選取的文字；否則刪掉游標前（Backspace）或後（Delete）的一個字元，按住 Ctrl 則是一個字
                             Key::Backspace | Key::Delete => {
+                                let (before, after) = around(buf, sel);
                                 let (a, b) = if !sel.is_empty() {
                                     (sel.start(), sel.end())
+                                } else if *key == Key::Backspace && pair_enabled && modifiers.is_none() && should_delete_pair(before, after) {
+                                    // 游標在一對空的括號 / 引號中間：連右邊那個一起刪
+                                    let h = sel.head;
+                                    (Position { line: h.line, col: h.col - 1 }, Position { line: h.line, col: h.col + 1 })
                                 } else if *key == Key::Backspace {
                                     (step_left(buf, sel.head, word), sel.head)
                                 } else {
@@ -4757,6 +4806,10 @@ impl AlexCodeApp {
                     small_edits &= typing && a.line == b.line && !text.contains('\n');
                     buf.replace_range(a, b, &text, typing);
                     sel = buf.selections[0];
+                    if pair_back {
+                        sel = Selection::point(Position { line: sel.head.line, col: sel.head.col.saturating_sub(1) });
+                        buf.selections = vec![sel];
+                    }
                     moved = true;
                 }
             }
@@ -4777,6 +4830,26 @@ impl AlexCodeApp {
         let line_count = self.tabs[idx].lines.len();
         let last_line = line_count.saturating_sub(1);
         let gutter_w = line_count.to_string().len().max(3) as f32 * char_w + 30.0;
+
+        // Git 行狀態：與一般編輯區共用 `git_marks`，但等內容停止變動 `LARGE_GIT_DELAY` 之後才重算
+        //（剛切到這個分頁時立刻算）；等待期間沿用上一次的結果
+        let buf_key = (tab_id, self.tabs[idx].revision());
+        match self.git_head.get(&tab_id) {
+            Some(Some(head)) => {
+                if self.git_marks.0 != buf_key {
+                    if self.large_marks_seen.0 != buf_key {
+                        self.large_marks_seen = (buf_key, std::time::Instant::now());
+                    }
+                    let waited = self.large_marks_seen.1.elapsed();
+                    if self.git_marks.0 .0 != tab_id || waited >= LARGE_GIT_DELAY {
+                        self.git_marks = (buf_key, diff_line_states(head, &self.tabs[idx].lines, 800));
+                    } else {
+                        ui.ctx().request_repaint_after(LARGE_GIT_DELAY - waited);
+                    }
+                }
+            }
+            _ => self.git_marks = ((0, 0), HashMap::new()),
+        }
 
         let mut toggle_bookmark = None;
         let scroll = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]).show_viewport(
@@ -4894,6 +4967,21 @@ impl AlexCodeApp {
                     );
                     if active {
                         painter.rect_filled(Rect::from_min_size(Pos2::new(gutter.left(), y), egui::vec2(2.0, row_h)), 0.0, c.accent);
+                    }
+                    // Git：新增（強調色條）/ 修改（黃色條）/ 此行上方有刪除（洋紅三角），與一般編輯區相同
+                    if let Some(&st) = self.git_marks.1.get(&line) {
+                        let x = gutter.right() - 4.0;
+                        if st & (ADDED | MODIFIED) != 0 {
+                            let col = if st & MODIFIED != 0 { c.warn } else { c.accent };
+                            painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), egui::vec2(3.0, row_h)), 0.0, col);
+                        }
+                        if st & DELETED_ABOVE != 0 {
+                            painter.add(Shape::convex_polygon(
+                                vec![Pos2::new(x - 3.0, y - 3.0), Pos2::new(x + 3.0, y), Pos2::new(x - 3.0, y + 3.0)],
+                                c.accent2,
+                                Stroke::NONE,
+                            ));
+                        }
                     }
                     if buf.bookmarks.contains(&line) {
                         painter.circle_filled(Pos2::new(gutter.left() + 9.0, y + row_h * 0.5), 3.5, c.accent2);
@@ -6899,6 +6987,128 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         frame(&mut app, &ctx, vec![key(Key::End, Modifiers::NONE)]);
         assert!(app.highlight_cache.is_none());
+    }
+
+    #[test]
+    fn large_view_auto_pairs_brackets_and_quotes() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 200);
+        let none = Modifiers::NONE;
+        let line0 = |app: &AlexCodeApp| app.tabs[0].lines[0].clone();
+        let type_ = |app: &mut AlexCodeApp, t: &str| {
+            frame(app, &ctx, vec![Event::Text(t.into())]);
+        };
+
+        // 純文字檔（.log）與一般編輯區一樣不配對
+        frame(&mut app, &ctx, vec![key(Key::End, none)]);
+        type_(&mut app, "(");
+        assert_eq!(line0(&app), "line 00000 some text here(");
+        frame(&mut app, &ctx, vec![key(Key::Backspace, none)]);
+
+        // 程式碼檔：補上右括號，游標留在中間
+        app.tabs[0].file_path = Some("big.rs".into());
+        type_(&mut app, "(");
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("line 00000 some text here()", (0, 26)));
+        type_(&mut app, "x");
+        assert_eq!(line0(&app), "line 00000 some text here(x)");
+        // 輸入右括號時跳過已經有的那個
+        type_(&mut app, ")");
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("line 00000 some text here(x)", (0, 28)));
+
+        // 空的一對：退格連右邊一起刪
+        type_(&mut app, "[");
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("line 00000 some text here(x)[]", (0, 29)));
+        frame(&mut app, &ctx, vec![key(Key::Backspace, none)]);
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("line 00000 some text here(x)", (0, 28)));
+
+        // 後面緊接著字母時不補；英文字裡的撇號也不補
+        frame(&mut app, &ctx, vec![key(Key::Home, none)]);
+        type_(&mut app, "{");
+        assert_eq!(line0(&app), "{line 00000 some text here(x)");
+        frame(&mut app, &ctx, vec![key(Key::ArrowRight, Modifiers::COMMAND)]);
+        type_(&mut app, "'");
+        assert_eq!(line0(&app), "{line' 00000 some text here(x)");
+
+        // 有選取時用一對符號把選取的文字包起來（跨行也可以）
+        frame(&mut app, &ctx, vec![key(Key::ArrowDown, none), key(Key::Home, none), key(Key::ArrowRight, Modifiers::COMMAND | Modifiers::SHIFT)]);
+        type_(&mut app, "\"");
+        assert_eq!(app.tabs[0].lines[1], "\"line\" 00001 some text here");
+        frame(&mut app, &ctx, vec![key(Key::Home, none), key(Key::ArrowDown, Modifiers::SHIFT)]);
+        type_(&mut app, "(");
+        assert_eq!(
+            (app.tabs[0].lines[1].as_str(), app.tabs[0].lines[2].as_str()),
+            ("(\"line\" 00001 some text here", ")line 00002 some text here")
+        );
+        // 一次復原就回到包起來之前
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[2], "line 00002 some text here");
+
+        // 關閉設定後照常輸入
+        app.config.auto_pair = false;
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::COMMAND)]);
+        type_(&mut app, "(");
+        assert_eq!(app.tabs[0].lines[200], "(");
+        assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty(), "still the large-file view");
+    }
+
+    /// 這一幀畫出來的、寬 3 像素且顏色為 `fill` 的實心矩形（行號區的 Git 標記）的上緣 y 座標
+    fn mark_bars(out: &egui::FullOutput, fill: Color32) -> Vec<f32> {
+        fn walk(shape: &Shape, fill: Color32, found: &mut Vec<f32>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, found)),
+                Shape::Rect(r) if r.fill == fill && (r.rect.width() - 3.0).abs() < 0.01 => found.push(r.rect.top()),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, fill, &mut found));
+        found
+    }
+
+    #[test]
+    fn large_view_shows_git_marks_in_the_gutter() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 5000);
+        let id = app.tabs[0].id;
+        let pal = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud());
+        let wait = || std::thread::sleep(LARGE_GIT_DELAY + std::time::Duration::from_millis(30));
+
+        // 與 HEAD 相同：沒有標記
+        app.git_head.insert(id, Some(Arc::new(app.tabs[0].lines.clone())));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(app.git_marks.1.is_empty());
+        assert!(mark_bars(&out, c.warn).is_empty() && mark_bars(&out, c.accent).is_empty());
+
+        // 改第 0 行、在它後面加一行：停止輸入一小段時間後標記出現在那兩行的行號區
+        frame(&mut app, &ctx, vec![Event::Text("x".into()), key(Key::End, Modifiers::NONE), key(Key::Enter, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![Event::Text("new".into())]);
+        assert!(app.git_marks.1.is_empty(), "not recomputed on every keystroke");
+        wait();
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.git_marks.1.get(&0), Some(&MODIFIED));
+        assert_eq!(app.git_marks.1.get(&1), Some(&ADDED));
+        assert_eq!(app.git_marks.1.len(), 2);
+        let (row0, row_h) = (large_row_y(&app, &ctx, 0), row_height(&app, &ctx));
+        let near = |ys: Vec<f32>, y: f32| ys.len() == 1 && (ys[0] - y).abs() < 0.5;
+        assert!(near(mark_bars(&out, c.warn), row0), "modified bar on line 1");
+        assert!(near(mark_bars(&out, c.accent), row0 + row_h), "added bar on line 2");
+
+        // 捲到看不到那兩行的地方：標記還在，但不會畫出來
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::COMMAND)]);
+        settle(&mut app, &ctx);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.git_marks.1.len(), 2);
+        assert!(mark_bars(&out, c.warn).is_empty());
+
+        // 不在 Git 內的檔案沒有標記
+        app.git_head.insert(id, None);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.git_marks.1.is_empty());
+        assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty());
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
