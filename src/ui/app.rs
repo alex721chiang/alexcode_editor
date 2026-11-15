@@ -30,7 +30,7 @@ use crate::git::{align_trimmed, change_starts, Row as DiffRow, RowType as DiffRo
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
-use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, SearchStats};
+use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, Finder, SearchStats};
 use crate::search::{apply_replace_in_files, plan_replace_in_files, ReplaceHit, ReplaceResult};
 use crate::snippets::SnippetsController;
 use crate::terminal::VtParser;
@@ -241,6 +241,8 @@ pub struct AlexCodeApp {
 
     // ---- 尋找 / 取代 ----
     find_opts: FindOptions,
+    /// Markdown 預覽用的尋找條件快取：(查詢與選項組成的鍵, 編譯好的條件)
+    md_find: (String, Finder),
     show_replace: bool,
     replace_text: String,
     find_error: Option<String>,
@@ -601,6 +603,7 @@ impl AlexCodeApp {
             tree_expanded: HashSet::new(),
             tree_chan: unbounded(),
             find_opts: FindOptions::default(),
+            md_find: (String::new(), Finder::default()),
             show_replace: false,
             replace_text: String::new(),
             find_error: None,
@@ -3066,10 +3069,15 @@ impl AlexCodeApp {
                 if filtering {
                     self.filtered_view(ui, c, &pal);
                 } else if is_md {
+                    // 尋找列開著時，預覽用與編輯區相同的選項標示命中；查詢或選項沒變就沿用編譯好的條件
                     let find = if self.show_find_bar {
-                        self.find_bar_text.clone()
+                        let key = format!("{}\u{0}{:?}", self.find_bar_text, self.find_opts);
+                        if self.md_find.0 != key {
+                            self.md_find = (key, Finder::new(&self.find_bar_text, &self.find_opts));
+                        }
+                        self.md_find.1.clone()
                     } else {
-                        String::new()
+                        Finder::default()
                     };
                     let root = self.project_root.clone();
                     let fsize = self.config.font_size;
@@ -7109,6 +7117,78 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         assert!(app.git_marks.1.is_empty());
         assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty());
+    }
+
+    /// 這一幀畫出的文字裡，底色是搜尋命中色的那些片段（已排序）
+    fn hit_texts(out: &egui::FullOutput, bg: Color32) -> Vec<String> {
+        fn walk(shape: &Shape, bg: Color32, found: &mut Vec<String>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, bg, found)),
+                Shape::Text(t) => {
+                    let job = &t.galley.job;
+                    for s in job.sections.iter().filter(|s| s.format.background == bg) {
+                        found.push(job.text[s.byte_range.clone()].to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, bg, &mut found));
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn markdown_view_highlights_with_the_find_bar_options() {
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        let mut b = EditorBuffer::from_text("# Cat notes\n\nconcat here\n\nA cat sat\n\n```rust\nlet cat = Cat::new();\n```\n");
+        b.file_path = Some("notes.md".into());
+        app.tabs = vec![b];
+        app.active_tab_idx = 0;
+        app.md_view.mode = MdViewMode::Typora;
+        let pal = app.theme_mgr.current_palette().clone();
+        let bg = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud()).search_bg;
+        let hits = |app: &mut AlexCodeApp| {
+            frame(app, &ctx, vec![]);
+            hit_texts(&frame(app, &ctx, vec![]), bg)
+        };
+
+        // 尋找列沒開：沒有高亮
+        app.find_bar_text = "cat".into();
+        assert!(hits(&mut app).is_empty());
+
+        // 預設：不分大小寫的純文字。內文以整段為單位標示，程式碼區塊只標命中的字
+        app.show_find_bar = true;
+        assert_eq!(hits(&mut app), ["A cat sat", "Cat", "Cat notes", "cat", "concat here"]);
+
+        // 區分大小寫
+        app.find_opts.case_sensitive = true;
+        assert_eq!(hits(&mut app), ["A cat sat", "cat", "concat here"]);
+
+        // 全字
+        app.find_opts = FindOptions { whole_word: true, ..Default::default() };
+        assert_eq!(hits(&mut app), ["A cat sat", "Cat", "Cat notes", "cat"]);
+
+        // 正規表示式；一般模式下同樣的字串只是普通文字
+        app.find_opts = FindOptions { regex: true, ..Default::default() };
+        app.find_bar_text = "s[ae]t".into();
+        assert_eq!(hits(&mut app), ["A cat sat"]);
+        app.find_opts.regex = false;
+        assert!(hits(&mut app).is_empty());
+
+        // 寫到一半、還不合法的正規表示式：沒有高亮，也不會出錯
+        app.find_opts.regex = true;
+        app.find_bar_text = "(".into();
+        assert!(hits(&mut app).is_empty());
+
+        // 並排模式右邊的預覽用的是同一套選項
+        app.md_view.mode = MdViewMode::Split;
+        app.find_opts = FindOptions { case_sensitive: true, ..Default::default() };
+        app.find_bar_text = "Cat".into();
+        let split = hits(&mut app);
+        assert!(split.contains(&"Cat notes".to_string()) && !split.contains(&"A cat sat".to_string()), "{split:?}");
     }
 
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`

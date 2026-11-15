@@ -1,4 +1,4 @@
-use alexcode::search::{find_all, replace_all, replace_range, FindOptions};
+use alexcode::search::{find_all, replace_all, replace_range, FindOptions, Finder};
 
 const PLAIN: FindOptions = FindOptions { case_sensitive: false, whole_word: false, regex: false };
 
@@ -25,6 +25,31 @@ fn regex_search_and_invalid_pattern() {
     assert!(find_all("abc", "(", &re).is_err());
     // 可比對空字串的樣式不會產生無限多個空命中
     assert!(find_all("abc", "x*", &re).unwrap().is_empty());
+}
+
+#[test]
+fn finder_matches_like_find_all_and_never_fails() {
+    let text = "Cat concat cat_x cat";
+    for opts in [
+        PLAIN,
+        FindOptions { case_sensitive: true, ..PLAIN },
+        FindOptions { whole_word: true, ..PLAIN },
+        FindOptions { regex: true, ..PLAIN },
+    ] {
+        let f = Finder::new("cat", &opts);
+        assert_eq!(f.find_all(text), find_all(text, "cat", &opts).unwrap(), "{opts:?}");
+    }
+    let cs = Finder::new("cat", &FindOptions { case_sensitive: true, ..PLAIN });
+    assert!(cs.is_match("a cat") && !cs.is_match("A Cat"));
+    let ww = Finder::new("cat", &FindOptions { whole_word: true, ..PLAIN });
+    assert!(ww.is_match("the Cat sat") && !ww.is_match("concat"));
+    let re = FindOptions { regex: true, ..PLAIN };
+    assert!(Finder::new(r"c[ao]t\b", &re).is_match("a cot") && !Finder::new("a.b", &PLAIN).is_match("axb"));
+
+    // 空的查詢、不合法的正規表示式、只會比對到空字串的樣式：都不算命中，也不會出錯
+    for f in [Finder::new("", &PLAIN), Finder::new("(", &re), Finder::new("x*", &re), Finder::default()] {
+        assert!(!f.is_match("abc") && f.find_all("abc").is_empty());
+    }
 }
 
 #[test]

@@ -7,9 +7,10 @@
 //! - **原始碼模式 (`MdViewMode::Source`)**：純 Markdown 原始碼編輯。
 //! - **大綱側邊欄 (Outline / TOC)**：自動擷取 `# H1` ~ `###### H6` 標題階層，點擊快速跳轉章節。
 
-use super::highlight::{highlight, Lang};
+use super::highlight::{highlight, highlight_ranges, Lang};
 use super::style::{hex, with_alpha, Colors, ORBITRON};
 use crate::editor::EditorBuffer;
+use crate::search::Finder;
 use crate::theme::Palette;
 use eframe::egui::{
     self, Align, Color32, CursorIcon, FontFamily, FontId, Key, Layout, Margin, Rect, RichText, Rounding,
@@ -720,7 +721,7 @@ fn render_inline_text(
     force_strike: bool,
     c: &Colors,
     pal: &Palette,
-    find_query: &str,
+    find: &Finder,
     action: &mut MdAction,
 ) {
     let segments = parse_inline(text);
@@ -732,7 +733,8 @@ fn render_inline_text(
         ui.spacing_mut().item_spacing.y = 4.0;
 
         for seg in segments {
-            let is_hit = !find_query.is_empty() && seg.text.to_lowercase().contains(&find_query.to_lowercase());
+            // 這一段文字裡有命中就整段標示（選項與尋找列相同：區分大小寫 / 全字 / 正規表示式）
+            let is_hit = find.is_match(&seg.text);
             if let Some((target, is_wiki)) = seg.style.link_target {
                 let mut rt = RichText::new(&seg.text)
                     .size(base_size)
@@ -993,7 +995,7 @@ pub fn render_typora_document(
     base_font_size: f32,
     c: &Colors,
     pal: &Palette,
-    find_query: &str,
+    find: &Finder,
     project_root: &Path,
     allow_inline_edit: bool,
 ) -> MdAction {
@@ -1114,7 +1116,7 @@ pub fn render_typora_document(
                             base_font_size,
                             c,
                             pal,
-                            find_query,
+                            find,
                             project_root,
                             buf.file_path.as_deref(),
                             &mut state.image_cache,
@@ -1178,7 +1180,7 @@ fn render_single_block(
     base_size: f32,
     c: &Colors,
     pal: &Palette,
-    find_query: &str,
+    find: &Finder,
     project_root: &Path,
     file_path: Option<&str>,
     image_cache: &mut HashMap<String, Option<egui::TextureHandle>>,
@@ -1219,7 +1221,7 @@ fn render_single_block(
                         false,
                         c,
                         pal,
-                        find_query,
+                        find,
                         action,
                     );
                     ui.with_layout(Layout::right_to_left(Align::BOTTOM), |ui| {
@@ -1248,7 +1250,7 @@ fn render_single_block(
             }
 
             MdBlockKind::Paragraph { text } => {
-                render_inline_text(ui, text, base_size, c.fg, false, false, c, pal, find_query, action);
+                render_inline_text(ui, text, base_size, c.fg, false, false, c, pal, find, action);
                 ui.add_space(8.0);
             }
 
@@ -1278,13 +1280,13 @@ fn render_single_block(
                             };
                             ui.label(RichText::new(format!("{} ", bullet)).size(base_size).color(c.accent).strong());
                             render_inline_text(
-                                ui, content, base_size, c.fg, false, false, c, pal, find_query, action,
+                                ui, content, base_size, c.fg, false, false, c, pal, find, action,
                             );
                         }
                         ListMarker::Ordered(num) => {
                             ui.label(RichText::new(format!("{} ", num)).size(base_size).color(c.accent).strong());
                             render_inline_text(
-                                ui, content, base_size, c.fg, false, false, c, pal, find_query, action,
+                                ui, content, base_size, c.fg, false, false, c, pal, find, action,
                             );
                         }
                         ListMarker::Task(checked) => {
@@ -1306,7 +1308,7 @@ fn render_single_block(
                                 *checked,
                                 c,
                                 pal,
-                                find_query,
+                                find,
                                 action,
                             );
                         }
@@ -1327,7 +1329,7 @@ fn render_single_block(
                     });
                 let resp = frame.show(ui, |ui| {
                     for l in lines {
-                        render_inline_text(ui, l, base_size, c.fg_dim, false, false, c, pal, find_query, action);
+                        render_inline_text(ui, l, base_size, c.fg_dim, false, false, c, pal, find, action);
                     }
                 });
                 let r = resp.response.rect;
@@ -1360,7 +1362,7 @@ fn render_single_block(
                     ui.label(RichText::new(heading).size(base_size * 0.96).color(col).strong());
                     ui.add_space(4.0);
                     for l in lines {
-                        render_inline_text(ui, l, base_size, c.fg, false, false, c, pal, find_query, action);
+                        render_inline_text(ui, l, base_size, c.fg, false, false, c, pal, find, action);
                     }
                 });
                 let r = resp.response.rect;
@@ -1395,12 +1397,12 @@ fn render_single_block(
                     });
                     ui.separator();
                     let hl_lang = Lang::from_path(&format!("snippet.{}", lang));
-                    let job = highlight(
+                    let job = highlight_ranges(
                         code,
                         hl_lang,
                         pal,
                         FontId::monospace((base_size - 0.5).max(11.0)),
-                        find_query,
+                        &find.find_all(code),
                     );
                     let galley = ui.fonts(|f| f.layout_job(job));
                     egui::ScrollArea::horizontal()
@@ -1431,7 +1433,7 @@ fn render_single_block(
                                     let align = aligns.get(ci).copied().unwrap_or(Align::Min);
                                     ui.with_layout(Layout::top_down(align), |ui| {
                                         render_inline_text(
-                                            ui, h, base_size, c.accent, true, false, c, pal, find_query, action,
+                                            ui, h, base_size, c.accent, true, false, c, pal, find, action,
                                         );
                                     });
                                 }
@@ -1443,7 +1445,7 @@ fn render_single_block(
                                         let align = aligns.get(ci).copied().unwrap_or(Align::Min);
                                         ui.with_layout(Layout::top_down(align), |ui| {
                                             render_inline_text(
-                                                ui, cell, base_size, c.fg, false, false, c, pal, find_query, action,
+                                                ui, cell, base_size, c.fg, false, false, c, pal, find, action,
                                             );
                                         });
                                     }
