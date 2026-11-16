@@ -17,6 +17,76 @@ pub fn default_shell() -> String {
     shell
 }
 
+/// 終端機可以選的一個 shell
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellChoice {
+    /// 顯示的名稱（也是存在設定裡的名稱）
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// 在 PATH 裡找 `file`
+#[cfg(windows)]
+fn find_in_path(file: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(file)).find(|p| p.is_file())
+}
+
+/// 這台電腦上找得到的 shell，第一個是預設的（`default_shell`）。
+/// Windows：cmd、PowerShell（有 PowerShell 7 的 pwsh 時用它）、Git Bash（Git 的標準安裝位置，
+/// 或 PATH 裡的 git.exe 旁邊的 `bin\bash.exe`）；其他平台：`$SHELL` 與 /bin 底下的 bash、zsh、sh
+pub fn available_shells() -> Vec<ShellChoice> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        out.push(ShellChoice { name: "cmd".into(), program: default_shell(), args: Vec::new() });
+        if let Some(p) = find_in_path("pwsh.exe").or_else(|| find_in_path("powershell.exe")) {
+            out.push(ShellChoice { name: "PowerShell".into(), program: p.to_string_lossy().into_owned(), args: vec!["-NoLogo".into()] });
+        }
+        let mut bash: Vec<std::path::PathBuf> = ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]
+            .iter()
+            .filter_map(std::env::var_os)
+            .map(|d| std::path::PathBuf::from(d).join("Git").join("bin").join("bash.exe"))
+            .collect();
+        if let Some(d) = std::env::var_os("LOCALAPPDATA") {
+            bash.push(std::path::PathBuf::from(d).join("Programs").join("Git").join("bin").join("bash.exe"));
+        }
+        // git.exe 通常在 <Git>\cmd\ 底下，bash.exe 在 <Git>\bin\ 底下
+        if let Some(git) = find_in_path("git.exe") {
+            if let Some(root) = git.parent().and_then(|d| d.parent()) {
+                bash.push(root.join("bin").join("bash.exe"));
+            }
+        }
+        if let Some(p) = bash.into_iter().find(|p| p.is_file()) {
+            out.push(ShellChoice {
+                name: "Git Bash".into(),
+                program: p.to_string_lossy().into_owned(),
+                args: vec!["--login".into(), "-i".into()],
+            });
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let mut seen = Vec::new();
+        let candidates = std::iter::once(default_shell()).chain(["/bin/bash", "/bin/zsh", "/bin/sh"].map(String::from));
+        for program in candidates {
+            let path = Path::new(&program);
+            let real = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            if !path.is_file() || seen.contains(&real) {
+                continue;
+            }
+            seen.push(real);
+            let name = path.file_name().map_or(program.clone(), |n| n.to_string_lossy().into_owned());
+            out.push(ShellChoice { name, program, args: Vec::new() });
+        }
+        if out.is_empty() {
+            out.push(ShellChoice { name: "sh".into(), program: "/bin/sh".into(), args: Vec::new() });
+        }
+    }
+    out
+}
+
 /// 一個在虛擬終端裡執行的 shell
 pub struct PtySession {
     // 虛擬終端本身：一直留著，關掉它 shell 的輸出端也會跟著關閉
@@ -29,10 +99,11 @@ pub struct PtySession {
 }
 
 impl PtySession {
-    /// 在 `cwd` 啟動 `program`，虛擬終端的大小是 `rows` × `cols`。
+    /// 在 `cwd` 以參數 `args` 啟動 `program`，虛擬終端的大小是 `rows` × `cols`。
     /// `notify` 在每次讀到輸出、以及 shell 結束時被呼叫（在背景執行緒上；介面用它要求重畫）。
     pub fn spawn(
         program: &str,
+        args: &[String],
         cwd: &Path,
         rows: u16,
         cols: u16,
@@ -42,6 +113,7 @@ impl PtySession {
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|e| format!("無法建立虛擬終端：{e}"))?;
         let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
         cmd.cwd(cwd);
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| format!("無法啟動 {program}：{e}"))?;
         // 子程序已經拿到它那一端了；這裡留著的話，Windows 上 shell 結束後讀取端也不會結束

@@ -33,6 +33,8 @@ pub struct EditorConfig {
     pub highlight_max_mb: u32,
     pub assist_max_mb: u32,
     pub long_line_chars: usize,
+    /// 終端機使用的 shell 名稱（`terminal::available_shells` 的 `name`）；空的或找不到時用第一個（預設的）
+    pub terminal_shell: String,
 }
 
 impl Default for EditorConfig {
@@ -53,6 +55,7 @@ impl Default for EditorConfig {
             highlight_max_mb: 10,
             assist_max_mb: 2,
             long_line_chars: 10000,
+            terminal_shell: String::new(),
         }
     }
 }

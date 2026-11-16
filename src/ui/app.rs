@@ -33,7 +33,8 @@ use crate::plugins::PluginManager;
 use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, Finder, SearchStats};
 use crate::search::{apply_replace_in_files, plan_replace_in_files, ReplaceHit, ReplaceResult};
 use crate::snippets::SnippetsController;
-use crate::terminal::{default_shell, PtySession, VtParser};
+// （`core::available_shells` 是「在此開啟終端機」選單用的外部終端機清單，這裡的是內建終端機能用的 shell）
+use crate::terminal::{available_shells as pty_shells, PtySession, ShellChoice, VtParser};
 use crate::theme::ThemeManager;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
@@ -206,6 +207,8 @@ pub struct AlexCodeApp {
     term_pty_failed: bool,
     /// shell 結束過一次之後就不再自動啟動，等使用者在輸入列按 Enter
     term_pty_exited: bool,
+    /// 可以選的 shell（`shells()` 第一次用到時才找）
+    term_shells: Vec<ShellChoice>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -698,6 +701,64 @@ fn edge_scroll_speed(over: f32, unit: f32) -> f32 {
     over.signum() * (unit * 8.0 + over.abs() * 10.0).min(6000.0)
 }
 
+/// 終端機有鍵盤焦點時，一個按鍵要送給 shell 的位元組（一般終端機送的 VT 序列；
+/// Ctrl + 字母是控制字元，例如 Ctrl+C 是 0x03）。一般的字由 `Event::Text` 送，這裡不管；不送的鍵回傳 None
+fn terminal_key_bytes(key: Key, m: Modifiers) -> Option<Vec<u8>> {
+    let seq: &[u8] = match key {
+        Key::Enter => b"\r",
+        Key::Tab if m.shift => b"\x1b[Z",
+        Key::Tab => b"\t",
+        Key::Backspace => b"\x7f",
+        Key::Escape => b"\x1b",
+        Key::ArrowUp => b"\x1b[A",
+        Key::ArrowDown => b"\x1b[B",
+        Key::ArrowRight => b"\x1b[C",
+        Key::ArrowLeft => b"\x1b[D",
+        Key::Home => b"\x1b[H",
+        Key::End => b"\x1b[F",
+        Key::Insert => b"\x1b[2~",
+        Key::Delete => b"\x1b[3~",
+        Key::PageUp => b"\x1b[5~",
+        Key::PageDown => b"\x1b[6~",
+        _ if m.ctrl && !m.alt => {
+            let mut name = key.name().chars();
+            return match (name.next(), name.next()) {
+                (Some(c), None) if c.is_ascii_alphabetic() => Some(vec![c.to_ascii_uppercase() as u8 - b'@']),
+                _ => None,
+            };
+        }
+        _ => return None,
+    };
+    Some(seq.to_vec())
+}
+
+/// 終端機有鍵盤焦點時，這一幀的輸入事件要送給 shell 的位元組：輸入的字照送、貼上的文字換行改成 `\r`、
+/// 特殊鍵見 `terminal_key_bytes`。egui 把 Ctrl+C / X / V 變成「複製 / 剪下 / 貼上」事件（同一幀也有那個按鍵的事件）：
+/// 在終端機裡 Ctrl+C / X 是控制字元（0x03 中斷 / 0x18），Ctrl+V 是貼上剪貼簿的文字，按鍵本身不再重送
+fn terminal_input_bytes(events: &[egui::Event]) -> Vec<u8> {
+    use egui::Event;
+    let clip = events.iter().any(|e| matches!(e, Event::Copy | Event::Cut | Event::Paste(_)));
+    let mut out = Vec::new();
+    for ev in events {
+        match ev {
+            Event::Text(t) => out.extend_from_slice(t.as_bytes()),
+            Event::Paste(t) => out.extend_from_slice(t.replace("\r\n", "\r").replace('\n', "\r").as_bytes()),
+            Event::Copy => out.push(0x03),
+            Event::Cut => out.push(0x18),
+            Event::Key { key, pressed: true, modifiers, .. } => {
+                if clip && modifiers.ctrl && matches!(key, Key::C | Key::X | Key::V) {
+                    continue;
+                }
+                if let Some(b) = terminal_key_bytes(*key, *modifiers) {
+                    out.extend(b);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// 往左一個字元（`word` 為 true 時一個字）的位置；在行首時是上一行的行尾
 fn step_left(buf: &EditorBuffer, p: Position, word: bool) -> Position {
     if p.col == 0 {
@@ -792,6 +853,7 @@ impl AlexCodeApp {
             term_pty: None,
             term_pty_failed: false,
             term_pty_exited: false,
+            term_shells: Vec::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1845,12 +1907,39 @@ impl AlexCodeApp {
     fn start_shell(&mut self, ctx: &egui::Context) {
         let ctx = ctx.clone();
         let (rows, cols) = (self.terminal.rows() as u16, self.terminal.cols() as u16);
-        match PtySession::spawn(&default_shell(), &self.term_cwd, rows, cols, move || ctx.request_repaint()) {
+        let sh = self.chosen_shell();
+        match PtySession::spawn(&sh.program, &sh.args, &self.term_cwd, rows, cols, move || ctx.request_repaint()) {
             Ok(s) => self.term_pty = Some(s),
             Err(e) => {
                 self.term_pty_failed = true;
                 self.terminal.feed(format!("\x1b[31m{e}\x1b[0m\r\n（改為逐指令執行：每個指令跑完才顯示輸出）\r\n").as_bytes());
             }
+        }
+    }
+
+    /// 可以選的 shell（第一次用到時才去找）
+    fn shells(&mut self) -> &[ShellChoice] {
+        if self.term_shells.is_empty() {
+            self.term_shells = pty_shells();
+        }
+        &self.term_shells
+    }
+
+    /// 目前選的 shell：設定裡的名稱找不到時（或沒選過）用第一個，也就是系統預設的
+    fn chosen_shell(&mut self) -> ShellChoice {
+        let name = self.config.terminal_shell.clone();
+        let shells = self.shells();
+        shells.iter().find(|s| s.name == name).unwrap_or(&shells[0]).clone()
+    }
+
+    /// 換成另一個 shell：結束目前的（若還在跑），在畫面上註明後啟動新的，並記在設定裡
+    fn switch_shell(&mut self, ctx: &egui::Context, name: &str) {
+        self.config.terminal_shell = name.to_string();
+        self.term_pty = None; // `PtySession` 被丟掉時會結束它的 shell
+        self.term_pty_exited = false;
+        self.terminal.feed(format!("\r\n\x1b[33m[切換到 {name}]\x1b[0m\r\n").as_bytes());
+        if !self.term_pty_failed {
+            self.start_shell(ctx);
         }
     }
 
@@ -3172,7 +3261,48 @@ impl AlexCodeApp {
                 }
                 egui::Frame::none().inner_margin(egui::Margin::symmetric(10.0, 6.0)).show(ui, |ui| {
                     let input_h = 28.0;
-                    egui::ScrollArea::vertical()
+                    // 選擇 shell：換了就結束目前的、啟動選的那一個（記在設定裡）
+                    let mut switch_to = None;
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Shell").size(12.0).color(c.fg_dim));
+                        let current = self.chosen_shell().name;
+                        let names: Vec<String> = self.shells().iter().map(|s| s.name.clone()).collect();
+                        let combo = egui::ComboBox::from_id_source("terminal-shell").selected_text(current.as_str()).show_ui(ui, |ui| {
+                            for n in &names {
+                                if ui.selectable_label(*n == current, n.as_str()).clicked() && *n != current {
+                                    switch_to = Some(n.clone());
+                                }
+                            }
+                        });
+                        self.mark("terminal-shell", &combo.response);
+                        if self.term_pty.is_some() {
+                            ui.label(
+                                RichText::new("點一下輸出區後，鍵盤（含方向鍵、Tab、Ctrl+C）直接送進 shell")
+                                    .size(11.0)
+                                    .color(c.faint),
+                            );
+                        }
+                    });
+                    if let Some(name) = switch_to {
+                        self.switch_shell(ctx, &name);
+                    }
+                    // 輸出區有鍵盤焦點時，按鍵與輸入的字直接送進 shell（shell 自己回顯）；
+                    // Tab / 方向鍵 / Esc 也留給 shell，不拿來移動 egui 的焦點
+                    let term_id = egui::Id::new("alexcode-terminal-output");
+                    let focused = ui.memory(|m| m.has_focus(term_id));
+                    if focused {
+                        ui.memory_mut(|m| {
+                            m.set_focus_lock_filter(
+                                term_id,
+                                egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
+                            )
+                        });
+                        let bytes = terminal_input_bytes(&ui.input(|i| i.events.clone()));
+                        if let (false, Some(s)) = (bytes.is_empty(), &mut self.term_pty) {
+                            let _ = s.write(&bytes);
+                        }
+                    }
+                    let out = egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .max_height(ui.available_height() - input_h)
                         .stick_to_bottom(true)
@@ -3190,6 +3320,15 @@ impl AlexCodeApp {
                                 ui.label(RichText::new(line).font(font.clone()).color(c.fg));
                             }
                         });
+                    // 點一下輸出區取得鍵盤焦點（只接點擊：拖曳仍然是選取輸出的文字）；有焦點時加一圈外框
+                    let resp = ui.interact(out.inner_rect, term_id, Sense::click());
+                    if resp.clicked() {
+                        resp.request_focus();
+                    }
+                    if focused {
+                        ui.painter().rect_stroke(out.inner_rect.expand(2.0), 2.0, Stroke::new(1.0_f32, c.accent));
+                    }
+                    self.mark_rect("terminal-output", out.inner_rect);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("❯").color(c.accent).strong());
                         // 逐指令執行（虛擬終端無法使用時）要等指令跑完；互動式 shell 隨時可以再送
@@ -8169,6 +8308,118 @@ mod tests {
         app.submit_terminal_line(&ctx, again.to_string());
         assert!(app.term_pty.is_some());
         assert!(wait(&mut app, &|t| t.contains("4321")), "the restarted shell runs the line:\n{}", screen(&app));
+    }
+
+    #[test]
+    fn terminal_keys_become_the_bytes_a_terminal_sends() {
+        let ctrl = Modifiers { ctrl: true, command: cfg!(not(target_os = "macos")), ..Modifiers::NONE };
+        let k = |key, modifiers| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        let bytes = terminal_input_bytes(&[
+            Event::Text("ls -a".into()),
+            k(Key::Enter, Modifiers::NONE),
+            k(Key::ArrowUp, Modifiers::NONE),
+            k(Key::ArrowLeft, Modifiers::NONE),
+            k(Key::Tab, Modifiers::NONE),
+            k(Key::Backspace, Modifiers::NONE),
+            k(Key::D, ctrl),
+            k(Key::A, Modifiers::NONE), // 一般的字由 Text 送，按鍵本身不送
+        ]);
+        assert_eq!(bytes, b"ls -a\r\x1b[A\x1b[D\t\x7f\x04".to_vec());
+        // egui 把 Ctrl+C / Ctrl+V 變成複製 / 貼上事件：分別送中斷字元、貼上剪貼簿的文字（換行改成 \r），按鍵不重送
+        assert_eq!(terminal_input_bytes(&[Event::Copy, k(Key::C, ctrl)]), vec![0x03]);
+        assert_eq!(terminal_input_bytes(&[Event::Paste("a\nb\r\nc".into()), k(Key::V, ctrl)]), b"a\rb\rc".to_vec());
+        // 沒有複製事件時（例如平台沒有送）按鍵本身也是 Ctrl+C
+        assert_eq!(terminal_input_bytes(&[k(Key::C, ctrl)]), vec![0x03]);
+        assert_eq!(terminal_key_bytes(Key::Tab, Modifiers::SHIFT), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(terminal_key_bytes(Key::Delete, Modifiers::NONE), Some(b"\x1b[3~".to_vec()));
+        assert_eq!(terminal_key_bytes(Key::F5, Modifiers::NONE), None);
+    }
+
+    #[test]
+    fn terminal_keyboard_goes_straight_to_the_shell() {
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zzcomplete_me.txt"), "hello-from-tab\n").unwrap();
+        let mut app = AlexCodeApp::new();
+        app.term_cwd = dir.path().to_path_buf();
+        let screen = |app: &AlexCodeApp| {
+            let t = &app.terminal;
+            let mut s: Vec<String> = (0..t.scrollback_count()).map(|i| t.scrollback_line(i)).collect();
+            s.extend((0..t.rows()).map(|r| t.line_text(r)));
+            s.join("\n")
+        };
+        let wait = |app: &mut AlexCodeApp, secs: u64, cond: &dyn Fn(&str) -> bool| {
+            let end = Instant::now() + Duration::from_secs(secs);
+            while Instant::now() < end {
+                frame(app, &ctx, vec![]);
+                if cond(&screen(app)) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        let enter = || key(Key::Enter, Modifiers::NONE);
+        app.show_terminal = true;
+        frame(&mut app, &ctx, vec![]);
+        assert!(wait(&mut app, 20, &|t| !t.trim().is_empty()), "the shell prints its prompt");
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.probe.contains_key("terminal-shell"), "the shell can be chosen in the dock");
+        let tabs_before: Vec<String> = app.tabs.iter().map(|b| b.edit_text()).collect();
+
+        // 點一下輸出區取得焦點，之後打的字與 Enter 直接送進 shell
+        let out = app.probe["terminal-output"].center();
+        click(&mut app, &ctx, out);
+        assert!(ctx.memory(|m| m.has_focus(egui::Id::new("alexcode-terminal-output"))), "the output area takes the keyboard");
+        let (sum, again, long, tab) = if cfg!(windows) {
+            ("set /a 1000+1", "set /a 5000+555", "ping -n 30 127.0.0.1 >nul", "type zzcompl")
+        } else {
+            ("echo $((1000+1))", "echo $((5000+555))", "sleep 30", "cat zzcompl")
+        };
+        frame(&mut app, &ctx, vec![Event::Text(sum.into()), enter()]);
+        assert!(wait(&mut app, 20, &|t| t.lines().any(|l| l.trim() == "1001")), "typed command runs:\n{}", screen(&app));
+        // 上鍵叫出上一個指令，再按 Enter 又跑一次
+        frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![enter()]);
+        assert!(
+            wait(&mut app, 20, &|t| t.lines().filter(|l| l.trim() == "1001").count() >= 2),
+            "Up recalls the previous command:\n{}",
+            screen(&app)
+        );
+        // Ctrl+C 中斷還在跑的指令（30 秒），之後馬上能執行下一個
+        frame(&mut app, &ctx, vec![Event::Text(long.into()), enter()]);
+        wait(&mut app, 2, &|_| false);
+        let t0 = Instant::now();
+        let ctrl = Modifiers { ctrl: true, command: cfg!(not(target_os = "macos")), ..Modifiers::NONE };
+        frame(&mut app, &ctx, vec![Event::Copy, key(Key::C, ctrl)]);
+        wait(&mut app, 1, &|_| false);
+        frame(&mut app, &ctx, vec![Event::Text(again.into()), enter()]);
+        assert!(wait(&mut app, 20, &|t| t.contains("5555")), "Ctrl+C stops the running command:\n{}", screen(&app));
+        assert!(t0.elapsed() < Duration::from_secs(15), "it did not wait for the 30-second command ({:?})", t0.elapsed());
+        // Tab 補完檔名
+        frame(&mut app, &ctx, vec![Event::Text(tab.into()), key(Key::Tab, Modifiers::NONE)]);
+        wait(&mut app, 1, &|_| false);
+        frame(&mut app, &ctx, vec![enter()]);
+        assert!(wait(&mut app, 20, &|t| t.contains("hello-from-tab")), "Tab completes the file name:\n{}", screen(&app));
+        let tabs_after: Vec<String> = app.tabs.iter().map(|b| b.edit_text()).collect();
+        assert_eq!(tabs_after, tabs_before, "nothing typed into the terminal reached the editor");
+
+        // 換一個 shell：結束舊的、啟動選的那一個，並記在設定裡
+        let shells = app.shells().to_vec();
+        let other = shells.last().unwrap().clone();
+        app.switch_shell(&ctx, &other.name);
+        assert_eq!(app.config.terminal_shell, other.name);
+        assert_eq!(app.chosen_shell(), other);
+        assert!(app.term_pty.is_some());
+        let cmd = match other.name.as_str() {
+            "cmd" => "set /a 4000+321",
+            "PowerShell" => "4000+321",
+            _ => "echo $((4000+321))",
+        };
+        assert!(wait(&mut app, 30, &|t| t.contains(&format!("切換到 {}", other.name))));
+        app.submit_terminal_line(&ctx, cmd.to_string());
+        assert!(wait(&mut app, 30, &|t| t.contains("4321")), "{} runs commands:\n{}", other.name, screen(&app));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use alexcode::terminal::{default_shell, PtySession, VtParser};
+use alexcode::terminal::{available_shells, default_shell, PtySession, VtParser};
 
 /// 終端機畫面上的所有文字（捲出畫面的歷史 + 目前畫面）
 fn screen(vt: &VtParser) -> String {
@@ -34,7 +34,7 @@ fn pump(s: &mut PtySession, vt: &mut VtParser, timeout: Duration, done: impl Fn(
 #[test]
 fn shell_output_streams_while_a_command_is_still_running() {
     let dir = tempfile::tempdir().unwrap();
-    let mut s = PtySession::spawn(&default_shell(), dir.path(), 40, 120, || {}).expect("the shell starts in a pseudo terminal");
+    let mut s = PtySession::spawn(&default_shell(), &[], dir.path(), 40, 120, || {}).expect("the shell starts in a pseudo terminal");
     let mut vt = VtParser::new(40, 120);
 
     // 兩個算出來的數字中間隔 2 秒：指令本身（會被 shell 回顯）裡沒有這兩個數字，
@@ -64,4 +64,36 @@ fn shell_output_streams_while_a_command_is_still_running() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(s.exit_code(), Some(0), "the shell exits with code 0");
+}
+
+#[test]
+fn every_offered_shell_runs_commands() {
+    let shells = available_shells();
+    println!("shells: {:?}", shells.iter().map(|s| (&s.name, &s.program)).collect::<Vec<_>>());
+    assert!(!shells.is_empty());
+    assert_eq!(shells[0].program, default_shell(), "the default shell comes first");
+    if cfg!(windows) {
+        assert_eq!(shells[0].name, "cmd");
+        assert!(shells.iter().any(|s| s.name == "PowerShell"), "Windows always has PowerShell");
+    }
+    for sh in &shells {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = PtySession::spawn(&sh.program, &sh.args, dir.path(), 40, 120, || {})
+            .unwrap_or_else(|e| panic!("{} does not start: {e}", sh.name));
+        let mut vt = VtParser::new(40, 120);
+        // 算出來的數字不在指令本身裡（指令會被回顯）
+        let cmd: &[u8] = match sh.name.as_str() {
+            "cmd" => b"set /a 4000+321\r",
+            "PowerShell" => b"4000+321\r",
+            _ => b"echo $((4000+321))\r",
+        };
+        assert!(pump(&mut s, &mut vt, Duration::from_secs(30), |t| !t.trim().is_empty()), "{} printed nothing", sh.name);
+        s.write(cmd).unwrap();
+        assert!(
+            pump(&mut s, &mut vt, Duration::from_secs(30), |t| t.contains("4321")),
+            "{} did not run the command:\n{}",
+            sh.name,
+            screen(&vt)
+        );
+    }
 }
