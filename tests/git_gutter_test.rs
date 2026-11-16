@@ -101,3 +101,35 @@ fn test_prefix_suffix_trim_keeps_line_numbers_correct() {
     assert_eq!(s.len(), 1);
     assert_eq!(s.get(&500), Some(&MODIFIED));
 }
+
+#[test]
+fn test_oversized_middle_with_few_changes_is_still_precise() {
+    // 2000 行、上限 100：開頭插入一行、中間改一行、後面刪掉兩行。差異的範圍幾乎涵蓋整個檔案，
+    // 但真正不同的只有這三處
+    let old_l: Vec<String> = (0..2000).map(|i| format!("line {i}")).collect();
+    let mut new_l = old_l.clone();
+    new_l.drain(1500..1502);
+    new_l[1000] = "changed".into();
+    new_l.insert(0, "inserted".into());
+    let mut marks: Vec<(usize, u8)> = diff_line_states(&old_l, &new_l, 100).into_iter().collect();
+    marks.sort();
+    assert_eq!(marks, vec![(0, ADDED), (1001, MODIFIED), (1501, DELETED_ABOVE)]);
+
+    // 重複的行（空行）很多時也一樣
+    let old_l: Vec<String> = (0..3000).map(|i| if i % 3 == 0 { String::new() } else { format!("row {}", i / 3) }).collect();
+    let mut new_l = old_l.clone();
+    new_l.insert(10, "extra".into());
+    new_l.push("tail".into());
+    let mut marks: Vec<(usize, u8)> = diff_line_states(&old_l, &new_l, 100).into_iter().collect();
+    marks.sort();
+    assert_eq!(marks, vec![(10, ADDED), (3001, ADDED)]);
+}
+
+#[test]
+fn test_oversized_middle_with_too_many_changes_is_marked_coarsely() {
+    let old_l: Vec<String> = (0..5000).map(|i| format!("old {i}")).collect();
+    let new_l: Vec<String> = (0..5000).map(|i| format!("new {i}")).collect();
+    let s = diff_line_states(&old_l, &new_l, 100);
+    assert_eq!(s.len(), 5000);
+    assert!(s.values().all(|&st| st == MODIFIED));
+}
