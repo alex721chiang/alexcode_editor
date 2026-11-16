@@ -7818,6 +7818,121 @@ mod tests {
         assert!(split.contains(&"Cat notes".to_string()) && !split.contains(&"A cat sat".to_string()), "{split:?}");
     }
 
+    /// 大檔案其餘部分的耗時量測（待辦 3e）：Git 標記重算、尋找列、熱結束備份、Typora 閱讀模式。
+    /// `cargo test --release --lib large_file_cost_report -- --ignored --nocapture`
+    /// 檔案大小以 `ALEXCODE_MEM_REPORT_MB` 指定（預設 29）；記憶體用量在 `tests/memory_report.rs` 量。
+    #[test]
+    #[ignore]
+    fn large_file_cost_report() {
+        let size_mb: usize = std::env::var("ALEXCODE_MEM_REPORT_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(29);
+        let mut text = String::new();
+        let mut i = 0usize;
+        while text.len() < size_mb * 1024 * 1024 {
+            let id = i.wrapping_mul(2_654_435_761) as u32;
+            text.push_str(&format!("{i:07} 2026-11-12 10:00:00.123 INFO  worker-{:02} request {id:08x} status=ok\n", i % 16));
+            i += 1;
+        }
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let now = std::time::Instant::now;
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(dir.path().join("state.json"));
+        let mut b = EditorBuffer::from_text(&text);
+        b.file_path = Some("big.log".into());
+        app.tabs = vec![b];
+        app.active_tab_idx = 0;
+        app.pending_select = Some((0, 0));
+        for _ in 0..3 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let lines = app.tabs[0].lines.len();
+        println!("COST file: {size_mb} MB, {lines} lines");
+
+        // 1. 大檔案檢視重算 Git 行號區標記（每次內容變動後停 0.3 秒就會算一次）
+        let head = app.tabs[0].lines.clone();
+        let t = now();
+        let n = diff_line_states(&head, &app.tabs[0].lines, 800).len();
+        println!("COST git marks, identical to HEAD            = {:8.1} ms ({n} marks)", ms(t));
+        let mid = Position { line: lines / 2, col: 0 };
+        app.tabs[0].replace_range(mid, mid, "x", true);
+        let t = now();
+        let n = diff_line_states(&head, &app.tabs[0].lines, 800).len();
+        println!("COST git marks, one line modified in middle  = {:8.1} ms ({n} marks)", ms(t));
+        let top = Position { line: 0, col: 0 };
+        app.tabs[0].replace_range(top, top, "new line\n", false);
+        let t = now();
+        let n = diff_line_states(&head, &app.tabs[0].lines, 800).len();
+        println!("COST git marks, plus one line inserted at top = {:8.1} ms ({n} marks)", ms(t));
+        drop(head);
+
+        // 2. 尋找列：內容每變一次就重新串接全文並重新搜尋
+        let t = now();
+        let joined = app.tabs[0].edit_text();
+        println!("COST join the full text                      = {:8.1} ms", ms(t));
+        for q in ["status=ok", "worker-07", "zzz"] {
+            let t = now();
+            let n = find_all(&joined, q, &FindOptions::default()).map_or(0, |v| v.len());
+            println!("COST find_all {q:<12}                    = {:8.1} ms ({n} hits)", ms(t));
+        }
+        drop(joined);
+        let typing = |app: &mut AlexCodeApp| {
+            let t = now();
+            for _ in 0..5 {
+                frame(app, &ctx, vec![Event::Text("x".into())]);
+            }
+            ms(t) / 5.0
+        };
+        println!("COST typing one character, find bar closed   = {:8.1} ms", typing(&mut app));
+        app.show_find_bar = true;
+        app.find_bar_text = "worker-07".into();
+        let t = now();
+        frame(&mut app, &ctx, vec![]);
+        println!("COST first frame after opening the find bar  = {:8.1} ms ({} hits)", ms(t), app.find_cache.1.len());
+        let t = now();
+        for _ in 0..5 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        println!("COST idle frame, find bar open               = {:8.1} ms", ms(t) / 5.0);
+        println!("COST typing one character, find bar open     = {:8.1} ms", typing(&mut app));
+        app.show_find_bar = false;
+        frame(&mut app, &ctx, vec![]);
+
+        // 3. 熱結束：未存檔的大檔案每 30 秒把整份內容寫進備份檔一次（在介面執行緒上）
+        assert!(app.tabs[0].modified);
+        let t = now();
+        let ok = app.save_hot_exit(true);
+        let written = std::fs::metadata(dir.path().join("hot_exit.json")).map_or(0, |m| m.len());
+        println!("COST hot-exit backup write                   = {:8.1} ms (ok={ok}, {:.1} MB on disk)", ms(t), written as f64 / 1048576.0);
+        drop(app);
+
+        // 4. 很大的 Markdown 檔在 Typora 閱讀模式（不走大檔案檢視）：每一幀的成本
+        for md_mb in [1usize, 4] {
+            let mut md = String::new();
+            let mut i = 0usize;
+            while md.len() < md_mb * 1024 * 1024 {
+                md.push_str(&format!(
+                    "## Section {i}\n\nParagraph {i} with **bold**, `code` and a [link](https://example.com/{i}). Some more words to fill the line.\n\n- item one\n- item two\n\n"
+                ));
+                i += 1;
+            }
+            let mut app = AlexCodeApp::new();
+            let mut b = EditorBuffer::from_text(&md);
+            b.file_path = Some("big.md".into());
+            app.tabs = vec![b];
+            app.active_tab_idx = 0;
+            app.md_view.mode = MdViewMode::Typora;
+            let t = now();
+            frame(&mut app, &ctx, vec![]);
+            let first = ms(t);
+            let t = now();
+            for _ in 0..3 {
+                frame(&mut app, &ctx, vec![]);
+            }
+            println!("COST Typora view of a {md_mb} MB Markdown file      = {:8.1} ms per frame (first frame {first:.1} ms, {} lines)", ms(t) / 3.0, app.tabs[0].lines.len());
+        }
+    }
+
     /// 量測閒置（沒有輸入）時每一幀的成本：`cargo test --release idle_frame -- --ignored --nocapture`
     #[test]
     #[ignore]

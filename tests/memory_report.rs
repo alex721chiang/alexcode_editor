@@ -244,3 +244,112 @@ fn large_file_memory_report() {
         assert!(ratio <= limit, "memory after opening is {ratio:.1}x the file size, budget is {limit}x");
     }
 }
+
+/// 繼續跑幀，等背景工作（Git HEAD 讀取等）把結果送回來：用量連續 1 秒沒有變化才算穩定
+fn settle(app: &mut AlexCodeApp, ctx: &egui::Context) {
+    let (mut last, mut since) = (live(), std::time::Instant::now());
+    let start = std::time::Instant::now();
+    while since.elapsed().as_millis() < 1000 && start.elapsed().as_secs() < 120 {
+        frame(app, ctx);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        if live().abs_diff(last) > 64 * 1024 {
+            (last, since) = (live(), std::time::Instant::now());
+        }
+    }
+}
+
+fn frame_with(app: &mut AlexCodeApp, ctx: &egui::Context, events: Vec<egui::Event>) {
+    let input = RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1280.0, 800.0))),
+        focused: true,
+        events,
+        ..Default::default()
+    };
+    let _ = ctx.run(input, |ctx| app.ui_frame(ctx));
+}
+
+/// 大檔案其餘部分的記憶體量測（待辦 3e）：追蹤中的檔案多握的 HEAD 內容、尋找列的全文快取、
+/// Typora 閱讀模式下的大 Markdown 檔。耗時在 `src/ui/app.rs` 的 `large_file_cost_report` 量。
+///
+/// ```text
+/// cargo test --release --test memory_report extras -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn large_file_extras_memory_report() {
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let size_mb: usize = std::env::var("ALEXCODE_MEM_REPORT_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(29);
+    let ctx = egui::Context::default();
+    alexcode::ui::style::setup_fonts(&ctx);
+
+    // ---- 在 Git 儲存庫裡、已提交的大檔案：比不在儲存庫裡多用多少 ----
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.log");
+    let text = sample_text(size_mb * 1024 * 1024);
+    std::fs::write(&path, &text).unwrap();
+    let (file_bytes, file_lines) = (text.len(), text.lines().count());
+    drop(text);
+    println!("MEM file: {:.1} MB, {} lines", mb(file_bytes), file_lines);
+    let x = |bytes: usize| bytes as f64 / file_bytes as f64;
+    {
+        let (settled, _, mut app) = open_and_measure(&ctx, &path, file_lines);
+        settle(&mut app, &ctx);
+        println!("MEM untracked file, settled                = {:8.1} MB  ({:.1}x file)", mb(settled), x(settled));
+
+        // 尋找列：Ctrl+F 打開後就會串接出全文；輸入查詢後再加上命中位置
+        let base = live();
+        let ctrl_f = egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        frame_with(&mut app, &ctx, vec![ctrl_f]);
+        settle(&mut app, &ctx);
+        let open = live().saturating_sub(base);
+        println!("MEM find bar opened (full-text cache)      = {:8.1} MB  ({:.1}x file)", mb(open), x(open));
+        frame_with(&mut app, &ctx, vec![egui::Event::Text("status=ok".into())]);
+        settle(&mut app, &ctx);
+        let hits = live().saturating_sub(base);
+        println!("MEM find bar with a query hitting every line = {:6.1} MB  ({:.1}x file)", mb(hits), x(hits));
+    }
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dir.path())
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "core.autocrlf=false"])
+            .args(args)
+            .output()
+            .expect("git is installed");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "big.log"]);
+    git(&["commit", "-q", "-m", "init"]);
+    {
+        let (_, _, mut app) = open_and_measure(&ctx, &path, file_lines);
+        let base_after_open = live();
+        reset_peak();
+        settle(&mut app, &ctx);
+        let extra = live().saturating_sub(base_after_open);
+        let peak = PEAK.load(Relaxed).saturating_sub(base_after_open);
+        println!("MEM tracked file: HEAD copy kept            = {:8.1} MB  ({:.1}x file), peak while reading it {:.1} MB", mb(extra), x(extra), mb(peak));
+    }
+
+    // ---- Typora 閱讀模式：Markdown 檔不走大檔案檢視 ----
+    for md_mb in [1usize, 4] {
+        let mut md = String::new();
+        let mut i = 0usize;
+        while md.len() < md_mb * 1024 * 1024 {
+            md.push_str(&format!(
+                "## Section {i}\n\nParagraph {i} with **bold**, `code` and a [link](https://example.com/{i}). Some more words to fill the line.\n\n- item one\n- item two\n\n"
+            ));
+            i += 1;
+        }
+        let path = dir.path().join(format!("big{md_mb}.md"));
+        std::fs::write(&path, &md).unwrap();
+        let (bytes, lines) = (md.len(), md.lines().count());
+        drop(md);
+        let (settled, peak, _app) = open_and_measure(&ctx, &path, lines);
+        println!(
+            "MEM Typora view of a {md_mb} MB Markdown file     = {:8.1} MB  ({:.1}x file), peak {:.1} MB",
+            mb(settled),
+            settled as f64 / bytes as f64,
+            mb(peak)
+        );
+    }
+}
