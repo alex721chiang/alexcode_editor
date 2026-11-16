@@ -329,6 +329,8 @@ pub struct AlexCodeApp {
     large_preedit: String,
     /// 大檔案檢視中內容最後一次變動：((分頁 id, 內容版本), 發現變動的時間)；Git 標記等內容停下來才重算
     large_marks_seen: ((u64, u64), std::time::Instant),
+    /// 拖曳選取到可見範圍外時，下一幀大檔案檢視要捲到的位置：(分頁 id, 捲動位移)
+    large_scroll_to: Option<(u64, Vec2)>,
 
     // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
     /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
@@ -491,6 +493,33 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// 雙擊選字的範圍（欄位，含頭不含尾）：點到的字元，連同左右相鄰、同一類（字 / 空白 / 其他符號）的字元。
+/// 點在一個字的右側（行尾，或右邊不是字）時選左邊那個字。只看點到的位置之後 `LARGE_VIEW_MAX_COLS` 個字元以內。
+fn word_bounds(line: &str, col: usize) -> (usize, usize) {
+    let chars: Vec<char> = line.chars().take(col.saturating_add(LARGE_VIEW_MAX_COLS)).collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let class = |c: char| if is_word_char(c) { 0 } else if c.is_whitespace() { 1 } else { 2 };
+    let mut i = col.min(chars.len() - 1);
+    if col > 0 && col <= chars.len() && is_word_char(chars[col - 1]) && !chars.get(col).is_some_and(|&c| is_word_char(c)) {
+        i = col - 1;
+    }
+    let k = class(chars[i]);
+    let a = (0..i).rev().take_while(|&j| class(chars[j]) == k).last().unwrap_or(i);
+    let b = (i + 1..chars.len()).take_while(|&j| class(chars[j]) == k).last().map_or(i + 1, |j| j + 1);
+    (a, b)
+}
+
+/// 拖曳選取時指標超出可見範圍 `over` 像素：每秒捲動幾像素（帶正負號）。
+/// 超出一點點時每秒約 8 個 `unit`（行高或字寬），越遠越快，最多每秒 6000 像素。
+fn edge_scroll_speed(over: f32, unit: f32) -> f32 {
+    if over == 0.0 {
+        return 0.0;
+    }
+    over.signum() * (unit * 8.0 + over.abs() * 10.0).min(6000.0)
+}
+
 /// 往左一個字元（`word` 為 true 時一個字）的位置；在行首時是上一行的行尾
 fn step_left(buf: &EditorBuffer, p: Position, word: bool) -> Position {
     if p.col == 0 {
@@ -640,6 +669,7 @@ impl AlexCodeApp {
             large_stats: ((0, 0), (0, 0)),
             large_preedit: String::new(),
             large_marks_seen: ((0, 0), std::time::Instant::now()),
+            large_scroll_to: None,
             hot_exit_key: Vec::new(),
             hot_exit_written: (std::time::Instant::now(), 0),
             hot_restore: HashMap::new(),
@@ -4860,7 +4890,14 @@ impl AlexCodeApp {
         }
 
         let mut toggle_bookmark = None;
-        let scroll = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]).show_viewport(
+        let mut area = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]);
+        // 上一幀拖曳選取到邊緣以外：照它算好的位置捲過去
+        if let Some((id, offset)) = self.large_scroll_to.take() {
+            if id == tab_id {
+                area = area.scroll_offset(offset);
+            }
+        }
+        let scroll = area.show_viewport(
             ui,
             |ui, viewport| {
                 let buf = &self.tabs[idx];
@@ -4884,7 +4921,8 @@ impl AlexCodeApp {
                     Position { line, col }
                 };
 
-                // ---- 滑鼠：點一下放游標（Shift 延伸選取）、拖曳選取、點行號區切換書籤 ----
+                // ---- 滑鼠：點一下放游標（Shift 延伸選取）、雙擊選字、三擊選行、拖曳選取、點行號區切換書籤 ----
+                let clip = ui.clip_rect();
                 let in_gutter = |p: Pos2| p.x < rect.left() + gutter_w;
                 let mut dragging = false;
                 if resp.clicked() {
@@ -4900,6 +4938,19 @@ impl AlexCodeApp {
                     }
                     ui.memory_mut(|m| m.request_focus(view_id));
                 }
+                // 雙擊 / 三擊時上面的單擊已經把游標放到點的位置，這裡再把選取擴大成那個字 / 那一行
+                //（與一般編輯區相同：三擊選整行但不含換行）
+                if resp.double_clicked() || resp.triple_clicked() {
+                    if let Some(p) = resp.interact_pointer_pos().filter(|p| !in_gutter(*p)) {
+                        let at = pos_at(ui, p);
+                        let (a, b) = if resp.triple_clicked() {
+                            (0, buf.line_len(at.line))
+                        } else {
+                            word_bounds(&buf.lines[at.line], at.col)
+                        };
+                        sel = Selection { anchor: Position { line: at.line, col: a }, head: Position { line: at.line, col: b } };
+                    }
+                }
                 if resp.drag_started() {
                     if let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|p| !in_gutter(*p)) {
                         sel.anchor = pos_at(ui, origin);
@@ -4907,15 +4958,33 @@ impl AlexCodeApp {
                     }
                     ui.memory_mut(|m| m.request_focus(view_id));
                 }
+                // 拖曳中指標超出可見範圍：依超出的距離持續捲動（越遠越快，與幀率無關），
+                // 選取的端點停在可見範圍的邊上，所以一直看得到
+                let mut edge_scroll = Vec2::ZERO;
                 if resp.dragged() {
                     if let Some(p) = resp.interact_pointer_pos() {
-                        sel.head = pos_at(ui, p);
+                        let (left, right) = (clip.left().max(text_x), clip.right() - 1.0);
+                        let (top, bottom) = (clip.top(), clip.bottom() - 1.0);
+                        let over = |v: f32, lo: f32, hi: f32| if v < lo { v - lo } else if v > hi { v - hi } else { 0.0 };
+                        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.1);
+                        edge_scroll = Vec2::new(
+                            edge_scroll_speed(over(p.x, left, right), char_w),
+                            edge_scroll_speed(over(p.y, top, bottom), row_h),
+                        ) * dt;
+                        sel.head = pos_at(ui, Pos2::new(p.x.clamp(left, right.max(left)), p.y.clamp(top, bottom.max(top))));
                         dragging = true;
+                    }
+                }
+                let mut next_offset = None;
+                if edge_scroll != Vec2::ZERO {
+                    let max = (size - viewport.size()).max(Vec2::ZERO);
+                    let to = (viewport.min.to_vec2() + edge_scroll).clamp(Vec2::ZERO, max);
+                    if to != viewport.min.to_vec2() {
+                        next_offset = Some(to);
                     }
                 }
 
                 // ---- 只畫看得到的行 ----
-                let clip = ui.clip_rect();
                 let painter = ui.painter();
                 let first = (((viewport.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line);
                 let last = (((viewport.bottom() - 4.0) / row_h).ceil().max(0.0) as usize).min(line_count);
@@ -4996,8 +5065,12 @@ impl AlexCodeApp {
                     }
                 }
 
-                // 游標移動後讓它留在畫面上；尋找 / 跳至行則把那一行帶到畫面中央
-                if scroll_to_cursor || moved || dragging {
+                // 游標移動後讓它留在畫面上；尋找 / 跳至行則把那一行帶到畫面中央。
+                // 拖曳選取時不用這個：端點本來就在可見範圍內，到邊緣以外時由上面的 `edge_scroll` 捲動
+                if dragging {
+                    ui.ctx().request_repaint();
+                }
+                if scroll_to_cursor || moved {
                     let x = text_x + x_of(&plain(ui, sel.head.line, &[]), sel.head.col);
                     let r = Rect::from_min_size(Pos2::new(x, y_of(sel.head.line)), egui::vec2(char_w, row_h));
                     if scroll_to_cursor {
@@ -5007,14 +5080,13 @@ impl AlexCodeApp {
                         let r = Rect::from_min_max(Pos2::new(r.left() - gutter_w - 10.0 - char_w * 4.0, r.top()), Pos2::new(r.right() + char_w * 4.0, r.bottom()));
                         ui.scroll_to_rect(r, None);
                     }
-                    if dragging {
-                        ui.ctx().request_repaint();
-                    }
                 }
-                Rect::from_min_max(Pos2::new(text_x, rect.top() + 4.0), rect.max)
+                (Rect::from_min_max(Pos2::new(text_x, rect.top() + 4.0), rect.max), clip, next_offset)
             },
         );
-        self.mark_rect("large-text", scroll.inner);
+        self.large_scroll_to = scroll.inner.2.map(|o| (tab_id, o));
+        self.mark_rect("large-text", scroll.inner.0);
+        self.mark_rect("large-clip", scroll.inner.1);
         let buf = &mut self.tabs[idx];
         buf.selections = vec![sel];
         buf.clamp_cursors();
@@ -6736,10 +6808,15 @@ mod tests {
 
     /// 開一個超過大檔案門檻（測試中調低）的分頁：每行都是 "line NNNNN some text here"，最後有一個空行
     fn large_app(ctx: &egui::Context, lines: usize) -> AlexCodeApp {
+        let text: String = (0..lines).map(|i| format!("line {i:05} some text here\n")).collect();
+        large_app_with(ctx, &text)
+    }
+
+    /// 同 `large_app`，內容由呼叫端提供
+    fn large_app_with(ctx: &egui::Context, text: &str) -> AlexCodeApp {
         let mut app = AlexCodeApp::new();
         app.large_view_bytes = 1000;
-        let text: String = (0..lines).map(|i| format!("line {i:05} some text here\n")).collect();
-        let mut b = EditorBuffer::from_text(&text);
+        let mut b = EditorBuffer::from_text(text);
         b.file_path = Some("big.log".into());
         app.tabs = vec![b];
         app.active_tab_idx = 0;
@@ -7117,6 +7194,148 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         assert!(app.git_marks.1.is_empty());
         assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty());
+    }
+
+    /// 在 `pos` 連按 `n` 下左鍵（2 = 雙擊、3 = 三擊）
+    fn multi_click(app: &mut AlexCodeApp, ctx: &egui::Context, pos: Pos2, n: usize) {
+        let button = |pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        // 先等過雙擊的間隔（每幀 1/60 秒），免得和上一次的點擊連成三擊
+        for _ in 0..30 {
+            frame(app, ctx, vec![]);
+        }
+        frame(app, ctx, vec![Event::PointerMoved(pos)]);
+        for _ in 0..n {
+            frame(app, ctx, vec![button(true)]);
+            frame(app, ctx, vec![button(false)]);
+        }
+        frame(app, ctx, vec![]);
+    }
+
+    fn selection(app: &AlexCodeApp) -> ((usize, usize), (usize, usize)) {
+        let s = app.tabs[0].selections[0];
+        ((s.anchor.line, s.anchor.col), (s.head.line, s.head.col))
+    }
+
+    #[test]
+    fn large_view_double_click_selects_a_word_and_triple_click_the_line() {
+        let ctx = ctx();
+        let mut text: String = (0..5000).map(|i| format!("line {i:05} some text here\n")).collect();
+        text.insert_str(0, "let some_value = foo(bar);  // 中文註解\n");
+        let mut app = large_app_with(&ctx, &text);
+        let area = app.probe["large-text"];
+        let row_h = row_height(&app, &ctx);
+        // 第 0 行第 `col` 個字元（小數部分 = 在那個字元裡的哪裡）在畫面上的位置，用實際排版量出來
+        let first = app.tabs[0].lines[0].clone();
+        let font = FontId::monospace(app.config.font_size);
+        let x_of = |n: usize| ctx.fonts(|f| f.layout_no_wrap(first.chars().take(n).collect(), font.clone(), Color32::WHITE).size().x);
+        let at = |col: f32| {
+            let n = col.floor() as usize;
+            let x = x_of(n) + (x_of(n + 1) - x_of(n)).max(1.0) * col.fract();
+            Pos2::new(area.left() + x, area.top() + row_h * 0.5)
+        };
+        let copy = |app: &mut AlexCodeApp| frame(app, &ctx, vec![Event::Copy]).platform_output.copied_text;
+
+        // 雙擊選取一個字（英數字與底線算同一個字）
+        multi_click(&mut app, &ctx, at(6.5), 2);
+        assert_eq!(selection(&app), ((0, 4), (0, 14)));
+        assert_eq!(copy(&mut app), "some_value");
+        multi_click(&mut app, &ctx, at(18.5), 2);
+        assert_eq!(copy(&mut app), "foo");
+        // 中文字連在一起算一個字
+        multi_click(&mut app, &ctx, at(31.3), 2);
+        assert_eq!(copy(&mut app), "中文註解");
+        // 點在空白上選取那一串空白；點在行尾右邊選取最後一個字
+        multi_click(&mut app, &ctx, at(26.3), 2);
+        assert_eq!(selection(&app), ((0, 26), (0, 28)));
+        multi_click(&mut app, &ctx, at(60.0), 2);
+        assert_eq!(selection(&app), ((0, 31), (0, 35)));
+
+        // 三擊選取整行（不含換行，與一般編輯區相同）；接著輸入會取代那一行的內容
+        multi_click(&mut app, &ctx, at(3.0), 3);
+        assert_eq!(selection(&app), ((0, 0), (0, 35)));
+        assert_eq!(copy(&mut app), "let some_value = foo(bar);  // 中文註解");
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!((app.tabs[0].lines[0].as_str(), app.tabs[0].lines.len()), ("X", 5002));
+
+        // 雙擊行號區只會切換書籤，不會選字
+        multi_click(&mut app, &ctx, Pos2::new(area.left() - 30.0, area.top() + row_h * 1.5), 2);
+        assert_eq!(selection(&app), ((0, 1), (0, 1)));
+        assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty());
+    }
+
+    /// 在 `from` 按下左鍵並拖到 `to`（不放開）
+    fn press_and_drag(app: &mut AlexCodeApp, ctx: &egui::Context, from: Pos2, to: Pos2) {
+        frame(app, ctx, vec![Event::PointerMoved(from)]);
+        frame(app, ctx, vec![Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
+        frame(app, ctx, vec![Event::PointerMoved(Pos2::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5))]);
+        frame(app, ctx, vec![Event::PointerMoved(to)]);
+    }
+
+    /// 把（仍按著的）指標移到 `to` 後不動，再跑 `frames` 幀；回傳每一幀之後游標的位置
+    fn hold_at(app: &mut AlexCodeApp, ctx: &egui::Context, to: Pos2, frames: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for i in 0..frames {
+            frame(app, ctx, if i == 0 { vec![Event::PointerMoved(to)] } else { vec![] });
+            out.push(cursor(app));
+        }
+        out
+    }
+
+    #[test]
+    fn large_view_keeps_scrolling_while_a_drag_is_held_past_the_edge() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 5000);
+        let clip = app.probe["large-clip"];
+        let row_h = row_height(&app, &ctx);
+        let x = app.probe["large-text"].left() + 20.0;
+        let visible = (clip.height() / row_h) as usize;
+        let lines = |v: &[(usize, usize)]| v.iter().map(|c| c.0).collect::<Vec<_>>();
+        press_and_drag(&mut app, &ctx, Pos2::new(x, clip.top() + row_h * 2.5), Pos2::new(x, clip.top() + row_h * 5.5));
+        assert_eq!(selection(&app).0 .0, 2);
+
+        // 拖到編輯區下緣再往下 1 行的地方不動：一秒內每一幀都繼續往下捲，選取跟著延伸
+        let near = lines(&hold_at(&mut app, &ctx, Pos2::new(x, clip.bottom() + row_h), 60));
+        assert!(near.windows(2).all(|w| w[1] >= w[0]), "{near:?}");
+        assert!(near[59] > near[40] && near[40] > near[20] && near[20] > near[0], "keeps scrolling: {near:?}");
+        assert!(near[59] > visible + 5, "went past the first screen: {near:?}");
+        // 游標所在的行一直在畫面上，起點沒變
+        let head = cursor(&app).0;
+        let y = large_row_y(&app, &ctx, head);
+        assert!(y > clip.top() - 1.0 && y < clip.bottom(), "head line {head} on screen (y = {y})");
+        assert_eq!(selection(&app).0, (2, selection(&app).0 .1));
+
+        // 拖得越遠捲得越快
+        let far = lines(&hold_at(&mut app, &ctx, Pos2::new(x, clip.bottom() + row_h * 10.0), 60));
+        assert!(far[59] - far[0] > (near[59] - near[0]) * 2, "near {near:?} far {far:?}");
+        // 但拖到很遠（例如視窗外）也不會一下子跳過一大段：每一幀最多捲幾行
+        let very_far = lines(&hold_at(&mut app, &ctx, Pos2::new(x, clip.bottom() + 3000.0), 20));
+        assert!(very_far.windows(2).all(|w| w[1] >= w[0] && w[1] - w[0] <= 8), "{very_far:?}");
+        assert!(very_far[19] > very_far[0]);
+
+        // 往上拖到上緣以外：往回捲
+        let up = lines(&hold_at(&mut app, &ctx, Pos2::new(x, clip.top() - row_h * 3.0), 30));
+        assert!(up.windows(2).all(|w| w[1] <= w[0]) && up[29] < up[0], "{up:?}");
+
+        // 放開之後就停下來
+        let release = Event::PointerButton { pos: Pos2::new(x, clip.top() - row_h * 3.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE };
+        frame(&mut app, &ctx, vec![release]);
+        let stopped = cursor(&app);
+        settle(&mut app, &ctx);
+        let y = large_row_y(&app, &ctx, 0);
+        for _ in 0..10 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert_eq!((cursor(&app), large_row_y(&app, &ctx, 0)), (stopped, y), "no scrolling after release");
+
+        // 橫向也一樣：長行拖到右緣以外時繼續往右捲
+        let long: String = (0..50).map(|i| format!("{}\n", "abcdefghij".repeat(40 + i))).collect();
+        let mut app = large_app_with(&ctx, &long);
+        let clip = app.probe["large-clip"];
+        let y = clip.top() + row_h * 1.5;
+        press_and_drag(&mut app, &ctx, Pos2::new(clip.left() + 200.0, y), Pos2::new(clip.left() + 400.0, y));
+        let cols: Vec<usize> = hold_at(&mut app, &ctx, Pos2::new(clip.right() + 30.0, y), 60).iter().map(|c| c.1).collect();
+        let shown = ((clip.width() - 60.0) / ctx.fonts(|f| f.glyph_width(&FontId::monospace(app.config.font_size), '0'))) as usize;
+        assert!(cols.windows(2).all(|w| w[1] >= w[0]) && cols[59] > cols[30] && cols[59] > shown, "{cols:?}");
     }
 
     /// 這一幀畫出的文字裡，底色是搜尋命中色的那些片段（已排序）
