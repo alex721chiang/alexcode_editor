@@ -340,7 +340,9 @@ pub struct AlexCodeApp {
 
     // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
     /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
-    hot_exit_key: Vec<(u64, u64, &'static str, Option<String>)>,
+    hot_exit_key: HotExitKey,
+    /// 正在背景執行緒寫的備份（內容很大時才用）：寫完交回 (寫的是哪些分頁的哪個版本, 內容大小, 寫入結果)
+    hot_exit_job: Option<std::thread::JoinHandle<(HotExitKey, usize, std::io::Result<()>)>>,
     /// 上次寫入備份檔的時間與內容大小（位元組）：內容很大時降低寫入頻率
     hot_exit_written: (std::time::Instant, usize),
     /// 等背景載入完成後要套回分頁的未存檔內容（依分頁 id）
@@ -720,6 +722,7 @@ impl AlexCodeApp {
             md_preview_bytes: MD_PREVIEW_MAX_BYTES,
             md_big_preview: HashSet::new(),
             hot_exit_key: Vec::new(),
+            hot_exit_job: None,
             hot_exit_written: (std::time::Instant::now(), 0),
             hot_restore: HashMap::new(),
             show_settings: false,
@@ -5346,6 +5349,9 @@ impl AlexCodeApp {
 const HOT_EXIT_SLOW_BYTES: usize = 4 * 1024 * 1024;
 const HOT_EXIT_SLOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// 備份檔裡是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
+type HotExitKey = Vec<(u64, u64, &'static str, Option<String>)>;
+
 impl AlexCodeApp {
     /// 熱結束備份檔的位置（與 `state.json` 同一個資料夾）。
     /// 不保存狀態（測試）或關閉「啟動時還原」時為 None：既然下次不會還原，結束時就照舊詢問。
@@ -5357,6 +5363,16 @@ impl AlexCodeApp {
     /// 把尚未存檔的分頁內容寫進備份檔。回傳 true 表示目前所有未存檔的內容都在備份裡
     /// （結束程式時可以不必詢問）。`force` 為 false 時內容沒變就不重寫，內容很大時降低寫入頻率。
     fn save_hot_exit(&mut self, force: bool) -> bool {
+        // 上一次交給背景執行緒寫的備份：寫完了就收回結果。還沒寫完時，定期的呼叫下次再來看；
+        // 結束程式時的呼叫（`force`）則等它寫完，免得兩邊同時寫同一個檔案
+        let mut just_written = false;
+        if let Some(job) = self.hot_exit_job.take() {
+            if !force && !job.is_finished() {
+                self.hot_exit_job = Some(job);
+                return false;
+            }
+            just_written = self.finish_hot_exit_write(job.join());
+        }
         let Some(path) = self.hot_exit_path() else {
             // 這次執行中才關掉「啟動時還原」：先前寫的備份不會再被還原，一併移除
             if !self.hot_exit_key.is_empty() {
@@ -5377,6 +5393,9 @@ impl AlexCodeApp {
             .map(|b| (b.id, b.revision(), b.encoding.label(), b.file_path.clone()))
             .collect();
         key.extend(waiting.iter().map(|id| (*id, u64::MAX, "", None)));
+        if force && just_written && key == self.hot_exit_key {
+            return true; // 背景剛寫完的就是現在的內容
+        }
         if !force {
             if key == self.hot_exit_key {
                 return true;
@@ -5408,14 +5427,39 @@ impl AlexCodeApp {
             .collect();
         tabs.extend(waiting.iter().filter_map(|id| self.hot_restore.get(id).cloned()));
         let size = tabs.iter().map(|t| t.text.len()).sum();
-        match (HotExit { tabs }).save(&path) {
-            Ok(()) => {
+        let backup = HotExit { tabs };
+        if !force && size > HOT_EXIT_SLOW_BYTES {
+            // 內容很大：轉成 JSON 與寫檔放到背景執行緒，介面不必等（量測：29 MB 的內容一次約 150 ms）。
+            // 寫完之前回報「還沒備份好」；結果由下一次呼叫收回來
+            let repaint = self.repaint.clone();
+            self.hot_exit_written = (std::time::Instant::now(), size);
+            self.hot_exit_job = Some(std::thread::spawn(move || {
+                let result = backup.save(&path);
+                if let Some(ctx) = repaint {
+                    ctx.request_repaint();
+                }
+                (key, size, result)
+            }));
+            return false;
+        }
+        let result = backup.save(&path);
+        self.finish_hot_exit_write(Ok((key, size, result)))
+    }
+
+    /// 記下一次備份寫入的結果（同步寫的，或背景執行緒寫完交回來的）；回傳是否寫成功
+    fn finish_hot_exit_write(&mut self, done: std::thread::Result<(HotExitKey, usize, std::io::Result<()>)>) -> bool {
+        match done {
+            Ok((key, size, Ok(()))) => {
                 self.hot_exit_key = key;
                 self.hot_exit_written = (std::time::Instant::now(), size);
                 true
             }
-            Err(e) => {
+            Ok((_, _, Err(e))) => {
                 self.status_message = format!("未存檔內容的備份寫入失敗：{}", e);
+                false
+            }
+            Err(_) => {
+                self.status_message = "未存檔內容的備份寫入失敗：背景執行緒異常結束".to_string();
                 false
             }
         }
@@ -7875,6 +7919,66 @@ mod tests {
     }
 
     #[test]
+    fn large_hot_exit_backups_are_written_in_the_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join("cfg").join("hot_exit.json");
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(dir.path().join("cfg").join("state.json"));
+        app.new_tab();
+        let i = app.active_tab_idx;
+        let big = format!("{}\n", "x".repeat(99)).repeat(HOT_EXIT_SLOW_BYTES / 100 + 100);
+        app.tabs[i].replace_all_text(&big);
+        let saved_text = |path: &Path| HotExit::load(path).expect("a readable backup").tabs[0].text.clone();
+        let top = Position { line: 0, col: 0 };
+        let overdue = |app: &mut AlexCodeApp| app.hot_exit_written.0 -= HOT_EXIT_SLOW_INTERVAL * 2;
+
+        // 定期的寫入：內容很大時交給背景執行緒，呼叫立刻回來，寫完之前算「還沒備份好」
+        assert!(!app.save_hot_exit(false));
+        assert!(app.hot_exit_job.is_some(), "the write runs on a background thread");
+        let t = std::time::Instant::now();
+        while !app.save_hot_exit(false) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(20), "the background write never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(app.hot_exit_job.is_none());
+        assert_eq!(saved_text(&backup).len(), app.tabs[i].edit_text().len());
+
+        // 內容又變了：30 秒內不重寫；結束程式時（force）一定寫完最新的內容才回來
+        app.tabs[i].replace_range(top, top, "a", true);
+        assert!(!app.save_hot_exit(false) && app.hot_exit_job.is_none());
+        assert!(app.save_hot_exit(true));
+        assert!(saved_text(&backup).starts_with("ax"));
+
+        // 背景還在寫的時候結束程式：等它寫完，再把之後的修改也寫進去
+        app.tabs[i].replace_range(top, top, "b", true);
+        overdue(&mut app);
+        assert!(!app.save_hot_exit(false) && app.hot_exit_job.is_some());
+        app.tabs[i].replace_range(top, top, "c", true);
+        assert!(app.save_hot_exit(true));
+        assert!(app.hot_exit_job.is_none());
+        assert!(saved_text(&backup).starts_with("cbax"));
+
+        // 背景寫完之後內容沒有再變：結束時不必重寫一次
+        app.tabs[i].replace_range(top, top, "d", true);
+        overdue(&mut app);
+        assert!(!app.save_hot_exit(false));
+        while !app.hot_exit_job.as_ref().is_some_and(|j| j.is_finished()) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let written = std::fs::metadata(&backup).unwrap().modified().unwrap();
+        assert!(app.save_hot_exit(true));
+        assert_eq!(std::fs::metadata(&backup).unwrap().modified().unwrap(), written, "not written twice");
+        assert!(saved_text(&backup).starts_with("dcbax"));
+
+        // 小的內容照舊當場寫完
+        app.tabs[i].replace_all_text("small");
+        overdue(&mut app);
+        assert!(app.save_hot_exit(false));
+        assert!(app.hot_exit_job.is_none());
+        assert_eq!(saved_text(&backup), "small");
+    }
+
+    #[test]
     fn big_markdown_files_are_shown_as_source_instead_of_the_reading_view() {
         let ctx = ctx();
         let md: String = (0..400).map(|i| format!("## Section {i}\n\nParagraph {i} with **bold** text.\n\n")).collect();
@@ -8006,6 +8110,9 @@ mod tests {
 
         // 3. 熱結束：未存檔的大檔案每 30 秒把整份內容寫進備份檔一次（在介面執行緒上）
         assert!(app.tabs[0].modified);
+        let t = now();
+        let done = app.save_hot_exit(false);
+        println!("COST hot-exit periodic write, on the UI thread = {:8.1} ms (finished={done}: the rest runs in the background)", ms(t));
         let t = now();
         let ok = app.save_hot_exit(true);
         let written = std::fs::metadata(dir.path().join("hot_exit.json")).map_or(0, |m| m.len());
