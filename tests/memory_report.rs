@@ -134,14 +134,14 @@ fn type_chars(app: &mut AlexCodeApp, ctx: &egui::Context, n: usize) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0 / n as f64
 }
 
-/// 每次 `cargo test` 都會跑的回歸測試：5 MB 的檔案（超過大檔案檢視的門檻）開啟後，
+/// 每次 `cargo test` 都會跑的回歸測試：3 MB 的檔案（超過大檔案檢視的門檻 2 MB）開啟後，
 /// 程式多用的記憶體不得超過檔案大小的 4 倍。改用大檔案檢視之前約是 200 倍。
 #[test]
 fn opening_a_large_file_stays_within_a_few_times_its_size() {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big.log");
-    let text = sample_text(5 * 1024 * 1024);
+    let text = sample_text(3 * 1024 * 1024);
     std::fs::write(&path, &text).unwrap();
     let (file_bytes, file_lines) = (text.len(), text.lines().count());
     drop(text);
@@ -150,7 +150,7 @@ fn opening_a_large_file_stays_within_a_few_times_its_size() {
     alexcode::ui::style::setup_fonts(&ctx);
     let (settled, peak, mut app) = open_and_measure(&ctx, &path, file_lines);
     let ratio = settled as f64 / file_bytes as f64;
-    println!("MEM 5 MB file: settled {:.1} MB ({ratio:.1}x), peak {:.1} MB", mb(settled), mb(peak));
+    println!("MEM 3 MB file: settled {:.1} MB ({ratio:.1}x), peak {:.1} MB", mb(settled), mb(peak));
     assert!(ratio <= 4.0, "memory after opening is {ratio:.1}x the file size ({:.1} MB)", mb(settled));
     assert!(peak as f64 <= 8.0 * file_bytes as f64, "peak while opening is {:.1} MB", mb(peak));
 

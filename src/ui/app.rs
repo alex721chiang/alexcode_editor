@@ -327,6 +327,8 @@ pub struct AlexCodeApp {
     /// 目前分頁的大小統計快取：鍵為 (分頁 id, 內容版本)，值為 (位元組數, 最寬一行的欄數)。
     /// 欄數只在文件達到門檻時才計算。
     large_stats: ((u64, u64), (usize, usize)),
+    /// 目前分頁（以大檔案檢視顯示時）是否有超過 `LARGE_VIEW_MAX_COLS` 個字元、只顯示開頭的行；與 `large_stats` 一起更新
+    large_cut: bool,
     /// 大檔案檢視中輸入法正在組字的文字（還沒寫進文件）
     large_preedit: String,
     /// 大檔案檢視中內容最後一次變動：((分頁 id, 內容版本), 發現變動的時間)；Git 標記等內容停下來才重算
@@ -469,8 +471,11 @@ const HIGHLIGHT_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// 達到這個大小的文件改用大檔案檢視（只排版畫面上看得到的行）。
 /// 一般編輯區把整份文字交給 egui 排成一個 Galley，每個位元組的文字約佔 200 位元組記憶體
-/// （`tests/memory_report.rs` 的量測：4 MB 的檔案約 790 MB、29 MB 約 5.7 GB）。
-const LARGE_VIEW_BYTES: usize = 4 * 1024 * 1024;
+/// （`tests/memory_report.rs` 的量測：3 MB 的檔案約 600 MB、4 MB 約 790 MB、29 MB 約 5.7 GB）。
+/// 門檻就是不再做語法高亮的大小：全文超過 `HIGHLIGHT_MAX_BYTES` 的文件在一般編輯區裡也沒有語法高亮與
+/// Sticky Scroll，換成大檔案檢視不會少東西；更小的文件要留在一般編輯區才有語法高亮。
+/// （`+ 2`：這個門檻比的是每行長度 + 1 的總和，也就是全文長度 + 1，而且用 `>=` 比。）
+const LARGE_VIEW_BYTES: usize = HIGHLIGHT_MAX_BYTES + 2;
 
 /// Markdown 檔達到這個大小就不用閱讀 / 雙欄模式，改以原始碼顯示：那兩種模式每一幀都解析並排版整份文件
 /// （`large_file_cost_report` 的量測：1 MB 的檔案每一幀 181 ms、4 MB 676 ms；這個門檻大約是每一幀 45 ms）。
@@ -721,6 +726,7 @@ impl AlexCodeApp {
             large_view_bytes: LARGE_VIEW_BYTES,
             large_edit: HashSet::new(),
             large_stats: ((0, 0), (0, 0)),
+            large_cut: false,
             large_preedit: String::new(),
             large_marks_seen: ((0, 0), std::time::Instant::now()),
             large_scroll_to: None,
@@ -4640,6 +4646,7 @@ impl AlexCodeApp {
             let bytes = buf.lines.iter().map(|l| l.len() + 1).sum::<usize>();
             let large = bytes >= self.large_view_bytes && !self.large_edit.contains(&buf.id);
             let cols = if large { buf.lines.iter().map(|l| display_cols(l)).max().unwrap_or(0) } else { 0 };
+            self.large_cut = large && buf.lines.iter().any(|l| shown_part(l).1);
             self.large_stats = (key, (bytes, cols));
         }
         self.large_stats.1 .0 >= self.large_view_bytes && !self.large_edit.contains(&buf.id)
@@ -4736,24 +4743,29 @@ impl AlexCodeApp {
         self.sticky_rows.clear();
         self.sticky_below = 0;
 
-        // 說明列：這個檢視少了什麼，以及怎麼換回一般編輯區
+        // 說明列：只在這個檢視真的少了東西時出現——有超過 `LARGE_VIEW_MAX_COLS` 個字元的行只顯示開頭，
+        // 要看到整行得換回一般編輯區。其他情況下大檔案檢視什麼都不缺，不佔這一列
         let mut switch = false;
-        egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 4.0)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let size = bytes as f64 / (1024.0 * 1024.0);
-                ui.label(
-                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體"))
+        if self.large_cut {
+            egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 4.0)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let size = bytes as f64 / (1024.0 * 1024.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "這個檔案很大（{size:.1} MB），而且有超過 {LARGE_VIEW_MAX_COLS} 個字元的行：那些行只顯示開頭"
+                        ))
                         .size(12.0)
                         .color(c.fg_dim),
-                );
-                let need = size * 200.0;
-                let need = if need >= 1024.0 { format!("{:.1} GB", need / 1024.0) } else { format!("{need:.0} MB") };
-                let resp = ui.button(RichText::new(format!("改用一般編輯區（約需 {need} 記憶體）")).size(12.0));
-                switch = resp.clicked();
-                self.mark("large-edit", &resp);
-                ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                    );
+                    let need = size * 200.0;
+                    let need = if need >= 1024.0 { format!("{:.1} GB", need / 1024.0) } else { format!("{need:.0} MB") };
+                    let resp = ui.button(RichText::new(format!("改用一般編輯區顯示整行（約需 {need} 記憶體）")).size(12.0));
+                    switch = resp.clicked();
+                    self.mark("large-edit", &resp);
+                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                });
             });
-        });
+        }
         if switch {
             self.large_edit.insert(tab_id);
             self.sync_cursor_to_editor();
@@ -5009,7 +5021,8 @@ impl AlexCodeApp {
                 }
             }
             let edited = buf.revision() != rev;
-            if edited && small_edits {
+            // （有行被截短、或這一行可能剛變得太長時不走這條捷徑：重新掃一次才知道說明列該不該在）
+            if edited && small_edits && !self.large_cut && buf.lines[sel.head.line].len() <= LARGE_VIEW_MAX_COLS {
                 let bytes = buf.lines.iter().map(|l| l.len() + 1).sum::<usize>();
                 max_cols = max_cols.max(display_cols(&buf.lines[sel.head.line]));
                 self.large_stats = ((tab_id, buf.revision()), (bytes, max_cols));
@@ -7556,9 +7569,60 @@ mod tests {
     }
 
     #[test]
+    fn files_too_big_to_highlight_use_the_large_view() {
+        // 門檻就是不再做語法高亮的大小：剛好 `HIGHLIGHT_MAX_BYTES` 的文件仍用一般編輯區（有語法高亮），多一個位元組就換
+        let mut text = format!("{}\n", "x".repeat(99)).repeat(HIGHLIGHT_MAX_BYTES / 100);
+        text.push_str(&"x".repeat(HIGHLIGHT_MAX_BYTES - text.len()));
+        assert_eq!(text.len(), HIGHLIGHT_MAX_BYTES);
+        let mut app = AlexCodeApp::new();
+        app.tabs = vec![EditorBuffer::from_text(&text)];
+        app.active_tab_idx = 0;
+        assert!(!app.uses_large_view(0), "a file that is still highlighted stays in the normal editor");
+        text.push('x');
+        app.tabs = vec![EditorBuffer::from_text(&text)];
+        app.large_stats.0 = (0, 0);
+        assert!(app.uses_large_view(0), "one byte past the highlight limit uses the large-file view");
+    }
+
+    #[test]
+    fn large_view_offers_the_normal_editor_only_when_a_line_is_cut() {
+        // 沒有被截短的行：大檔案檢視什麼都不缺，沒有說明列也沒有按鈕，文字從編輯區最上面開始
+        let ctx = ctx();
+        let app = large_app(&ctx, 200);
+        assert!(!app.probe.contains_key("large-edit"), "no switch button");
+        let top = app.probe["large-text"].top();
+
+        // 有一行超過顯示上限：多一列說明與按鈕（文字往下移）
+        let ctx2 = self::ctx();
+        let long = "x".repeat(LARGE_VIEW_MAX_COLS + 500);
+        let rest: String = (0..200).map(|i| format!("line {i:05} some text here\n")).collect();
+        let mut app2 = large_app_with(&ctx2, &format!("{long}\n{rest}"));
+        assert!(app2.probe.contains_key("large-edit"), "the button is offered when a line is cut");
+        assert!(app2.probe["large-text"].top() > top + 10.0, "the bar sits above the text");
+
+        // 把那一行刪短之後就不再需要：說明列消失
+        app2.tabs[0].replace_range(Position { line: 0, col: 10 }, Position { line: 0, col: LARGE_VIEW_MAX_COLS + 500 }, "", false);
+        frame(&mut app2, &ctx2, vec![]);
+        frame(&mut app2, &ctx2, vec![]);
+        assert!(app2.highlight_cache.is_none(), "still the large-file view");
+        assert!((app2.probe["large-text"].top() - top).abs() < 0.5, "the bar is gone once no line is cut");
+
+        // 反過來：在大檔案檢視裡把一行打到超過上限，說明列就出現
+        let ctx3 = self::ctx();
+        let mut app3 = large_app(&ctx3, 200);
+        frame(&mut app3, &ctx3, vec![Event::Paste("y".repeat(LARGE_VIEW_MAX_COLS))]);
+        frame(&mut app3, &ctx3, vec![Event::Text("z".into())]);
+        frame(&mut app3, &ctx3, vec![]);
+        assert!(app3.probe.contains_key("large-edit"), "the bar appears when typing makes a line too long");
+    }
+
+    #[test]
     fn large_view_can_be_switched_to_the_normal_editor() {
         let ctx = ctx();
-        let mut app = large_app(&ctx, 200);
+        // 按鈕只在有行被截短時出現：最後加一行超過顯示上限的
+        let mut text: String = (0..200).map(|i| format!("line {i:05} some text here\n")).collect();
+        text.push_str(&"x".repeat(LARGE_VIEW_MAX_COLS + 500));
+        let mut app = large_app_with(&ctx, &text);
         let i = AlexCodeApp::char_index_of(&app.tabs[0], 3, 4);
         app.pending_select = Some((i, i));
         frame(&mut app, &ctx, vec![]);
