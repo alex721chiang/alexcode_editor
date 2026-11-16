@@ -346,7 +346,7 @@ fn large_file_extras_memory_report() {
         drop(md);
         let (settled, peak, _app) = open_and_measure(&ctx, &path, lines);
         println!(
-            "MEM Typora view of a {md_mb} MB Markdown file     = {:8.1} MB  ({:.1}x file), peak {:.1} MB",
+            "MEM {md_mb} MB Markdown file as opened (shown as source above 256 KB; was the Typora view) = {:8.1} MB  ({:.1}x file), peak {:.1} MB",
             mb(settled),
             settled as f64 / bytes as f64,
             mb(peak)

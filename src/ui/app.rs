@@ -333,6 +333,10 @@ pub struct AlexCodeApp {
     large_scroll_to: Option<(u64, Vec2)>,
     /// 大檔案檢視上一幀的折行寬度（沒有開自動換行時為 None）：上下鍵要用它算出游標在哪一列
     large_wrap_w: Option<f32>,
+    /// Markdown 檔達到多少位元組就以原始碼顯示（測試中可調低）
+    md_preview_bytes: usize,
+    /// 使用者選擇仍要用閱讀模式的大 Markdown 分頁（依 id）
+    md_big_preview: HashSet<u64>,
 
     // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
     /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
@@ -463,6 +467,13 @@ const HIGHLIGHT_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// 一般編輯區把整份文字交給 egui 排成一個 Galley，每個位元組的文字約佔 200 位元組記憶體
 /// （`tests/memory_report.rs` 的量測：4 MB 的檔案約 790 MB、29 MB 約 5.7 GB）。
 const LARGE_VIEW_BYTES: usize = 4 * 1024 * 1024;
+
+/// Markdown 檔達到這個大小就不用閱讀 / 雙欄模式，改以原始碼顯示：那兩種模式每一幀都解析並排版整份文件
+/// （`large_file_cost_report` 的量測：1 MB 的檔案每一幀 181 ms、4 MB 676 ms；這個門檻大約是每一幀 45 ms）。
+const MD_PREVIEW_MAX_BYTES: usize = 256 * 1024;
+
+/// 閱讀模式下每 MB 的 Markdown 大約多用幾 MB 記憶體（`tests/memory_report.rs` 的量測：135–155 倍）
+const MD_PREVIEW_MEM_FACTOR: f64 = 150.0;
 
 /// 大檔案檢視中一行最多顯示幾個字元：更長的行只顯示開頭，避免單獨一行就排出巨大的版面
 const LARGE_VIEW_MAX_COLS: usize = 20_000;
@@ -706,6 +717,8 @@ impl AlexCodeApp {
             large_marks_seen: ((0, 0), std::time::Instant::now()),
             large_scroll_to: None,
             large_wrap_w: None,
+            md_preview_bytes: MD_PREVIEW_MAX_BYTES,
+            md_big_preview: HashSet::new(),
             hot_exit_key: Vec::new(),
             hot_exit_written: (std::time::Instant::now(), 0),
             hot_restore: HashMap::new(),
@@ -3089,8 +3102,14 @@ impl AlexCodeApp {
             return;
         }
         let pal = self.theme_mgr.current_palette().clone();
-        let is_md = self.tab_lang(self.active_tab_idx) == Lang::Markdown;
+        // 很大的 Markdown 檔當成一般文字檔顯示（原始碼）：閱讀 / 雙欄模式每一幀都解析並排版整份文件
+        let md_lang = self.tab_lang(self.active_tab_idx) == Lang::Markdown;
+        let md_big = md_lang && self.md_too_big(self.active_tab_idx);
+        let is_md = md_lang && !md_big;
         let filtering = self.filter_active && !self.filter_query.trim().is_empty();
+        if !filtering && md_big {
+            self.md_big_bar(ctx, c);
+        }
 
         if !filtering && is_md {
             // Markdown 專屬頂部工具列（Typora 閱讀 / 雙欄 / 原始碼 切換 + 快速格式插入）
@@ -4596,6 +4615,43 @@ impl AlexCodeApp {
             self.large_stats = (key, (bytes, cols));
         }
         self.large_stats.1 .0 >= self.large_view_bytes && !self.large_edit.contains(&buf.id)
+    }
+
+    /// 這個 Markdown 分頁是否大到不該用閱讀 / 雙欄模式（使用者按了「仍要使用閱讀模式」的分頁除外）
+    fn md_too_big(&mut self, idx: usize) -> bool {
+        self.uses_large_view(idx); // 更新 `large_stats`
+        let Some(buf) = self.tabs.get(idx) else { return false };
+        self.large_stats.0 .0 == buf.id && self.large_stats.1 .0 >= self.md_preview_bytes && !self.md_big_preview.contains(&buf.id)
+    }
+
+    /// 很大的 Markdown 檔以原始碼顯示時的說明列：為什麼，以及怎麼換回閱讀模式
+    fn md_big_bar(&mut self, ctx: &egui::Context, c: &Colors) {
+        let Some(id) = self.tabs.get(self.active_tab_idx).map(|b| b.id) else { return };
+        let size = self.large_stats.1 .0 as f64 / (1024.0 * 1024.0);
+        let mut preview = false;
+        egui::TopBottomPanel::top("md_big_bar")
+            .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 4.0)))
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "這個 Markdown 檔很大（{size:.1} MB）：以原始碼顯示。閱讀 / 雙欄模式每一幀都要排版整份文件，會拖慢畫面"
+                        ))
+                        .size(12.0)
+                        .color(c.fg_dim),
+                    );
+                    let need = (size * MD_PREVIEW_MEM_FACTOR).max(1.0);
+                    let resp = ui.button(RichText::new(format!("仍要使用閱讀模式（約需 {need:.0} MB 記憶體）")).size(12.0));
+                    preview = resp.clicked();
+                    self.mark("md-big-preview", &resp);
+                });
+            });
+        if preview {
+            self.md_big_preview.insert(id);
+            self.md_view.mode = MdViewMode::Typora;
+            ctx.request_repaint();
+        }
     }
 
     /// TextEdit 字元索引 → (行, 列)（`char_index_of` 的反向）
@@ -7818,6 +7874,56 @@ mod tests {
         assert!(split.contains(&"Cat notes".to_string()) && !split.contains(&"A cat sat".to_string()), "{split:?}");
     }
 
+    #[test]
+    fn big_markdown_files_are_shown_as_source_instead_of_the_reading_view() {
+        let ctx = ctx();
+        let md: String = (0..400).map(|i| format!("## Section {i}\n\nParagraph {i} with **bold** text.\n\n")).collect();
+        let open = |text: &str, limit: usize| {
+            let mut app = AlexCodeApp::new();
+            app.md_preview_bytes = limit;
+            let mut b = EditorBuffer::from_text(text);
+            b.file_path = Some("notes.md".into());
+            app.tabs = vec![b];
+            app.active_tab_idx = 0;
+            app.md_view.mode = MdViewMode::Typora;
+            frame(&mut app, &ctx, vec![]);
+            app
+        };
+        let has = |out: &egui::FullOutput, what: &str| painted_texts(out).iter().any(|t| t.contains(what));
+
+        // 小於門檻：照舊是閱讀模式（標題不帶 `##`），沒有說明列
+        let mut small = open(&md, md.len() + 100);
+        let out = frame(&mut small, &ctx, vec![]);
+        assert!(has(&out, "Section 0") && !has(&out, "## Section 0"), "rendered, not source");
+        assert!(!has(&out, "以原始碼顯示") && small.highlight_cache.is_none());
+
+        // 達到門檻：以原始碼顯示，並說明原因；模式設定本身不變
+        let mut app = open(&md, 1000);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(has(&out, "## Section 0"), "the Markdown source is shown");
+        assert!(has(&out, "以原始碼顯示"), "and a bar says why");
+        assert!(app.highlight_cache.is_some(), "it is the code editor");
+        assert_eq!(app.md_view.mode, MdViewMode::Typora);
+        // 可以直接打字
+        app.pending_select = Some((0, 0));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!(app.tabs[0].lines[0], "X## Section 0");
+
+        // 按「仍要使用閱讀模式」：只有這個分頁換回閱讀模式
+        let pos = app.probe["md-big-preview"].center();
+        click(&mut app, &ctx, pos);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!has(&out, "以原始碼顯示") && !has(&out, "## Section 1"), "back in the reading view");
+        assert!(has(&out, "Section 1"));
+
+        // 其他格式的檔案不受影響
+        let mut code = open(&md, 1000);
+        code.tabs[0].file_path = Some("notes.txt".into());
+        let out = frame(&mut code, &ctx, vec![]);
+        assert!(!has(&out, "以原始碼顯示"));
+    }
+
     /// 大檔案其餘部分的耗時量測（待辦 3e）：Git 標記重算、尋找列、熱結束備份、Typora 閱讀模式。
     /// `cargo test --release --lib large_file_cost_report -- --ignored --nocapture`
     /// 檔案大小以 `ALEXCODE_MEM_REPORT_MB` 指定（預設 29）；記憶體用量在 `tests/memory_report.rs` 量。
@@ -7922,6 +8028,18 @@ mod tests {
             app.tabs = vec![b];
             app.active_tab_idx = 0;
             app.md_view.mode = MdViewMode::Typora;
+            // 預設：超過門檻的 Markdown 檔以原始碼顯示
+            let t = now();
+            frame(&mut app, &ctx, vec![]);
+            let first = ms(t);
+            let t = now();
+            for _ in 0..3 {
+                frame(&mut app, &ctx, vec![]);
+            }
+            println!("COST {md_mb} MB Markdown file shown as source        = {:8.1} ms per frame (first frame {first:.1} ms)", ms(t) / 3.0);
+            // 使用者選擇仍要用閱讀模式
+            let id = app.tabs[0].id;
+            app.md_big_preview.insert(id);
             let t = now();
             frame(&mut app, &ctx, vec![]);
             let first = ms(t);
