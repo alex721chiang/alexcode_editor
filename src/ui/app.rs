@@ -216,6 +216,8 @@ pub struct AlexCodeApp {
     highlight_cache: Option<(u64, Arc<egui::Galley>, FontAtlas)>,
     /// 尋找列命中位置快取
     find_cache: ((u64, u64, String), Vec<(usize, usize)>),
+    /// 大檔案裡尋找列的命中數等內容停止變動才重算：(最後一次看到的 (分頁 id, 內容版本), 發現變動的時間)
+    find_seen: ((u64, u64), std::time::Instant),
     /// Log 篩選命中的行號快取
     filter_cache: (Option<(u64, u64, String, bool, bool)>, Vec<usize>),
     /// 背景執行中的全專案搜尋
@@ -484,6 +486,9 @@ const LARGE_VIEW_MAX_COLS: usize = 20_000;
 /// （比對要掃過整份文件與 HEAD 內容，每按一個鍵就算一次會拖慢輸入）
 const LARGE_GIT_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
+/// 大檔案檢視中，內容停止變動這麼久之後才重算尋找列的命中數（要串接全文再搜尋一次）
+const LARGE_FIND_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// 一行在等寬字型下大約佔幾欄（全形字算 2 欄、Tab 算 4 欄）；只看前 `LARGE_VIEW_MAX_COLS` 個字元
 fn display_cols(line: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
@@ -666,6 +671,7 @@ impl AlexCodeApp {
             text_cache: ((0, 0), String::new()),
             highlight_cache: None,
             find_cache: ((0, 0, String::new()), Vec::new()),
+            find_seen: ((0, 0), std::time::Instant::now()),
             filter_cache: (None, Vec::new()),
             find_job: None,
             last_title: String::new(),
@@ -2374,16 +2380,35 @@ impl AlexCodeApp {
             return;
         }
         // 全文與命中位置都只在內容、搜尋字串或選項改變時重算
-        self.sync_text_cache();
-        let fkey = (
-            self.text_cache.0 .0,
-            self.text_cache.0 .1,
-            format!("{}\u{0}{:?}", self.find_bar_text, self.find_opts),
-        );
+        let idx = self.active_tab_idx;
+        let key = self.tabs.get(idx).map_or(self.text_cache.0, |b| (b.id, b.revision()));
+        let fkey = (key.0, key.1, format!("{}\u{0}{:?}", self.find_bar_text, self.find_opts));
         if self.find_cache.0 != fkey {
-            let found = find_all(&self.text_cache.1, &self.find_bar_text, &self.find_opts);
-            self.find_error = found.as_ref().err().cloned();
-            self.find_cache = (fkey, found.unwrap_or_default());
+            // 大檔案（大檔案檢視）裡每打一個字就串接全文再搜尋一次太慢（29 MB 的檔案約 30 ms）：
+            // 只有內容變了的時候，等停止輸入 `LARGE_FIND_DELAY` 之後才重算，這段時間命中數沿用舊的。
+            // 尋找下一個 / 取代不看這份快取，不受影響
+            let large = self.uses_large_view(idx);
+            let only_content = self.find_cache.0 .0 == fkey.0 && self.find_cache.0 .2 == fkey.2;
+            let mut wait = None;
+            if large && only_content {
+                if self.find_seen.0 != key {
+                    self.find_seen = (key, std::time::Instant::now());
+                }
+                wait = LARGE_FIND_DELAY.checked_sub(self.find_seen.1.elapsed()).filter(|d| !d.is_zero());
+            }
+            match wait {
+                Some(d) => ctx.request_repaint_after(d),
+                None => {
+                    self.sync_text_cache();
+                    let found = find_all(&self.text_cache.1, &self.find_bar_text, &self.find_opts);
+                    self.find_error = found.as_ref().err().cloned();
+                    self.find_cache = (fkey, found.unwrap_or_default());
+                    if large {
+                        // 大檔案檢視不用全文快取：算完就放掉，不留一份與檔案一樣大的複本
+                        self.text_cache = ((0, 0), String::new());
+                    }
+                }
+            }
         }
         let total = self.find_cache.1.len();
         // (往下找?), 取代, 全部取代
@@ -7916,6 +7941,59 @@ mod tests {
         app.find_bar_text = "Cat".into();
         let split = hits(&mut app);
         assert!(split.contains(&"Cat notes".to_string()) && !split.contains(&"A cat sat".to_string()), "{split:?}");
+    }
+
+    #[test]
+    fn find_bar_count_in_large_files_waits_for_typing_to_pause() {
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 200);
+        app.show_find_bar = true;
+        app.find_bar_text = "line".into();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.find_cache.1.len(), 200);
+        assert!(app.text_cache.1.is_empty(), "the joined copy of the text is dropped once the count is known");
+
+        // 在文件裡打字：命中數先沿用舊的，不是每個字元都重新串接全文再搜尋
+        frame(&mut app, &ctx, vec![Event::Text("line ".into())]);
+        frame(&mut app, &ctx, vec![Event::Text("line ".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[0], "line line line 00000 some text here");
+        assert_eq!(app.find_cache.1.len(), 200, "not recounted while typing");
+        assert!(app.text_cache.1.is_empty());
+        // 停下來之後才重算
+        std::thread::sleep(LARGE_FIND_DELAY + std::time::Duration::from_millis(30));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.find_cache.1.len(), 202);
+        assert!(app.text_cache.1.is_empty());
+
+        // 改了查詢字串或選項：立刻重算
+        app.find_bar_text = "00001".into();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.find_cache.1.len(), 1);
+        app.find_bar_text = "LINE".into();
+        app.find_opts.case_sensitive = true;
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.find_cache.1.len(), 0);
+
+        // 尋找下一個不看這份快取：剛打完字就按也找得到新的內容
+        app.find_opts.case_sensitive = false;
+        app.find_bar_text = "zzz".into();
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::COMMAND), Event::Text("zzz".into())]);
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::COMMAND)]);
+        app.find_step(true);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (200, 3));
+
+        // 小檔案（一般編輯區）：內容一變就重算
+        let mut small = app_with(&ctx, "aa\nbb\n");
+        small.show_find_bar = true;
+        small.find_bar_text = "aa".into();
+        frame(&mut small, &ctx, vec![]);
+        assert_eq!(small.find_cache.1.len(), 1);
+        frame(&mut small, &ctx, vec![Event::Text("aa".into())]);
+        frame(&mut small, &ctx, vec![]);
+        assert_eq!(small.find_cache.1.len(), 2);
     }
 
     #[test]
