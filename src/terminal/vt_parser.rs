@@ -5,7 +5,8 @@
 //! - EOL 自動換行
 //! - 頂端捲動與 Scrollback 歷史紀錄 (上限 5000 行)
 //! - CSI 游標移動 (CUU, CUD, CUF, CUB, CHA, CUP)
-//! - 清除操作 (ED 2J 全螢幕清除, EL K 清除到行尾)
+//! - 清除操作 (ED J 0 / 1 / 2 清除畫面的一部分或全部, EL K 清除行, ECH X 清除字元)
+//! - 回覆查詢 (DSR 5n / 6n：狀態與游標位置；由 `take_responses` 取走寫回程式)
 //! - SGR 樣式設定（重置、粗體、標準前背景色 30..37/40..47、亮色前背景色 90..97/100..107）
 //! - OSC 標題設定序列略過
 //! - 跨 Feed 切割與容忍未完整逸出序列
@@ -50,6 +51,8 @@ pub struct VtParser {
     csi_buf: Vec<u8>,
     utf8_buf: Vec<u8>,
     utf8_need: usize,
+    /// 要回覆給程式的資料（例如游標位置查詢的回答），由 `take_responses` 取走後寫回 shell
+    responses: Vec<u8>,
 }
 
 impl VtParser {
@@ -71,7 +74,13 @@ impl VtParser {
             csi_buf: Vec::new(),
             utf8_buf: Vec::new(),
             utf8_need: 0,
+            responses: Vec::new(),
         }
+    }
+
+    /// 取走要回覆給程式的資料（終端機查詢的回答，例如 `ESC[6n` 的游標位置）；呼叫端要把它寫回 shell
+    pub fn take_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.responses)
     }
 
     pub fn rows(&self) -> usize {
@@ -318,15 +327,34 @@ impl VtParser {
                 self.cx = (col - 1).clamp(0, (self.cols - 1) as i32) as usize;
             }
             'J' => {
-                let mode = self.param_or(0, 0);
-                if mode == 2 {
-                    for r in 0..self.rows {
-                        for c in 0..self.cols {
-                            self.grid[r][c] = Cell::default();
-                        }
+                // 0：游標到畫面結尾；1：畫面開頭到游標（含）；2：整個畫面
+                let (from, to) = match self.param_or(0, 0) {
+                    0 => ((self.cy, self.cx), (self.rows - 1, self.cols - 1)),
+                    1 => ((0, 0), (self.cy, self.cx.min(self.cols - 1))),
+                    2 => ((0, 0), (self.rows - 1, self.cols - 1)),
+                    _ => return,
+                };
+                for r in from.0..=to.0 {
+                    let a = if r == from.0 { from.1 } else { 0 };
+                    let b = if r == to.0 { to.1 } else { self.cols - 1 };
+                    for c in a..=b.min(self.cols - 1) {
+                        self.grid[r][c] = Cell::default();
                     }
                 }
             }
+            'X' => {
+                // ECH：從游標起清掉 n 個字元，游標不動
+                let count = self.param_or(0, 1).max(1) as usize;
+                for c in self.cx..(self.cx + count).min(self.cols) {
+                    self.grid[self.cy][c] = Cell::default();
+                }
+            }
+            'n' => match self.param_or(0, 0) {
+                // DSR：5 = 狀態查詢（回答「正常」），6 = 游標位置（從 1 起算的 列;欄）
+                5 => self.responses.extend_from_slice(b"\x1b[0n"),
+                6 => self.responses.extend_from_slice(format!("\x1b[{};{}R", self.cy + 1, self.cx.min(self.cols - 1) + 1).as_bytes()),
+                _ => {}
+            },
             'K' => {
                 let mode = self.param_or(0, 0);
                 let (from, to) = if mode == 0 {

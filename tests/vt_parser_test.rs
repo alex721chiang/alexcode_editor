@@ -160,3 +160,30 @@ fn test_utf8_newline_does_not_corrupt_next() {
     assert_eq!(p.line_text(0), "中");
     assert_eq!(p.line_text(1), "文");
 }
+
+#[test]
+fn test_cursor_position_report_is_answered() {
+    // ConPTY 啟動時以 ESC[6n 詢問游標位置，要等到回覆才繼續輸出
+    let mut p = VtParser::new(5, 20);
+    assert!(p.take_responses().is_empty());
+    p.feed(b"ab\r\ncde\x1b[6n");
+    assert_eq!(p.take_responses(), b"\x1b[2;4R".to_vec());
+    assert!(p.take_responses().is_empty(), "each reply is handed out once");
+    // ESC[5n（狀態查詢）回覆「正常」；其他私有模式的查詢不回覆
+    p.feed(b"\x1b[5n\x1b[?6n");
+    assert_eq!(p.take_responses(), b"\x1b[0n".to_vec());
+    assert_eq!(p.line_text(1), "cde", "queries print nothing");
+}
+
+#[test]
+fn test_erase_characters_and_partial_screen_erase() {
+    // ConPTY 重畫畫面時常用的 ECH（ESC[nX：從游標起清掉 n 個字，游標不動）與 ED 0 / 1
+    let mut p = VtParser::new(3, 10);
+    p.feed(b"abcdefgh\x1b[1;3H\x1b[2X");
+    assert_eq!(p.line_text(0), "ab  efgh");
+    assert_eq!((p.cursor_row(), p.cursor_col()), (0, 2));
+    p.feed(b"\x1b[2;1Hline2\x1b[3;1Hline3\x1b[2;3H\x1b[J");
+    assert_eq!((p.line_text(0).as_str(), p.line_text(1).as_str(), p.line_text(2).as_str()), ("ab  efgh", "li", ""));
+    p.feed(b"\x1b[1;4H\x1b[1J");
+    assert_eq!(p.line_text(0), "    efgh");
+}

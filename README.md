@@ -51,7 +51,7 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 | 熱結束：有未存檔的修改時關閉視窗不再詢問，下次啟動連同未存檔的內容（含未命名分頁）一起還原；內容以純文字存在設定資料夾的 `hot_exit.json`，全部存檔後自動移除。關閉單一分頁仍會詢問 | 自動；在設定對話框關閉「啟動時還原…」即恢復結束前詢問 |
 
 > **目前狀態**：下方列出的 LSP、AI 補全、矩形選取，其邏輯模組與測試已在程式庫中，但尚未接上介面；
-> 內建終端機為逐指令執行（非互動式）。完整說明見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+> 內建終端機在虛擬終端（Windows ConPTY / Unix PTY）裡執行 shell，輸出即時顯示；目前仍從下方的輸入列一次送出一行（鍵盤直接操作 shell、ANSI 顏色與視窗大小同步尚未完成）。完整說明見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ---
 
@@ -100,9 +100,10 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 - **力導向知識圖譜 (Fruchterman-Reingold Graph Layout)**：決定性均勻圓周初始佈局、斥力與引力模擬、向心重力防止孤立節點漂移。
 
 ### 6. VT100 / ANSI 整合終端機
+- 打開終端機時以虛擬終端（Windows 的 ConPTY、macOS / Linux 的 PTY）啟動 shell（Windows 是 `%COMSPEC%`，其他平台是 `$SHELL`），輸出一讀到就顯示，不等指令結束；`exit` 之後在輸入列按 Enter 重新啟動。虛擬終端無法建立時退回逐指令執行。
 - 純邏輯 VT100/ANSI 狀態機與 2D 螢幕單元模型。
 - 支援 CR/LF/BS/TAB (對齊 8 倍數)、EOL 自動折行、5000 行 Scrollback 捲動歷史。
-- CSI 游標移動 (CUU, CUD, CUF, CUB, CHA, CUP)、ED (2J) 全螢幕清除、EL (K) 行尾清除。
+- CSI 游標移動 (CUU, CUD, CUF, CUB, CHA, CUP)、ED (J 0 / 1 / 2) 清除畫面、EL (K) 清除行、ECH (X) 清除字元；回覆游標位置查詢（DSR `ESC[6n`，ConPTY 啟動時要等到這個回覆才會輸出）。
 - 完整 SGR 色彩支援（標準 8 色、粗體、高亮 16 色 90..97 / 100..107）。
 - UTF-8 多位元組跨封包邊界累積解碼（繁體中文、Emoji 正常顯示不亂碼）。
 

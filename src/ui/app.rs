@@ -33,7 +33,7 @@ use crate::plugins::PluginManager;
 use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, Finder, SearchStats};
 use crate::search::{apply_replace_in_files, plan_replace_in_files, ReplaceHit, ReplaceResult};
 use crate::snippets::SnippetsController;
-use crate::terminal::VtParser;
+use crate::terminal::{default_shell, PtySession, VtParser};
 use crate::theme::ThemeManager;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
@@ -200,6 +200,12 @@ pub struct AlexCodeApp {
     project_root: PathBuf,
     term_rx: Option<Receiver<Vec<u8>>>,
     term_cwd: PathBuf,
+    /// 在虛擬終端（ConPTY / PTY）裡執行的 shell；終端機第一次打開時啟動
+    term_pty: Option<PtySession>,
+    /// 虛擬終端啟動失敗：改回逐指令執行（`run_terminal_command`）
+    term_pty_failed: bool,
+    /// shell 結束過一次之後就不再自動啟動，等使用者在輸入列按 Enter
+    term_pty_exited: bool,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -783,6 +789,9 @@ impl AlexCodeApp {
             project_root: cwd.clone(),
             term_rx: None,
             term_cwd: cwd,
+            term_pty: None,
+            term_pty_failed: false,
+            term_pty_exited: false,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1829,6 +1838,61 @@ impl AlexCodeApp {
         }
         self.link_index = MarkdownLinkIndex::new();
         self.link_index.build_from_contents(&map);
+    }
+
+    /// 在虛擬終端裡啟動 shell（目前的終端機資料夾、與 `terminal` 同樣的大小）。
+    /// 失敗時說明原因並改回逐指令執行
+    fn start_shell(&mut self, ctx: &egui::Context) {
+        let ctx = ctx.clone();
+        let (rows, cols) = (self.terminal.rows() as u16, self.terminal.cols() as u16);
+        match PtySession::spawn(&default_shell(), &self.term_cwd, rows, cols, move || ctx.request_repaint()) {
+            Ok(s) => self.term_pty = Some(s),
+            Err(e) => {
+                self.term_pty_failed = true;
+                self.terminal.feed(format!("\x1b[31m{e}\x1b[0m\r\n（改為逐指令執行：每個指令跑完才顯示輸出）\r\n").as_bytes());
+            }
+        }
+    }
+
+    /// 把 shell 到目前為止的輸出餵給 `terminal`，並回覆它的查詢（例如 ConPTY 啟動時問的游標位置，
+    /// 沒有回覆它就不會繼續輸出）。shell 結束時收掉它，並在畫面上說明
+    fn pump_shell(&mut self) {
+        let Some(s) = &mut self.term_pty else { return };
+        let data = s.read_available();
+        if !data.is_empty() {
+            self.terminal.feed(&data);
+            let reply = self.terminal.take_responses();
+            if !reply.is_empty() {
+                let _ = s.write(&reply);
+            }
+        }
+        if let Some(code) = s.exit_code() {
+            let rest = s.read_available();
+            self.terminal.feed(&rest);
+            self.term_pty = None;
+            self.term_pty_exited = true;
+            self.terminal.feed(format!("\r\n\x1b[33m[shell 已結束（代碼 {code}）；按 Enter 重新啟動]\x1b[0m\r\n").as_bytes());
+        }
+    }
+
+    /// 終端機輸入列按下 Enter：有 shell 時把這一行送進去（shell 自己會回顯並執行），
+    /// shell 結束了就重新啟動再送；虛擬終端無法使用時照舊逐指令執行
+    fn submit_terminal_line(&mut self, ctx: &egui::Context, line: String) {
+        if self.term_pty_failed {
+            self.run_terminal_command(line);
+            return;
+        }
+        if self.term_pty.is_none() {
+            self.start_shell(ctx);
+        }
+        match &mut self.term_pty {
+            Some(s) => {
+                if let Err(e) = s.write(format!("{line}\r").as_bytes()) {
+                    self.terminal.feed(format!("\x1b[31m無法送出指令：{e}\x1b[0m\r\n").as_bytes());
+                }
+            }
+            None => self.run_terminal_command(line), // 剛剛啟動失敗
+        }
     }
 
     fn run_terminal_command(&mut self, cmd: String) {
@@ -3081,6 +3145,12 @@ impl AlexCodeApp {
     }
 
     fn terminal_dock(&mut self, ctx: &egui::Context, c: &Colors) {
+        // 互動式 shell：終端機第一次打開時在虛擬終端裡啟動；輸出由背景執行緒讀進來後要求重畫，
+        // 這裡每一幀把讀到的部分餵給 `terminal`（終端機收起來時也照讀，免得輸出堆著）
+        if self.show_terminal && self.term_pty.is_none() && !self.term_pty_failed && !self.term_pty_exited {
+            self.start_shell(ctx);
+        }
+        self.pump_shell();
         if let Some(rx) = &self.term_rx {
             if let Ok(data) = rx.try_recv() {
                 self.terminal.feed(&data);
@@ -3122,17 +3192,25 @@ impl AlexCodeApp {
                         });
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("❯").color(c.accent).strong());
+                        // 逐指令執行（虛擬終端無法使用時）要等指令跑完；互動式 shell 隨時可以再送
                         let busy = self.term_rx.is_some();
+                        let hint = if busy {
+                            "執行中…"
+                        } else if self.term_pty.is_some() {
+                            "輸入指令後按 Enter 送進 shell，輸出即時顯示（例如 dir、git status、cargo build）"
+                        } else {
+                            "輸入指令後按 Enter（例如 dir、git status、cargo --version）"
+                        };
                         let resp = ui.add_enabled(
                             !busy,
                             egui::TextEdit::singleline(&mut self.term_input)
                                 .font(FontId::monospace(13.0))
-                                .hint_text(if busy { "執行中…" } else { "輸入指令後按 Enter（例如 dir、git status、cargo --version）" })
+                                .hint_text(hint)
                                 .desired_width(f32::INFINITY),
                         );
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                             let cmd = std::mem::take(&mut self.term_input);
-                            self.run_terminal_command(cmd);
+                            self.submit_terminal_line(ctx, cmd);
                             resp.request_focus();
                         }
                     });
@@ -8038,6 +8116,59 @@ mod tests {
         assert!(p.len() >= 5 && p.iter().all(|l| l.2 == 1 && l.1.right() <= clip.right() + 0.5));
         let joined: String = p.iter().map(|l| l.0.as_str()).collect();
         assert!(wide.starts_with(&joined));
+    }
+
+    #[test]
+    fn terminal_runs_an_interactive_shell_and_streams_its_output() {
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        let screen = |app: &AlexCodeApp| {
+            let t = &app.terminal;
+            let mut s: Vec<String> = (0..t.scrollback_count()).map(|i| t.scrollback_line(i)).collect();
+            s.extend((0..t.rows()).map(|r| t.line_text(r)));
+            s.join("\n")
+        };
+        // 一直跑幀（不送任何輸入），直到畫面上的文字符合條件或逾時
+        let wait = |app: &mut AlexCodeApp, cond: &dyn Fn(&str) -> bool| {
+            let end = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < end {
+                frame(app, &ctx, vec![]);
+                if cond(&screen(app)) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.term_pty.is_none(), "the shell starts only when the terminal is opened");
+        app.show_terminal = true;
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.term_pty.is_some(), "opening the terminal starts a shell in a pseudo terminal");
+        assert!(wait(&mut app, &|t| !t.trim().is_empty()), "the shell prints its prompt");
+
+        // 送出的指令算出兩個數字、中間隔 2 秒：第一個數字出現時指令還在跑
+        let cmd = if cfg!(windows) {
+            "set /a 1000+234 & ping -n 3 127.0.0.1 >nul & set /a 5000+678"
+        } else {
+            "echo $((1000+234)); sleep 2; echo $((5000+678))"
+        };
+        app.submit_terminal_line(&ctx, cmd.to_string());
+        assert!(wait(&mut app, &|t| t.contains("1234")), "the first result shows up:\n{}", screen(&app));
+        assert!(!screen(&app).contains("5678"), "before the command has finished");
+        assert!(wait(&mut app, &|t| t.contains("5678")), "then the second one:\n{}", screen(&app));
+
+        // 離開 shell：畫面上說明，之後不會自己重新啟動；在輸入列按 Enter 才重新啟動並執行那一行
+        app.submit_terminal_line(&ctx, "exit".to_string());
+        assert!(wait(&mut app, &|t| t.contains("shell 已結束")), "the exit is reported:\n{}", screen(&app));
+        assert!(app.term_pty.is_none());
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.term_pty.is_none(), "an exited shell is not restarted by itself");
+        let again = if cfg!(windows) { "set /a 4000+321" } else { "echo $((4000+321))" };
+        app.submit_terminal_line(&ctx, again.to_string());
+        assert!(app.term_pty.is_some());
+        assert!(wait(&mut app, &|t| t.contains("4321")), "the restarted shell runs the line:\n{}", screen(&app));
     }
 
     #[test]
