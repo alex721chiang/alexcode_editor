@@ -28,6 +28,7 @@ use crate::index::{extract_symbols, Symbol, SymbolLang};
 use crate::git::{blame_contents, blame_status_text, diff_line_states, LineInfo, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::git::{align_trimmed, change_starts, Row as DiffRow, RowType as DiffRowType};
 use crate::filter::{FilterEngine, FilterLogic};
+use crate::lsp::{Launcher, LspManager, LspStatus, OpenDoc, ServerKind};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
 use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, Finder, SearchStats};
@@ -209,6 +210,10 @@ pub struct AlexCodeApp {
     term_pty_exited: bool,
     /// 可以選的 shell（`shells()` 第一次用到時才找）
     term_shells: Vec<ShellChoice>,
+    /// 語言伺服器（rust-analyzer / clangd / pylsp）：開著那種檔案時才啟動，開著的文件每一幀同步給它
+    lsp: LspManager,
+    /// 送給語言伺服器的文件的大小快取：分頁 id → (內容版本, 位元組數)。大檔案（大檔案檢視）不送
+    lsp_sizes: HashMap<u64, (u64, usize)>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -701,6 +706,24 @@ fn edge_scroll_speed(over: f32, unit: f32) -> f32 {
     over.signum() * (unit * 8.0 + over.abs() * 10.0).min(6000.0)
 }
 
+/// 啟動語言伺服器的方式：執行 PATH 裡的伺服器程式。
+/// 單元測試裡一律當作「未安裝」，免得每個開了 `.rs` 分頁的測試都去啟動真的 rust-analyzer
+fn default_lsp_launcher() -> Launcher {
+    #[cfg(not(test))]
+    return Box::new(crate::lsp::spawn_server);
+    #[cfg(test)]
+    return Box::new(|_, _| Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
+}
+
+/// 語言伺服器沒辦法用時，狀態列提示怎麼安裝
+fn lsp_install_hint(kind: ServerKind) -> &'static str {
+    match kind {
+        ServerKind::RustAnalyzer => "安裝：rustup component add rust-analyzer（rustup 有代理程式但沒裝元件時，伺服器一啟動就會結束）",
+        ServerKind::Clangd => "安裝 clangd（LLVM），並確認它在 PATH 裡",
+        ServerKind::Pylsp => "安裝：pip install python-lsp-server，並確認 pylsp 在 PATH 裡",
+    }
+}
+
 /// 終端機的 16 色（ANSI 0–15，數值與 Windows Terminal 的 Campbell 配色相同）。
 /// 沒有指定顏色的字用主題的文字色、沒有指定底色的格子不畫底色
 const TERM_COLORS: [Color32; 16] = [
@@ -894,11 +917,13 @@ impl AlexCodeApp {
             scroll_to_cursor: false,
             project_root: cwd.clone(),
             term_rx: None,
-            term_cwd: cwd,
+            term_cwd: cwd.clone(),
             term_pty: None,
             term_pty_failed: false,
             term_pty_exited: false,
             term_shells: Vec::new(),
+            lsp: LspManager::new(cwd.clone(), default_lsp_launcher()),
+            lsp_sizes: HashMap::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1945,6 +1970,40 @@ impl AlexCodeApp {
         }
         self.link_index = MarkdownLinkIndex::new();
         self.link_index.build_from_contents(&map);
+    }
+
+    /// 每一幀：把開著的、語言伺服器支援的文件（有檔名、載入完成、不是大檔案）交給 `LspManager` 同步；
+    /// 伺服器還在啟動時繼續重畫，才看得到它就緒
+    fn lsp_tick(&mut self, ctx: &egui::Context) {
+        self.lsp.set_root(self.project_root.clone());
+        let mut docs = Vec::new();
+        let mut idx = Vec::new();
+        for (i, b) in self.tabs.iter().enumerate() {
+            let Some(path) = b.file_path.as_deref() else { continue };
+            if ServerKind::for_path(path).is_none() || self.loading.contains_key(&b.id) {
+                continue;
+            }
+            let rev = b.revision();
+            let size = match self.lsp_sizes.get(&b.id) {
+                Some(&(r, size)) if r == rev => size,
+                _ => {
+                    let size = b.lines.iter().map(|l| l.len() + 1).sum::<usize>();
+                    self.lsp_sizes.insert(b.id, (rev, size));
+                    size
+                }
+            };
+            if size >= self.large_view_bytes {
+                continue;
+            }
+            docs.push(OpenDoc { path: path.to_string(), revision: rev });
+            idx.push(i);
+        }
+        let tabs = &self.tabs;
+        self.lsp_sizes.retain(|id, _| tabs.iter().any(|b| b.id == *id));
+        self.lsp.sync(&docs, |k| tabs[idx[k]].edit_text());
+        if self.lsp.is_starting() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 
     /// 在虛擬終端裡啟動 shell（目前的終端機資料夾、與 `terminal` 同樣的大小）。
@@ -3214,6 +3273,29 @@ impl AlexCodeApp {
                     ui.add_space(10.0);
                     seg(ui, eol.into(), c.fg_dim2);
                     seg(ui, lang.display_name().into(), c.fg_dim2);
+                    // 語言伺服器：這個分頁的檔案類型有對應的伺服器（而且已經用到它）時顯示它的狀態；
+                    // 用不了時滑鼠停留顯示怎麼安裝
+                    let kind = self.active_buffer().and_then(|b| b.file_path.as_deref()).and_then(ServerKind::for_path);
+                    if let Some((kind, status)) = kind.and_then(|k| self.lsp.status(k).map(|s| (k, s.clone()))) {
+                        let color = match status {
+                            LspStatus::Ready => c.accent,
+                            LspStatus::Starting => c.fg_dim2,
+                            _ => c.warn,
+                        };
+                        let text = format!("{}：{}", kind.program(), status.label());
+                        let r = ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).wrap(false));
+                        let hint = if status == LspStatus::Ready || status == LspStatus::Starting {
+                            "語言伺服器（開著的文件會同步給它）"
+                        } else {
+                            lsp_install_hint(kind)
+                        };
+                        let r = r.on_hover_text(hint);
+                        self.mark("lsp-status", &r);
+                        ui.add_space(10.0);
+                        let (sr, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), Sense::hover());
+                        ui.painter().rect_filled(sr, 0.0, c.border);
+                        ui.add_space(10.0);
+                    }
                     ui.label(RichText::new(&self.status_message).size(12.0).color(c.fg_dim));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(8.0);
@@ -6175,6 +6257,7 @@ impl AlexCodeApp {
         }
 
         self.poll_services(ctx);
+        self.lsp_tick(ctx);
 
         // 視窗標題顯示目前檔案（只在標題真的改變時才送出命令）
         if let Some(buf) = self.active_buffer() {
@@ -8404,6 +8487,84 @@ mod tests {
         app.submit_terminal_line(&ctx, again.to_string());
         assert!(app.term_pty.is_some());
         assert!(wait(&mut app, &|t| t.contains("4321")), "the restarted shell runs the line:\n{}", screen(&app));
+    }
+
+    #[test]
+    fn language_servers_get_the_open_documents_and_show_in_the_status_bar() {
+        use serde_json::{json, Value};
+        use std::io::{Read, Write};
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        // 單元測試裡預設的啟動方式當作「未安裝」：狀態列照樣顯示，滑鼠停留提示怎麼安裝
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "fn main() {}");
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(painted_lines(&out).iter().any(|l| l.0 == "rust-analyzer：未安裝"), "the status bar tells the server is missing");
+        assert!(app.probe.contains_key("lsp-status"));
+
+        // 接上假的伺服器：記下收到的訊息，收到 initialize 就回覆
+        let log = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let l = log.clone();
+        let launcher: Launcher = Box::new(move |_, _| {
+            let (client_read, mut server_write) = std::io::pipe()?;
+            let (mut server_read, client_write) = std::io::pipe()?;
+            let log = l.clone();
+            std::thread::spawn(move || {
+                let mut frames = crate::lsp::Reader::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = server_read.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    frames.feed(&buf[..n]);
+                    for m in frames.take_messages() {
+                        log.lock().unwrap().push(m.clone());
+                        if m["method"] == "initialize" {
+                            let reply = json!({ "jsonrpc": "2.0", "id": m["id"], "result": { "capabilities": {} } });
+                            let _ = server_write.write_all(&crate::lsp::frame(&reply));
+                        }
+                    }
+                }
+            });
+            Ok(crate::lsp::LspClient::from_io(client_read, client_write))
+        });
+        let dir = tempfile::tempdir().unwrap();
+        app.lsp = LspManager::new(dir.path().to_path_buf(), launcher);
+        let sent = |method: &str| -> Vec<Value> { log.lock().unwrap().iter().filter(|m| m["method"] == method).cloned().collect() };
+        let wait = |app: &mut AlexCodeApp, cond: &dyn Fn() -> bool| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < end {
+                frame(app, &ctx, vec![]);
+                if cond() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        };
+        // 開著的 .rs 分頁：啟動伺服器、握手、didOpen 送出全文
+        assert!(wait(&mut app, &|| !sent("textDocument/didOpen").is_empty()), "the open file is sent to the server");
+        let open = sent("textDocument/didOpen");
+        assert_eq!(open[0]["params"]["textDocument"]["text"], "fn main() {}");
+        assert_eq!(open[0]["params"]["textDocument"]["languageId"], "rust");
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(painted_lines(&out).iter().any(|l| l.0 == "rust-analyzer：已連線"), "the status bar shows the connection");
+        // 在編輯區打字：didChange 送出新的全文
+        frame(&mut app, &ctx, vec![Event::Text("x".into())]);
+        assert!(wait(&mut app, &|| !sent("textDocument/didChange").is_empty()));
+        let change = sent("textDocument/didChange");
+        assert_eq!(change[0]["params"]["contentChanges"][0]["text"], app.tabs[0].edit_text());
+        assert!(app.tabs[0].edit_text().contains('x'));
+        // 換成沒有語言伺服器的分頁：狀態列不顯示，原來的文件 didClose
+        let mut b = EditorBuffer::from_text("notes");
+        b.file_path = Some("notes.txt".into());
+        app.tabs = vec![b];
+        app.active_tab_idx = 0;
+        assert!(wait(&mut app, &|| !sent("textDocument/didClose").is_empty()));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!painted_lines(&out).iter().any(|l| l.0.starts_with("rust-analyzer")), "no server status for a .txt tab");
+        assert_eq!(sent("initialize").len(), 1);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
