@@ -489,6 +489,13 @@ fn shown_part(line: &str) -> (&str, bool) {
     }
 }
 
+/// 把輸入法組字中的文字 `preedit` 插進 `line` 的第 `col` 個字元前面（`col` 超過行尾時接在最後）：
+/// 大檔案檢視用它排出組字期間的那一行，文件本身不變
+fn with_preedit(line: &str, col: usize, preedit: &str) -> String {
+    let at = line.char_indices().nth(col).map_or(line.len(), |(i, _)| i);
+    format!("{}{}{}", &line[..at], preedit, &line[at..])
+}
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
@@ -4736,9 +4743,15 @@ impl AlexCodeApp {
                             edit = Some((sel.start(), sel.end(), text, true));
                         }
                     }
-                    // 輸入法：組字中的文字只顯示在游標處，選定之後才寫進文件
+                    // 輸入法：組字中的文字只顯示在游標處（把後面的文字往後推），選定之後才寫進文件
                     Event::CompositionStart => preedit.clear(),
-                    Event::CompositionUpdate(t) => preedit = t.clone(),
+                    Event::CompositionUpdate(t) => {
+                        // 開始組字時先刪掉選取的文字（與一般編輯區相同），組字中的文字就排在那個位置
+                        if !t.is_empty() && !sel.is_empty() {
+                            edit = Some((sel.start(), sel.end(), String::new(), true));
+                        }
+                        preedit = t.clone();
+                    }
                     Event::CompositionEnd(t) => {
                         preedit.clear();
                         if !t.is_empty() {
@@ -4995,9 +5008,17 @@ impl AlexCodeApp {
                 for line in first..last {
                     let y = y_of(line);
                     let (shown, cut) = shown_part(&buf.lines[line]);
-                    let hits = if find.is_empty() { Vec::new() } else { find_all(shown, &find, &fopts).unwrap_or_default() };
-                    let galley = plain(ui, line, &hits);
                     let active = line == sel.head.line;
+                    // 組字中：把輸入法還沒選定的文字排進游標所在的位置，後面的文字跟著往後移（文件本身不變）
+                    let preedit_cols = if active && has_focus { self.large_preedit.chars().count() } else { 0 };
+                    let composed = (preedit_cols > 0).then(|| with_preedit(shown, sel.head.col, &self.large_preedit));
+                    let galley = match &composed {
+                        Some(text) => ui.fonts(|f| f.layout_job(highlight_ranges(text, Lang::Plain, pal, font.clone(), &[]))),
+                        None => {
+                            let hits = if find.is_empty() { Vec::new() } else { find_all(shown, &find, &fopts).unwrap_or_default() };
+                            plain(ui, line, &hits)
+                        }
+                    };
                     if active {
                         let r = Rect::from_min_max(Pos2::new(gutter.right(), y), Pos2::new(clip.right().max(rect.right()), y + row_h));
                         painter.rect_filled(r, 0.0, c.current_line);
@@ -5018,20 +5039,19 @@ impl AlexCodeApp {
                             c.faint,
                         );
                     }
-                    let caret_x = text_x + x_of(&galley, sel.head.col);
+                    // 組字中的文字從游標的位置開始，游標畫在它的後面
+                    let preedit_x = text_x + x_of(&galley, sel.head.col);
+                    let caret_x = text_x + x_of(&galley, sel.head.col + preedit_cols);
                     painter.galley(Pos2::new(text_x, y), galley, c.fg);
                     if active && has_focus {
                         let caret = Rect::from_min_size(Pos2::new(caret_x, y), egui::vec2(1.5, row_h));
                         painter.rect_filled(caret, 0.0, c.accent);
                         // 告訴作業系統游標在哪裡：輸入法的候選字視窗會跟著它，沒有這個輸入法也不會啟用
                         ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: clip, cursor_rect: caret }));
-                        // 組字中的文字畫在游標處（蓋在後面的文字上，選定後才真的插入）
-                        if !self.large_preedit.is_empty() {
-                            let g = painter.layout_no_wrap(self.large_preedit.clone(), font.clone(), c.fg);
-                            let r = Rect::from_min_size(Pos2::new(caret_x, y), egui::vec2(g.size().x, row_h));
-                            painter.rect_filled(r, 0.0, c.panel);
-                            painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, c.accent));
-                            painter.galley(r.min, g, c.fg);
+                        // 組字中的文字加底線，和已經在文件裡的文字區分開來
+                        if preedit_cols > 0 {
+                            let b = y + row_h - 1.0;
+                            painter.line_segment([Pos2::new(preedit_x, b), Pos2::new(caret_x, b)], Stroke::new(1.0_f32, c.accent));
                         }
                     }
                     // 行號區：行號、目前行標記、書籤
@@ -6949,6 +6969,71 @@ mod tests {
         assert!(app.highlight_cache.is_none());
         assert!(app.text_cache.1.is_empty());
         assert_eq!(app.tabs[0].lines.len(), 5001);
+    }
+
+    /// 這一幀畫出來的每一段文字
+    fn painted_texts(out: &egui::FullOutput) -> Vec<String> {
+        fn walk(shape: &Shape, found: &mut Vec<String>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
+                Shape::Text(t) => found.push(t.galley.job.text.clone()),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, &mut found));
+        found
+    }
+
+    #[test]
+    fn large_view_preedit_pushes_the_following_text_aside() {
+        assert_eq!(with_preedit("abcd", 2, "中"), "ab中cd");
+        assert_eq!(with_preedit("中文", 1, "x"), "中x文");
+        assert_eq!(with_preedit("ab", 9, "x"), "abx");
+
+        let ctx = ctx();
+        let mut app = large_app(&ctx, 200);
+        let line0 = |app: &AlexCodeApp| app.tabs[0].lines[0].clone();
+        let has = |out: &egui::FullOutput, text: &str| painted_texts(out).iter().any(|t| t == text);
+        let caret_x = |out: &egui::FullOutput| out.platform_output.ime.expect("IME output").cursor_rect.left();
+        let preedit_w =
+            ctx.fonts(|f| f.layout_no_wrap("zhong".into(), FontId::monospace(app.config.font_size), Color32::WHITE).size().x);
+
+        frame(&mut app, &ctx, vec![key(Key::ArrowRight, Modifiers::COMMAND)]);
+        assert_eq!(cursor(&app), (0, 4));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(has(&out, "line 00000 some text here"));
+        let caret0 = caret_x(&out);
+
+        // 組字中：那一行排成「游標前的文字 + 組字中的文字 + 游標後的文字」，不是另外蓋一塊在上面
+        let out = frame(&mut app, &ctx, vec![Event::CompositionStart, Event::CompositionUpdate("zhong".into())]);
+        assert!(has(&out, "linezhong 00000 some text here"), "painted: {:?}", painted_texts(&out));
+        assert!(!has(&out, "zhong"), "the preedit is no longer drawn as an overlay");
+        assert!(!has(&out, "line 00000 some text here"));
+        assert!(has(&out, "line 00001 some text here"), "other lines are untouched");
+        // 文件與游標位置不變；游標（輸入法候選字視窗跟著它）畫在組字中的文字後面
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("line 00000 some text here", (0, 4)));
+        assert!(!app.tabs[0].modified);
+        let moved = caret_x(&out) - caret0;
+        assert!((moved - preedit_w).abs() < 0.5, "caret moved {moved}, the preedit is {preedit_w} wide");
+        // 之後沒有事件的幀也維持這個畫面
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(has(&out, "linezhong 00000 some text here"));
+
+        // 取消組字：畫面回到原樣
+        let out = frame(&mut app, &ctx, vec![Event::CompositionUpdate(String::new())]);
+        assert!(has(&out, "line 00000 some text here"));
+        assert!((caret_x(&out) - caret0).abs() < 0.01);
+
+        // 有選取時開始組字：選取的文字先刪掉，組字中的文字排在那個位置
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::SHIFT)]);
+        let out = frame(&mut app, &ctx, vec![Event::CompositionStart, Event::CompositionUpdate("z".into())]);
+        assert_eq!((line0(&app).as_str(), cursor(&app)), (" 00000 some text here", (0, 0)));
+        assert!(has(&out, "z 00000 some text here"), "painted: {:?}", painted_texts(&out));
+        let out = frame(&mut app, &ctx, vec![Event::CompositionEnd("中".into())]);
+        assert_eq!((line0(&app).as_str(), cursor(&app)), ("中 00000 some text here", (0, 1)));
+        assert!(has(&out, "中 00000 some text here"));
+        assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty(), "still the large-file view");
     }
 
     #[test]
