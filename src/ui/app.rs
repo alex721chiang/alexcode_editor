@@ -331,6 +331,8 @@ pub struct AlexCodeApp {
     large_marks_seen: ((u64, u64), std::time::Instant),
     /// 拖曳選取到可見範圍外時，下一幀大檔案檢視要捲到的位置：(分頁 id, 捲動位移)
     large_scroll_to: Option<(u64, Vec2)>,
+    /// 大檔案檢視上一幀的折行寬度（沒有開自動換行時為 None）：上下鍵要用它算出游標在哪一列
+    large_wrap_w: Option<f32>,
 
     // ---- 熱結束：尚未存檔的內容跨次啟動保留 ----
     /// 上次寫進備份檔的是哪些分頁的哪個版本：(分頁 id, 內容版本, 編碼, 路徑)
@@ -494,6 +496,32 @@ fn shown_part(line: &str) -> (&str, bool) {
 fn with_preedit(line: &str, col: usize, preedit: &str) -> String {
     let at = line.char_indices().nth(col).map_or(line.len(), |(i, _)| i);
     format!("{}{}{}", &line[..at], preedit, &line[at..])
+}
+
+/// 排版 `g`（大檔案檢視的一行，可能折成好幾列）裡離 `pos`（相對於排版左上角）最近的欄位。
+/// 折行處的那個欄位算下一列的開頭，所以落在一列結尾右邊時退一格，游標才會留在那一列
+fn wrapped_col_at(g: &egui::Galley, pos: Vec2) -> usize {
+    let cur = g.cursor_from_pos(pos);
+    let row = cur.rcursor.row;
+    let at_wrapped_end =
+        row + 1 < g.rows.len() && cur.rcursor.column > 0 && cur.rcursor.column >= g.rows[row].char_count_excluding_newline();
+    cur.ccursor.index - usize::from(at_wrapped_end)
+}
+
+/// 欄位範圍 [a, b) 在排版 `g` 的每一列上佔的區段：(列的上緣, 列的下緣, 左, 右)，座標相對於排版左上角。
+/// `eol` 為真時範圍延伸到行尾：最後一列即使沒有選到字元也算進來（呼叫端用來標出換行）
+fn row_spans(g: &egui::Galley, a: usize, b: usize, eol: bool) -> Vec<(f32, f32, f32, f32)> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, row) in g.rows.iter().enumerate() {
+        let end = start + row.char_count_excluding_newline();
+        let (lo, hi) = (a.max(start), b.min(end));
+        if lo < hi || (eol && i + 1 == g.rows.len() && lo <= hi) {
+            out.push((row.rect.top(), row.rect.bottom(), row.x_offset(lo - start), row.x_offset(hi - start)));
+        }
+        start = end;
+    }
+    out
 }
 
 fn is_word_char(c: char) -> bool {
@@ -677,6 +705,7 @@ impl AlexCodeApp {
             large_preedit: String::new(),
             large_marks_seen: ((0, 0), std::time::Instant::now()),
             large_scroll_to: None,
+            large_wrap_w: None,
             hot_exit_key: Vec::new(),
             hot_exit_written: (std::time::Instant::now(), 0),
             hot_restore: HashMap::new(),
@@ -4607,7 +4636,7 @@ impl AlexCodeApp {
 
     /// 大檔案檢視：只排版畫面上看得到的行，記憶體用量與檔案大小同一個量級。
     /// 可以捲動、移動游標、選取、複製、尋找、跳至行、設書籤，也可以直接輸入、刪除、貼上（含輸入法），
-    /// 有自動配對與 Git 行號區標記；沒有自動換行。
+    /// 有自動配對與 Git 行號區標記；設定開啟時自動換行（只折畫面上的行）。
     fn large_view(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
         use egui::Event;
         let idx = self.active_tab_idx;
@@ -4629,7 +4658,7 @@ impl AlexCodeApp {
             ui.horizontal(|ui| {
                 let size = bytes as f64 / (1024.0 * 1024.0);
                 ui.label(
-                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體；沒有自動換行"))
+                    RichText::new(format!("大檔案檢視（{size:.1} MB）：只排版畫面上的行以節省記憶體"))
                         .size(12.0)
                         .color(c.fg_dim),
                 );
@@ -4690,8 +4719,32 @@ impl AlexCodeApp {
             // 自動配對的條件與一般編輯區相同：設定開啟，且不是純文字 / Markdown
             let pair_enabled = self.config.auto_pair && !matches!(self.tab_lang(idx), Lang::Plain | Lang::Markdown);
             let mut preedit = std::mem::take(&mut self.large_preedit);
+            let wrap_w = if self.config.word_wrap { self.large_wrap_w } else { None };
             let buf = &mut self.tabs[idx];
             let rev = buf.revision();
+            // 自動換行時上下鍵以畫面上的「列」為單位：在折成好幾列的行裡先在行內移動，到頭了才換到上 / 下一行
+            let row_step = |buf: &EditorBuffer, p: Position, down: bool, wrap_w: f32| {
+                let lay = |line: usize| {
+                    let mut job = highlight_ranges(shown_part(&buf.lines[line]).0, Lang::Plain, pal, font.clone(), &[]);
+                    job.wrap.max_width = wrap_w;
+                    ui.fonts(|f| f.layout_job(job))
+                };
+                let g = lay(p.line);
+                let cur = g.from_ccursor(CCursor { index: p.col, prefer_next_row: true });
+                let x = g.pos_from_cursor(&cur).left();
+                let row = cur.rcursor.row;
+                let target = if down { row + 1 } else { row.wrapping_sub(1) };
+                if let Some(r) = g.rows.get(target) {
+                    return Position { line: p.line, col: wrapped_col_at(&g, egui::vec2(x, r.rect.center().y)) };
+                }
+                let line = if down { p.line + 1 } else { p.line.wrapping_sub(1) };
+                if line >= buf.lines.len() {
+                    return p; // 已經在第一行的第一列 / 最後一行的最後一列
+                }
+                let g = lay(line);
+                let r = if down { g.rows.first() } else { g.rows.last() };
+                Position { line, col: wrapped_col_at(&g, egui::vec2(x, r.map_or(0.0, |r| r.rect.center().y))) }
+            };
             // 只有單行的逐字輸入時，大小統計可以就地更新，不必重新掃過整份文件
             let mut small_edits = true;
             for ev in &events {
@@ -4763,12 +4816,19 @@ impl AlexCodeApp {
                         let mut head = sel.head;
                         let mut all = false;
                         let word = modifiers.command;
-                        let handled = match key {
-                            Key::ArrowUp => {
+                        let handled = match (key, wrap_w) {
+                            (Key::ArrowUp | Key::ArrowDown, Some(w)) => {
+                                head = row_step(buf, head, *key == Key::ArrowDown, w);
+                                true
+                            }
+                            _ => false,
+                        };
+                        let handled = handled || match key {
+                            Key::ArrowUp if wrap_w.is_none() => {
                                 head.line = head.line.saturating_sub(1);
                                 true
                             }
-                            Key::ArrowDown => {
+                            Key::ArrowDown if wrap_w.is_none() => {
                                 head.line = (head.line + 1).min(last_line);
                                 true
                             }
@@ -4903,8 +4963,11 @@ impl AlexCodeApp {
         }
 
         let mut toggle_bookmark = None;
+        let wrap = self.config.word_wrap;
+        // 組字中的文字排在哪裡（鍵盤事件處理完之後的游標位置）
+        let compose_at = (has_focus && !self.large_preedit.is_empty()).then_some(sel.head);
         let mut area = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]);
-        // 上一幀拖曳選取到邊緣以外：照它算好的位置捲過去
+        // 上一幀算好的捲動位置（拖曳選取到邊緣以外、自動換行時讓游標留在畫面上）：照它捲過去
         if let Some((id, offset)) = self.large_scroll_to.take() {
             if id == tab_id {
                 area = area.scroll_offset(offset);
@@ -4914,24 +4977,85 @@ impl AlexCodeApp {
             ui,
             |ui, viewport| {
                 let buf = &self.tabs[idx];
+                // 自動換行：以可見寬度折行。捲動位置仍以檔案的行為單位（不論折成幾列，每一行都算一個行高），
+                // 所以不必排版整份文件就知道總高度；畫面從「捲動位置 ÷ 行高」那一行開始往下排到填滿為止
+                let wrap_w = wrap.then(|| (viewport.width() - gutter_w - 10.0 - char_w * 2.0).max(char_w * 20.0));
                 let text_w = (max_cols.min(LARGE_VIEW_MAX_COLS) + 8) as f32 * char_w;
-                let size = egui::vec2(
-                    (gutter_w + 10.0 + text_w).max(viewport.width()),
-                    (line_count as f32 * row_h + 44.0).max(viewport.height()),
-                );
+                let size = if wrap {
+                    // 多留將近一個畫面的高度：最後一行（可能折成好幾列）也能捲到最上面
+                    egui::vec2(viewport.width(), line_count as f32 * row_h + (viewport.height() - row_h).max(44.0))
+                } else {
+                    egui::vec2(
+                        (gutter_w + 10.0 + text_w).max(viewport.width()),
+                        (line_count as f32 * row_h + 44.0).max(viewport.height()),
+                    )
+                };
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
                 let resp = ui.interact(rect, view_id, Sense::click_and_drag());
                 let text_x = rect.left() + gutter_w + 10.0;
                 let y_of = |line: usize| rect.top() + 4.0 + line as f32 * row_h;
-                let plain = |ui: &egui::Ui, line: usize, hits: &[(usize, usize)]| {
-                    let (shown, _) = shown_part(buf.lines.get(line).map_or("", |s| s.as_str()));
-                    ui.fonts(|f| f.layout_job(highlight_ranges(shown, Lang::Plain, pal, font.clone(), hits)))
+                // 折行處的欄位同時是上一列的結尾與下一列的開頭：游標一律算在下一列的開頭
+                let cc = |col: usize| CCursor { index: col, prefer_next_row: true };
+                let layout = |ui: &egui::Ui, text: &str, hits: &[(usize, usize)]| {
+                    let mut job = highlight_ranges(text, Lang::Plain, pal, font.clone(), hits);
+                    if let Some(w) = wrap_w {
+                        job.wrap.max_width = w;
+                    }
+                    ui.fonts(|f| f.layout_job(job))
                 };
-                let x_of = |galley: &egui::Galley, col: usize| galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(col))).left();
-                let pos_at = |ui: &egui::Ui, p: Pos2| {
-                    let line = (((p.y - rect.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line);
-                    let col = plain(ui, line, &[]).cursor_from_pos(egui::vec2(p.x - text_x, 0.0)).ccursor.index;
-                    Position { line, col }
+                // 組字中：把輸入法還沒選定的文字排進游標所在的位置，後面的文字跟著往後移（文件本身不變）
+                let line_galley = |ui: &egui::Ui, line: usize, hits: &[(usize, usize)]| {
+                    let (shown, _) = shown_part(buf.lines.get(line).map_or("", |s| s.as_str()));
+                    match compose_at {
+                        Some(p) if p.line == line => layout(ui, &with_preedit(shown, p.col, &self.large_preedit), &[]),
+                        _ => layout(ui, shown, hits),
+                    }
+                };
+                let hits_of = |line: usize| {
+                    if find.is_empty() {
+                        Vec::new()
+                    } else {
+                        find_all(shown_part(&buf.lines[line]).0, &find, &fopts).unwrap_or_default()
+                    }
+                };
+                let x_of = |galley: &egui::Galley, col: usize| galley.pos_from_cursor(&galley.from_ccursor(cc(col))).left();
+
+                // ---- 只排版看得到的行：(行, 這一行上緣在畫面上的 y, 排版結果) ----
+                let view_top = rect.top() + viewport.top();
+                let view_bottom = view_top + viewport.height();
+                let mut vis: Vec<(usize, f32, Arc<egui::Galley>)> = Vec::new();
+                if wrap {
+                    let top_f = (viewport.top() / row_h).max(0.0);
+                    let top_line = (top_f.floor() as usize).min(last_line);
+                    // 捲動位置的小數部分：最上面那一行已經捲出畫面的比例（依它折行後的高度）
+                    let frac = if top_f.floor() as usize > last_line { 0.0 } else { top_f.fract() };
+                    let mut y = view_top + 4.0;
+                    for line in top_line..line_count {
+                        let g = line_galley(ui, line, &hits_of(line));
+                        let h = g.size().y.max(row_h);
+                        if line == top_line {
+                            y -= frac * h;
+                        }
+                        vis.push((line, y, g));
+                        y += h;
+                        if y >= view_bottom {
+                            break;
+                        }
+                    }
+                } else {
+                    let first = (((viewport.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line);
+                    let last = (((viewport.bottom() - 4.0) / row_h).ceil().max(0.0) as usize).min(line_count);
+                    for line in first..last {
+                        vis.push((line, y_of(line), line_galley(ui, line, &hits_of(line))));
+                    }
+                }
+                // 指標位置對應的 (行, 列)：在畫面上的行以外時，算最上面 / 最下面那一行
+                let pos_at = |p: Pos2| {
+                    let i = vis.iter().rposition(|(_, y, _)| *y <= p.y).unwrap_or(0);
+                    match vis.get(i) {
+                        Some((line, y, g)) => Position { line: *line, col: wrapped_col_at(g, egui::vec2(p.x - text_x, p.y - y)) },
+                        None => Position { line: 0, col: 0 },
+                    }
                 };
 
                 // ---- 滑鼠：點一下放游標（Shift 延伸選取）、雙擊選字、三擊選行、拖曳選取、點行號區切換書籤 ----
@@ -4941,9 +5065,9 @@ impl AlexCodeApp {
                 if resp.clicked() {
                     if let Some(p) = resp.interact_pointer_pos() {
                         if in_gutter(p) {
-                            toggle_bookmark = Some((((p.y - rect.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line));
+                            toggle_bookmark = Some(pos_at(p).line);
                         } else {
-                            sel.head = pos_at(ui, p);
+                            sel.head = pos_at(p);
                             if !ui.input(|i| i.modifiers.shift) {
                                 sel.anchor = sel.head;
                             }
@@ -4955,7 +5079,7 @@ impl AlexCodeApp {
                 //（與一般編輯區相同：三擊選整行但不含換行）
                 if resp.double_clicked() || resp.triple_clicked() {
                     if let Some(p) = resp.interact_pointer_pos().filter(|p| !in_gutter(*p)) {
-                        let at = pos_at(ui, p);
+                        let at = pos_at(p);
                         let (a, b) = if resp.triple_clicked() {
                             (0, buf.line_len(at.line))
                         } else {
@@ -4966,7 +5090,7 @@ impl AlexCodeApp {
                 }
                 if resp.drag_started() {
                     if let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|p| !in_gutter(*p)) {
-                        sel.anchor = pos_at(ui, origin);
+                        sel.anchor = pos_at(origin);
                         sel.head = sel.anchor;
                     }
                     ui.memory_mut(|m| m.request_focus(view_id));
@@ -4984,77 +5108,80 @@ impl AlexCodeApp {
                             edge_scroll_speed(over(p.x, left, right), char_w),
                             edge_scroll_speed(over(p.y, top, bottom), row_h),
                         ) * dt;
-                        sel.head = pos_at(ui, Pos2::new(p.x.clamp(left, right.max(left)), p.y.clamp(top, bottom.max(top))));
+                        sel.head = pos_at(Pos2::new(p.x.clamp(left, right.max(left)), p.y.clamp(top, bottom.max(top))));
                         dragging = true;
                     }
                 }
+                let max_offset = (size - viewport.size()).max(Vec2::ZERO);
                 let mut next_offset = None;
                 if edge_scroll != Vec2::ZERO {
-                    let max = (size - viewport.size()).max(Vec2::ZERO);
-                    let to = (viewport.min.to_vec2() + edge_scroll).clamp(Vec2::ZERO, max);
+                    let to = (viewport.min.to_vec2() + edge_scroll).clamp(Vec2::ZERO, max_offset);
                     if to != viewport.min.to_vec2() {
                         next_offset = Some(to);
                     }
                 }
 
-                // ---- 只畫看得到的行 ----
+                // ---- 畫出這些行 ----
                 let painter = ui.painter();
-                let first = (((viewport.top() - 4.0) / row_h).floor().max(0.0) as usize).min(last_line);
-                let last = (((viewport.bottom() - 4.0) / row_h).ceil().max(0.0) as usize).min(line_count);
                 let gutter = Rect::from_min_max(Pos2::new(rect.left(), clip.top()), Pos2::new(rect.left() + gutter_w, clip.bottom()));
                 painter.rect_filled(gutter, 0.0, c.panel);
                 painter.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0_f32, c.border));
                 let (s0, s1) = (sel.start(), sel.end());
-                for line in first..last {
-                    let y = y_of(line);
-                    let (shown, cut) = shown_part(&buf.lines[line]);
+                let preedit_cols = self.large_preedit.chars().count();
+                // 組字中的文字從游標的位置開始，游標畫在它的後面
+                let caret_col = sel.head.col + if compose_at == Some(sel.head) { preedit_cols } else { 0 };
+                let mut caret_rect = None;
+                for (line, y, galley) in &vis {
+                    let (line, y) = (*line, *y);
+                    let h = galley.size().y.max(row_h);
+                    let cut = shown_part(&buf.lines[line]).1;
                     let active = line == sel.head.line;
-                    // 組字中：把輸入法還沒選定的文字排進游標所在的位置，後面的文字跟著往後移（文件本身不變）
-                    let preedit_cols = if active && has_focus { self.large_preedit.chars().count() } else { 0 };
-                    let composed = (preedit_cols > 0).then(|| with_preedit(shown, sel.head.col, &self.large_preedit));
-                    let galley = match &composed {
-                        Some(text) => ui.fonts(|f| f.layout_job(highlight_ranges(text, Lang::Plain, pal, font.clone(), &[]))),
-                        None => {
-                            let hits = if find.is_empty() { Vec::new() } else { find_all(shown, &find, &fopts).unwrap_or_default() };
-                            plain(ui, line, &hits)
-                        }
-                    };
                     if active {
-                        let r = Rect::from_min_max(Pos2::new(gutter.right(), y), Pos2::new(clip.right().max(rect.right()), y + row_h));
+                        let r = Rect::from_min_max(Pos2::new(gutter.right(), y), Pos2::new(clip.right().max(rect.right()), y + h));
                         painter.rect_filled(r, 0.0, c.current_line);
                     }
                     if !sel.is_empty() && (s0.line..=s1.line).contains(&line) {
-                        let a = if line == s0.line { x_of(&galley, s0.col) } else { 0.0 };
+                        let a = if line == s0.line { s0.col } else { 0 };
                         // 選到下一行時，把這一行的換行也標出來
-                        let b = if line == s1.line { x_of(&galley, s1.col) } else { galley.size().x + char_w * 0.5 };
-                        let r = Rect::from_min_max(Pos2::new(text_x + a, y), Pos2::new(text_x + b, y + row_h));
-                        painter.rect_filled(r, 0.0, c.sel_bg);
+                        let to_eol = line != s1.line;
+                        let mut spans = row_spans(galley, a, if to_eol { usize::MAX } else { s1.col }, to_eol);
+                        if to_eol {
+                            if let Some(last) = spans.last_mut() {
+                                last.3 += char_w * 0.5;
+                            }
+                        }
+                        for (top, bottom, xa, xb) in spans {
+                            let r = Rect::from_min_max(Pos2::new(text_x + xa, y + top), Pos2::new(text_x + xb, y + bottom));
+                            painter.rect_filled(r, 0.0, c.sel_bg);
+                        }
                     }
                     if cut {
+                        let right = galley.rows.last().map_or(0.0, |r| r.rect.right());
                         painter.text(
-                            Pos2::new(text_x + galley.size().x + char_w, y + row_h * 0.5),
+                            Pos2::new(text_x + right + char_w, y + h - row_h * 0.5),
                             Align2::LEFT_CENTER,
                             format!("…（這一行共 {} 個字元，只顯示前 {}）", buf.line_len(line), LARGE_VIEW_MAX_COLS),
                             num_font.clone(),
                             c.faint,
                         );
                     }
-                    // 組字中的文字從游標的位置開始，游標畫在它的後面
-                    let preedit_x = text_x + x_of(&galley, sel.head.col);
-                    let caret_x = text_x + x_of(&galley, sel.head.col + preedit_cols);
-                    painter.galley(Pos2::new(text_x, y), galley, c.fg);
+                    painter.galley(Pos2::new(text_x, y), galley.clone(), c.fg);
                     if active && has_focus {
-                        let caret = Rect::from_min_size(Pos2::new(caret_x, y), egui::vec2(1.5, row_h));
+                        let r = galley.pos_from_cursor(&galley.from_ccursor(cc(caret_col)));
+                        let caret = Rect::from_min_size(Pos2::new(text_x + r.left(), y + r.top()), egui::vec2(1.5, row_h));
                         painter.rect_filled(caret, 0.0, c.accent);
+                        caret_rect = Some(caret);
                         // 告訴作業系統游標在哪裡：輸入法的候選字視窗會跟著它，沒有這個輸入法也不會啟用
                         ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: clip, cursor_rect: caret }));
-                        // 組字中的文字加底線，和已經在文件裡的文字區分開來
-                        if preedit_cols > 0 {
-                            let b = y + row_h - 1.0;
-                            painter.line_segment([Pos2::new(preedit_x, b), Pos2::new(caret_x, b)], Stroke::new(1.0_f32, c.accent));
+                    }
+                    // 組字中的文字加底線，和已經在文件裡的文字區分開來
+                    if let Some(p) = compose_at.filter(|p| p.line == line) {
+                        for (_, bottom, xa, xb) in row_spans(galley, p.col, p.col + preedit_cols, false) {
+                            let b = y + bottom - 1.0;
+                            painter.line_segment([Pos2::new(text_x + xa, b), Pos2::new(text_x + xb, b)], Stroke::new(1.0_f32, c.accent));
                         }
                     }
-                    // 行號區：行號、目前行標記、書籤
+                    // 行號區：行號（折成好幾列時標在第一列）、目前行標記、書籤
                     painter.text(
                         Pos2::new(gutter.right() - 10.0, y + row_h * 0.5),
                         Align2::RIGHT_CENTER,
@@ -5063,14 +5190,14 @@ impl AlexCodeApp {
                         if active { c.accent } else { c.faint },
                     );
                     if active {
-                        painter.rect_filled(Rect::from_min_size(Pos2::new(gutter.left(), y), egui::vec2(2.0, row_h)), 0.0, c.accent);
+                        painter.rect_filled(Rect::from_min_size(Pos2::new(gutter.left(), y), egui::vec2(2.0, h)), 0.0, c.accent);
                     }
                     // Git：新增（強調色條）/ 修改（黃色條）/ 此行上方有刪除（洋紅三角），與一般編輯區相同
                     if let Some(&st) = self.git_marks.1.get(&line) {
                         let x = gutter.right() - 4.0;
                         if st & (ADDED | MODIFIED) != 0 {
                             let col = if st & MODIFIED != 0 { c.warn } else { c.accent };
-                            painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), egui::vec2(3.0, row_h)), 0.0, col);
+                            painter.rect_filled(Rect::from_min_size(Pos2::new(x, y), egui::vec2(3.0, h)), 0.0, col);
                         }
                         if st & DELETED_ABOVE != 0 {
                             painter.add(Shape::convex_polygon(
@@ -5090,8 +5217,47 @@ impl AlexCodeApp {
                 if dragging {
                     ui.ctx().request_repaint();
                 }
-                if scroll_to_cursor || moved {
-                    let x = text_x + x_of(&plain(ui, sel.head.line, &[]), sel.head.col);
+                if (scroll_to_cursor || moved) && wrap {
+                    // 自動換行：每一行的高度要排版了才知道，所以自己算捲動位置，下一幀套用
+                    let head = sel.head;
+                    let g = line_galley(ui, head.line, &[]);
+                    let in_line = g.pos_from_cursor(&g.from_ccursor(cc(caret_col))).top();
+                    let height = |line: usize| line_galley(ui, line, &[]).size().y.max(row_h);
+                    // 游標那一列目前在畫面上的 y（那一行不在畫面上時為 None）
+                    let on_screen = vis.iter().find(|(l, ..)| *l == head.line).map(|(_, y, _)| y + in_line);
+                    let above = on_screen.map_or(vis.first().is_some_and(|v| head.line < v.0), |y| y < view_top);
+                    // 游標那一列的上緣要落在可見範圍上緣下方多少像素：置中 / 貼上緣 / 貼下緣；已經看得到就不動
+                    let dist = if scroll_to_cursor {
+                        Some(((viewport.height() - row_h) * 0.5).max(4.0))
+                    } else if on_screen.is_some_and(|y| y >= view_top && y + row_h <= view_bottom) {
+                        None
+                    } else if above {
+                        Some(4.0)
+                    } else {
+                        Some((viewport.height() - row_h - 4.0).max(4.0))
+                    };
+                    if let Some(dist) = dist {
+                        // 從游標那一列往上數，看最上面該是哪一行、該行捲出畫面多少比例
+                        let mut remaining = dist - 4.0 - in_line;
+                        let mut l = head.line;
+                        let top = loop {
+                            if remaining <= 0.0 {
+                                break l as f32 + (-remaining / height(l)).min(0.999);
+                            }
+                            if l == 0 {
+                                break 0.0;
+                            }
+                            l -= 1;
+                            remaining -= height(l);
+                        };
+                        let to = Vec2::new(0.0, (top * row_h).clamp(0.0, max_offset.y));
+                        if (to.y - viewport.top()).abs() > 0.01 {
+                            next_offset = Some(to);
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                } else if scroll_to_cursor || moved {
+                    let x = text_x + x_of(&line_galley(ui, sel.head.line, &[]), caret_col);
                     let r = Rect::from_min_size(Pos2::new(x, y_of(sel.head.line)), egui::vec2(char_w, row_h));
                     if scroll_to_cursor {
                         ui.scroll_to_rect(r.expand2(egui::vec2(40.0, row_h * 2.0)), Some(Align::Center));
@@ -5101,12 +5267,16 @@ impl AlexCodeApp {
                         ui.scroll_to_rect(r, None);
                     }
                 }
-                (Rect::from_min_max(Pos2::new(text_x, rect.top() + 4.0), rect.max), clip, next_offset)
+                (Rect::from_min_max(Pos2::new(text_x, rect.top() + 4.0), rect.max), clip, next_offset, wrap_w, caret_rect)
             },
         );
         self.large_scroll_to = scroll.inner.2.map(|o| (tab_id, o));
+        self.large_wrap_w = scroll.inner.3;
         self.mark_rect("large-text", scroll.inner.0);
         self.mark_rect("large-clip", scroll.inner.1);
+        if let Some(caret) = scroll.inner.4 {
+            self.mark_rect("large-caret", caret);
+        }
         let buf = &mut self.tabs[idx];
         buf.selections = vec![sel];
         buf.clamp_cursors();
@@ -7034,6 +7204,159 @@ mod tests {
         assert_eq!((line0(&app).as_str(), cursor(&app)), ("中 00000 some text here", (0, 1)));
         assert!(has(&out, "中 00000 some text here"));
         assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty(), "still the large-file view");
+    }
+
+    /// 這一幀畫出來的每一段文字：(內容, 在畫面上的範圍, 折成幾列)
+    fn painted_lines(out: &egui::FullOutput) -> Vec<(String, Rect, usize)> {
+        fn walk(shape: &Shape, found: &mut Vec<(String, Rect, usize)>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
+                Shape::Text(t) => {
+                    found.push((t.galley.job.text.clone(), Rect::from_min_size(t.pos, t.galley.size()), t.galley.rows.len()))
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, &mut found));
+        found
+    }
+
+    /// 300 行（加結尾的空行）：行號個位數是 5 的行很長（約 500 個字元），其餘都很短
+    fn large_wrap_source() -> String {
+        (0..300)
+            .map(|i| if i % 10 == 5 { format!("L{i:03} {}\n", "word ".repeat(100)) } else { format!("L{i:03} short\n") })
+            .collect()
+    }
+
+    #[test]
+    fn large_view_wraps_long_lines_when_word_wrap_is_on() {
+        let ctx = ctx();
+        let mut app = large_app_with(&ctx, &large_wrap_source());
+        let row_h = row_height(&app, &ctx);
+        let clip = app.probe["large-clip"];
+        let pal = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud());
+        let line = |out: &egui::FullOutput, prefix: &str| {
+            painted_lines(out).into_iter().find(|l| l.0.starts_with(prefix)).unwrap_or_else(|| panic!("{prefix} is not on screen"))
+        };
+        let on_screen = |app: &AlexCodeApp| {
+            let caret = app.probe["large-caret"];
+            caret.top() >= clip.top() - 1.0 && caret.bottom() <= clip.bottom() + 1.0
+        };
+
+        // 預設不換行：長行只有一列，超出畫面右邊
+        let out = frame(&mut app, &ctx, vec![]);
+        let l5 = line(&out, "L005 ");
+        assert!(l5.2 == 1 && l5.1.right() > clip.right());
+
+        app.config.word_wrap = true;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let (l4, l5, l6) = (line(&out, "L004 "), line(&out, "L005 "), line(&out, "L006 "));
+        let rows = l5.2;
+        assert!(rows >= 3, "the 500-character line takes several rows, got {rows}");
+        assert!(l5.1.right() <= clip.right(), "wrapped text stays inside the view");
+        assert!((l5.1.top() - l4.1.top() - row_h).abs() < 0.5);
+        assert!(l5.1.height() > (rows as f32 - 0.5) * row_h, "{rows} rows are {} high", l5.1.height());
+        assert!((l6.1.top() - l5.1.bottom()).abs() < 0.5, "the next line starts below every row of the wrapped one");
+        // 行號仍是檔案的行號，標在第一列
+        let number_y = |n: &str| {
+            let l = painted_lines(&out).into_iter().find(|l| l.0 == n && l.1.right() < l5.1.left()).unwrap_or_else(|| panic!("no line number {n}"));
+            l.1.center().y
+        };
+        assert!((number_y("6") - l5.1.top() - row_h * 0.5).abs() < 2.0);
+        assert!((number_y("7") - l6.1.top() - row_h * 0.5).abs() < 2.0);
+        assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty(), "still only the visible lines are laid out");
+
+        // 點在長行的第二列：游標在那一行靠後的欄位，輸入的字寫進那一行
+        click(&mut app, &ctx, Pos2::new(l5.1.left() + 20.0, l5.1.top() + row_h * 1.5));
+        let (at_line, col) = cursor(&app);
+        assert!(at_line == 5 && col > 50, "cursor at {:?}", cursor(&app));
+        frame(&mut app, &ctx, vec![]);
+        assert!((app.probe["large-caret"].top() - l5.1.top() - row_h).abs() < 2.0, "the caret is drawn on the second row");
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!(app.tabs[0].lines[5].chars().nth(col), Some('X'));
+        assert_eq!(cursor(&app), (5, col + 1));
+
+        // 選取整個長行：每一列各畫一塊選取底色
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::NONE), key(Key::End, Modifiers::SHIFT)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        fn fills(shape: &Shape, fill: Color32, n: &mut usize) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| fills(s, fill, n)),
+                Shape::Rect(r) if r.fill == fill => *n += 1,
+                _ => {}
+            }
+        }
+        let mut n = 0;
+        out.shapes.iter().for_each(|s| fills(&s.shape, c.sel_bg, &mut n));
+        assert_eq!(n, line(&out, "L005 ").2, "one selection rectangle per row");
+
+        // 拖曳選取：從長行的第二列拖到下面第二行
+        let (l5, l7) = (line(&out, "L005 "), line(&out, "L007 "));
+        let to = Pos2::new(l7.1.left() + 20.0, l7.1.center().y);
+        press_and_drag(&mut app, &ctx, Pos2::new(l5.1.left() + 20.0, l5.1.top() + row_h * 1.5), to);
+        frame(&mut app, &ctx, vec![Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+        let (anchor, head) = selection(&app);
+        assert!(anchor.0 == 5 && anchor.1 > 50 && head.0 == 7, "dragged from {anchor:?} to {head:?}");
+        let i = AlexCodeApp::char_index_of(&app.tabs[0], 5, 3);
+        app.pending_select = Some((i, i));
+        frame(&mut app, &ctx, vec![]);
+
+        // 上下鍵以畫面上的列為單位：在長行裡往下是同一行的下一列，走完每一列才到下一行；往上亦然
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::NONE)]);
+        let rows = line(&frame(&mut app, &ctx, vec![]), "L005 ").2;
+        let mut cols = vec![0];
+        for _ in 1..rows {
+            frame(&mut app, &ctx, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+            assert_eq!(cursor(&app).0, 5, "still inside the wrapped line");
+            cols.push(cursor(&app).1);
+        }
+        assert!(cols.windows(2).all(|w| w[1] > w[0] + 20), "each row is further into the line: {cols:?}");
+        frame(&mut app, &ctx, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        assert_eq!(cursor(&app), (6, 0));
+        frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE)]);
+        assert_eq!(cursor(&app), (5, cols[rows - 1]), "up from the next line lands on the last row");
+        for _ in 1..rows {
+            frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE)]);
+        }
+        assert_eq!(cursor(&app), (5, 0));
+        frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE)]);
+        assert_eq!(cursor(&app), (4, 0));
+
+        // 一路往下 / 往上移動：游標一直留在畫面上（捲動位置跟著走）
+        for i in 0..120 {
+            frame(&mut app, &ctx, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+            frame(&mut app, &ctx, vec![]);
+            assert!(on_screen(&app), "after {i} x down: caret {:?}, view {clip:?}", app.probe["large-caret"]);
+        }
+        let far = cursor(&app).0;
+        assert!(far > 60, "moved well past the first screen (line {far})");
+        for i in 0..40 {
+            frame(&mut app, &ctx, vec![key(Key::PageUp, Modifiers::NONE)]);
+            frame(&mut app, &ctx, vec![]);
+            assert!(on_screen(&app), "after {i} x page up: caret {:?}, view {clip:?}", app.probe["large-caret"]);
+        }
+        assert_eq!(cursor(&app).0, 0);
+        assert!((line(&frame(&mut app, &ctx, vec![]), "L000 ").1.top() - clip.top()).abs() < 12.0, "back at the top");
+
+        // 跳至行：那一行帶到畫面中央；Ctrl+End：最後一行在畫面上
+        goto_line(&mut app, &ctx, 205);
+        let out = frame(&mut app, &ctx, vec![]);
+        let l205 = line(&out, "L205 ");
+        assert!((l205.1.top() - clip.center().y).abs() < clip.height() * 0.25, "line 205 at y {} in {clip:?}", l205.1.top());
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (300, 0));
+        assert!(on_screen(&app));
+        assert!(line(&frame(&mut app, &ctx, vec![]), "L299 ").1.top() < clip.bottom());
+
+        // 關掉之後回到一行一列
+        app.config.word_wrap = false;
+        goto_line(&mut app, &ctx, 5);
+        assert_eq!(line(&frame(&mut app, &ctx, vec![]), "L005 ").2, 1);
     }
 
     #[test]
