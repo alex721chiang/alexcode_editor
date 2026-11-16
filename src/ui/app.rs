@@ -34,7 +34,7 @@ use crate::search::{command_match_score, find_all, replace_all, replace_range, s
 use crate::search::{apply_replace_in_files, plan_replace_in_files, ReplaceHit, ReplaceResult};
 use crate::snippets::SnippetsController;
 // （`core::available_shells` 是「在此開啟終端機」選單用的外部終端機清單，這裡的是內建終端機能用的 shell）
-use crate::terminal::{available_shells as pty_shells, PtySession, ShellChoice, VtParser};
+use crate::terminal::{available_shells as pty_shells, PtySession, ShellChoice, TerminalCell, VtParser};
 use crate::theme::ThemeManager;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use eframe::egui::{
@@ -699,6 +699,51 @@ fn edge_scroll_speed(over: f32, unit: f32) -> f32 {
         return 0.0;
     }
     over.signum() * (unit * 8.0 + over.abs() * 10.0).min(6000.0)
+}
+
+/// 終端機的 16 色（ANSI 0–15，數值與 Windows Terminal 的 Campbell 配色相同）。
+/// 沒有指定顏色的字用主題的文字色、沒有指定底色的格子不畫底色
+const TERM_COLORS: [Color32; 16] = [
+    Color32::from_rgb(12, 12, 12),
+    Color32::from_rgb(197, 15, 31),
+    Color32::from_rgb(19, 161, 14),
+    Color32::from_rgb(193, 156, 0),
+    Color32::from_rgb(0, 55, 218),
+    Color32::from_rgb(136, 23, 152),
+    Color32::from_rgb(58, 150, 221),
+    Color32::from_rgb(204, 204, 204),
+    Color32::from_rgb(118, 118, 118),
+    Color32::from_rgb(231, 72, 86),
+    Color32::from_rgb(22, 198, 12),
+    Color32::from_rgb(249, 241, 165),
+    Color32::from_rgb(59, 120, 255),
+    Color32::from_rgb(180, 0, 158),
+    Color32::from_rgb(97, 214, 214),
+    Color32::from_rgb(242, 242, 242),
+];
+
+/// 終端機的一列排成一段文字：相鄰、顏色相同的格子合成一段，依 `VtParser` 記下的前景 / 背景色與粗體上色
+///（粗體的基本色 0–7 以亮色 8–15 顯示，與多數終端機相同）。行尾沒有底色的空白不排；空的一列排一個空白，保留列高
+fn terminal_row_job(cells: &[TerminalCell], font: &FontId, default_fg: Color32) -> egui::text::LayoutJob {
+    let end = cells.iter().rposition(|c| c.ch != ' ' || c.bg >= 0).map_or(0, |i| i + 1);
+    let mut job = egui::text::LayoutJob::default();
+    let mut i = 0;
+    while i < end {
+        let (fg, bg, bold) = (cells[i].fg, cells[i].bg, cells[i].bold);
+        let mut text = String::new();
+        while i < end && (cells[i].fg, cells[i].bg, cells[i].bold) == (fg, bg, bold) {
+            text.push(cells[i].ch);
+            i += 1;
+        }
+        let fg = if bold && (0..8).contains(&fg) { fg + 8 } else { fg };
+        let color = if fg >= 0 { TERM_COLORS[fg as usize % 16] } else { default_fg };
+        let background = if bg >= 0 { TERM_COLORS[bg as usize % 16] } else { Color32::TRANSPARENT };
+        job.append(&text, 0.0, egui::TextFormat { font_id: font.clone(), color, background, ..Default::default() });
+    }
+    if job.text.is_empty() {
+        job.append(" ", 0.0, egui::TextFormat { font_id: font.clone(), color: default_fg, ..Default::default() });
+    }
+    job
 }
 
 /// 終端機有鍵盤焦點時，一個按鍵要送給 shell 的位元組（一般終端機送的 VT 序列；
@@ -1917,6 +1962,14 @@ impl AlexCodeApp {
         }
     }
 
+    /// 終端機的大小改成 `rows` × `cols`：畫面模型跟著改，shell 在跑時也通知它（它會依新的大小重排輸出）
+    fn resize_terminal(&mut self, rows: usize, cols: usize) {
+        self.terminal.resize(rows, cols);
+        if let Some(s) = &self.term_pty {
+            let _ = s.resize(rows as u16, cols as u16);
+        }
+    }
+
     /// 可以選的 shell（第一次用到時才去找）
     fn shells(&mut self) -> &[ShellChoice] {
         if self.term_shells.is_empty() {
@@ -1992,7 +2045,7 @@ impl AlexCodeApp {
             return;
         }
         if trimmed == "cls" || trimmed == "clear" {
-            self.terminal = VtParser::new(200, 160);
+            self.terminal = VtParser::new(self.terminal.rows(), self.terminal.cols());
             return;
         }
         if let Some(dir) = trimmed.strip_prefix("cd ").or_else(|| trimmed.strip_prefix("cd\t")) {
@@ -3256,10 +3309,14 @@ impl AlexCodeApp {
             .default_height(200.0)
             .frame(egui::Frame::none().fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
             .show(ctx, |ui| {
+                self.mark_rect("terminal-panel", ui.max_rect());
                 if Self::dock_title(ui, c, "TERMINAL  整合終端機") {
                     self.show_terminal = false;
                 }
                 egui::Frame::none().inner_margin(egui::Margin::symmetric(10.0, 6.0)).show(ui, |ui| {
+                    // 內容一定佔滿整個高度：可以改大小的面板下一幀會縮成內容用掉的高度，而最後一列（輸入列）
+                    // 後面的間距不算在內，不佔滿的話每一幀縮 2 像素（shell 有輸出就一直重畫，終端機越縮越小、大小一直變）
+                    ui.set_min_height(ui.available_height());
                     let input_h = 28.0;
                     // 選擇 shell：換了就結束目前的、啟動選的那一個（記在設定裡）
                     let mut switch_to = None;
@@ -3302,24 +3359,63 @@ impl AlexCodeApp {
                             let _ = s.write(&bytes);
                         }
                     }
+                    // 終端機的大小跟著輸出區：可見的寬高能放幾欄 × 幾列，變了就改 `terminal` 並通知 shell
+                    let font = FontId::monospace(13.0);
+                    let ppp = ui.ctx().pixels_per_point();
+                    // 每個字元往右移的距離是字寬取整到像素（egui 排版時對齊像素）
+                    let adv = (ui.fonts(|f| f.glyph_width(&font, '0')) * ppp).round().max(1.0) / ppp;
+                    let row_h = ui.fonts(|f| f.row_height(&font));
+                    let pitch = row_h + ui.spacing().item_spacing.y;
+                    let avail = egui::vec2(ui.available_width() - ui.spacing().scroll.bar_width - 8.0, ui.available_height() - input_h);
+                    let size = (
+                        ((avail.y / pitch).floor().max(0.0) as usize).clamp(2, 200),
+                        ((avail.x / adv).floor().max(0.0) as usize).clamp(20, 500),
+                    );
+                    if size != (self.terminal.rows(), self.terminal.cols()) {
+                        self.resize_terminal(size.0, size.1);
+                    }
+                    let alive = self.term_pty.is_some();
+                    let mut cursor_rect = None;
                     let out = egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .max_height(ui.available_height() - input_h)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            let font = FontId::monospace(13.0);
+                            // 捲出畫面的歷史稍暗一點；顏色照 `VtParser` 記下的
                             for i in 0..self.terminal.scrollback_count() {
-                                ui.label(RichText::new(self.terminal.scrollback_line(i)).font(font.clone()).color(c.fg_dim));
+                                ui.label(terminal_row_job(self.terminal.scrollback_cells(i), &font, c.fg_dim));
                             }
-                            let last = (0..self.terminal.rows())
-                                .rev()
-                                .find(|&r| !self.terminal.line_text(r).trim().is_empty())
-                                .map_or(0, |r| r + 1);
-                            for r in 0..last.max(self.terminal.cursor_row()) {
-                                let line = self.terminal.line_text(r);
-                                ui.label(RichText::new(line).font(font.clone()).color(c.fg));
+                            // 畫面上的列：排到最後一列有字的、或游標所在的那一列為止
+                            let t = &self.terminal;
+                            let last = (0..t.rows()).rev().find(|&r| !t.line_text(r).trim().is_empty()).map_or(0, |r| r + 1);
+                            let (cy, cx) = (t.cursor_row(), t.cursor_col());
+                            for r in 0..last.max(cy + 1).min(t.rows()) {
+                                let galley = ui.fonts(|f| f.layout_job(terminal_row_job(t.row_cells(r), &font, c.fg)));
+                                let resp = ui.label(galley.clone());
+                                // 游標：shell 在跑時畫在游標所在的格子（有焦點時是實心方塊，沒有時是外框）
+                                if r == cy && alive {
+                                    // 排出來的字數（空的一列排的是一個佔位的空白，不算）；游標在字的後面時每格加一個字寬
+                                    let blank = t.row_cells(r).iter().all(|c| c.ch == ' ' && c.bg < 0);
+                                    let n = if blank { 0 } else { galley.job.text.chars().count() };
+                                    let at = |i: usize| galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(i))).left();
+                                    let x = at(cx.min(n)) + cx.saturating_sub(n) as f32 * adv;
+                                    cursor_rect = Some(Rect::from_min_size(
+                                        Pos2::new(resp.rect.left() + x, resp.rect.top()),
+                                        egui::vec2(adv, row_h),
+                                    ));
+                                }
+                            }
+                            if let Some(r) = cursor_rect {
+                                if focused {
+                                    ui.painter().rect_filled(r, 0.0, c.accent.gamma_multiply(0.7));
+                                } else {
+                                    ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0_f32, c.accent));
+                                }
                             }
                         });
+                    if let Some(r) = cursor_rect {
+                        self.mark_rect("terminal-cursor", r);
+                    }
                     // 點一下輸出區取得鍵盤焦點（只接點擊：拖曳仍然是選取輸出的文字）；有焦點時加一圈外框
                     let resp = ui.interact(out.inner_rect, term_id, Sense::click());
                     if resp.clicked() {
@@ -8308,6 +8404,144 @@ mod tests {
         app.submit_terminal_line(&ctx, again.to_string());
         assert!(app.term_pty.is_some());
         assert!(wait(&mut app, &|t| t.contains("4321")), "the restarted shell runs the line:\n{}", screen(&app));
+    }
+
+    /// 這一幀畫出的所有文字排版（含各段的顏色）
+    fn painted_galleys(out: &egui::FullOutput) -> Vec<Arc<egui::Galley>> {
+        fn walk(shape: &Shape, found: &mut Vec<Arc<egui::Galley>>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
+                Shape::Text(t) => found.push(t.galley.clone()),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, &mut found));
+        found
+    }
+
+    #[test]
+    fn terminal_shows_ansi_colors() {
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        app.term_pty_failed = true; // 不啟動 shell，直接把帶顏色的輸出餵給畫面模型
+        app.show_terminal = true;
+        frame(&mut app, &ctx, vec![]);
+        app.terminal.feed(b"\x1b[31mRED\x1b[0m plain \x1b[1;32mBOLD\x1b[0m \x1b[44mONBLUE\x1b[0m\r\n");
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.contains("RED")).expect("the colored line is drawn");
+        let section = |word: &str| {
+            let at = g.job.text.find(word).unwrap();
+            g.job.sections.iter().find(|s| s.byte_range.contains(&at)).unwrap().format.clone()
+        };
+        assert_eq!(section("RED").color, TERM_COLORS[1]);
+        let fg = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&fg, app.theme_mgr.is_neon_hud());
+        assert_eq!(section("plain").color, c.fg, "uncolored text uses the theme's text color");
+        assert_eq!(section("BOLD").color, TERM_COLORS[10], "bold green shows as bright green");
+        assert_eq!(section("ONBLUE").background, TERM_COLORS[4]);
+        assert_eq!(section("plain").background, Color32::TRANSPARENT);
+        // 捲出畫面的列也保留顏色
+        for _ in 0..app.terminal.rows() {
+            app.terminal.feed(b"\r\n");
+        }
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.contains("RED")).expect("the line is in the scrollback");
+        assert!(app.terminal.scrollback_count() > 0);
+        assert_eq!(g.job.sections[0].format.color, TERM_COLORS[1]);
+    }
+
+    #[test]
+    fn terminal_follows_the_dock_size_and_draws_its_cursor() {
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = AlexCodeApp::new();
+        app.term_cwd = dir.path().to_path_buf();
+        let screen = |app: &AlexCodeApp| {
+            let t = &app.terminal;
+            let mut s: Vec<String> = (0..t.scrollback_count()).map(|i| t.scrollback_line(i)).collect();
+            s.extend((0..t.rows()).map(|r| t.line_text(r)));
+            s.join("\n")
+        };
+        let size = std::cell::Cell::new(egui::vec2(1280.0, 800.0));
+        let run = |app: &mut AlexCodeApp, events: Vec<Event>| {
+            frame_with(app, &ctx, |i| {
+                i.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, size.get()));
+                i.events = events;
+            })
+        };
+        let wait = |app: &mut AlexCodeApp, cond: &dyn Fn(&str) -> bool| {
+            let end = Instant::now() + Duration::from_secs(30);
+            while Instant::now() < end {
+                run(app, vec![]);
+                if cond(&screen(app)) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
+        };
+        app.show_terminal = true;
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            run(&mut app, vec![]);
+            seen.push((app.probe["terminal-panel"].height(), app.terminal.rows(), app.terminal.cols()));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // 面板與終端機的大小每一幀都一樣（之前面板每一幀縮 2 像素）
+        assert!(seen.windows(2).skip(1).all(|w| w[0] == w[1]), "the dock keeps its size: {seen:?}");
+        let font = FontId::monospace(13.0);
+        let width = |s: &str| ctx.fonts(|f| f.layout_no_wrap(s.into(), font.clone(), Color32::WHITE).size().x);
+        let adv = width("00") - width("0");
+        // 大小跟著輸出區：寬度放得下的欄數（扣掉捲軸），而不是固定的 200 × 160
+        let (rows, cols) = (app.terminal.rows(), app.terminal.cols());
+        let w = app.probe["terminal-output"].width();
+        assert!((2..40).contains(&rows), "rows follow the dock height, got {rows}");
+        assert!((cols as f32) * adv <= w && (cols as f32 + 4.0) * adv > w - 30.0, "{cols} columns for {w} px");
+        assert!(wait(&mut app, &|t| !t.trim().is_empty()), "the shell prints its prompt");
+
+        // shell 收到的大小與畫面相同
+        let ask = if cfg!(windows) {
+            "powershell -NoProfile -Command \"[Console]::WindowWidth*1000+[Console]::WindowHeight\""
+        } else {
+            "stty size"
+        };
+        let reply = |rows: usize, cols: usize| if cfg!(windows) { format!("{}", cols * 1000 + rows) } else { format!("{rows} {cols}") };
+        app.submit_terminal_line(&ctx, ask.to_string());
+        let want = reply(rows, cols);
+        assert!(wait(&mut app, &|t| t.lines().any(|l| l.trim() == want)), "the shell sees {rows} x {cols}:\n{}", screen(&app));
+
+        // 視窗變窄：欄數跟著變少，shell 也收到新的大小
+        size.set(egui::vec2(900.0, 800.0));
+        run(&mut app, vec![]);
+        run(&mut app, vec![]);
+        let (rows2, cols2) = (app.terminal.rows(), app.terminal.cols());
+        assert!(cols2 < cols, "narrower window, fewer columns ({cols} -> {cols2})");
+        app.submit_terminal_line(&ctx, ask.to_string());
+        let want = reply(rows2, cols2);
+        assert!(wait(&mut app, &|t| t.lines().any(|l| l.trim() == want)), "the shell sees {rows2} x {cols2}:\n{}", screen(&app));
+
+        // 游標畫在畫面上，輸入的字讓它往右移（先等提示字元印完、畫面 0.5 秒沒有變化）
+        let mut last = (screen(&app), Instant::now());
+        let end = Instant::now() + Duration::from_secs(20);
+        while last.1.elapsed() < Duration::from_millis(500) && Instant::now() < end {
+            run(&mut app, vec![]);
+            let now = screen(&app);
+            if now != last.0 {
+                last = (now, Instant::now());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let cursor = app.probe["terminal-cursor"];
+        assert!(app.probe["terminal-output"].contains(cursor.center()), "the cursor is inside the output area");
+        let out = app.probe["terminal-output"].center();
+        click(&mut app, &ctx, out);
+        run(&mut app, vec![Event::Text("abc".into())]);
+        assert!(wait(&mut app, &|t| t.contains("abc")));
+        run(&mut app, vec![]);
+        let moved = app.probe["terminal-cursor"].left() - cursor.left();
+        assert!((moved - 3.0 * adv).abs() < 1.5, "the cursor moved {moved} px for 3 characters");
     }
 
     #[test]

@@ -89,8 +89,8 @@ pub fn available_shells() -> Vec<ShellChoice> {
 
 /// 一個在虛擬終端裡執行的 shell
 pub struct PtySession {
-    // 虛擬終端本身：一直留著，關掉它 shell 的輸出端也會跟著關閉
-    _master: Box<dyn MasterPty + Send>,
+    // 虛擬終端本身：一直留著（關掉它 shell 的輸出端也會跟著關閉），改變大小也要透過它
+    master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     output: Receiver<Vec<u8>>,
@@ -145,7 +145,12 @@ impl PtySession {
             let _ = exit_tx.send(code);
             notify();
         });
-        Ok(PtySession { _master: pair.master, writer, killer, output, exit, exit_code: None })
+        Ok(PtySession { master: pair.master, writer, killer, output, exit, exit_code: None })
+    }
+
+    /// 通知 shell 終端機的大小改變了（Unix 上 shell 會收到 SIGWINCH；ConPTY 會依新的大小重畫畫面）
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
+        self.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())
     }
 
     /// 取出目前為止讀到、還沒取走的輸出（沒有時是空的）

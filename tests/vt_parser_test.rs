@@ -187,3 +187,50 @@ fn test_erase_characters_and_partial_screen_erase() {
     p.feed(b"\x1b[1;4H\x1b[1J");
     assert_eq!(p.line_text(0), "    efgh");
 }
+
+#[test]
+fn test_resize_keeps_the_cursor_on_screen() {
+    // 列變少：游標以上多出來的列推進歷史，游標所在的那一列留在畫面上
+    let mut p = VtParser::new(5, 10);
+    p.feed(b"a\r\nb\r\nc\r\nd\r\ne");
+    p.resize(3, 10);
+    assert_eq!((p.rows(), p.cols()), (3, 10));
+    assert_eq!((p.scrollback_count(), p.scrollback_line(0).as_str(), p.scrollback_line(1).as_str()), (2, "a", "b"));
+    assert_eq!((p.line_text(0).as_str(), p.line_text(1).as_str(), p.line_text(2).as_str()), ("c", "d", "e"));
+    assert_eq!((p.cursor_row(), p.cursor_col()), (2, 1));
+    // 列變多：內容與游標不動，下面多出空白列
+    p.resize(6, 10);
+    assert_eq!((p.line_text(0).as_str(), p.line_text(3).as_str()), ("c", ""));
+    assert_eq!((p.cursor_row(), p.cursor_col()), (2, 1));
+    p.feed(b"\r\nf");
+    assert_eq!(p.line_text(3), "f");
+    // 欄變少：每一列截短，游標不超過新的寬度
+    let mut q = VtParser::new(2, 10);
+    q.feed(b"abcdefgh");
+    q.resize(2, 4);
+    assert_eq!(q.line_text(0), "abcd");
+    assert!(q.cursor_col() <= 4);
+    q.resize(2, 8);
+    assert_eq!(q.line_text(0), "abcd", "cut columns do not come back");
+}
+
+#[test]
+fn test_scrollback_keeps_colors() {
+    let mut p = VtParser::new(1, 20);
+    p.feed(b"\x1b[31mred\x1b[0m plain\r\nnext");
+    assert_eq!(p.scrollback_line(0), "red plain");
+    let cells = p.scrollback_cells(0);
+    assert_eq!((cells[0].ch, cells[0].fg), ('r', 1));
+    assert_eq!((cells[4].ch, cells[4].fg), ('p', -1));
+    assert_eq!(p.row_cells(0)[0].ch, 'n');
+}
+
+#[test]
+fn test_extended_colors_do_not_leak_into_basic_ones() {
+    // 256 色 / 真彩色的參數（例如 38;2;31;32;33）不能被當成 31（紅）之類的基本色
+    let mut p = VtParser::new(1, 20);
+    p.feed(b"\x1b[38;2;31;32;33mA\x1b[48;5;41mB\x1b[0;32mC");
+    assert_eq!((p.cell_at(0, 0).fg, p.cell_at(0, 0).bg), (-1, -1));
+    assert_eq!(p.cell_at(0, 1).bg, -1);
+    assert_eq!(p.cell_at(0, 2).fg, 2);
+}

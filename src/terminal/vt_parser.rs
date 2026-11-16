@@ -45,7 +45,8 @@ pub struct VtParser {
     cx: usize,
     cy: usize,
     grid: Vec<Vec<Cell>>,
-    scrollback: Vec<String>,
+    /// 捲出畫面的列（連同顏色；行尾沒有底色的空白去掉）
+    scrollback: Vec<Vec<Cell>>,
     cur: Cell,
     state: State,
     csi_buf: Vec<u8>,
@@ -123,16 +124,47 @@ impl VtParser {
     }
 
     pub fn scrollback_line(&self, i: usize) -> String {
-        if i < self.scrollback.len() {
-            self.scrollback[i].clone()
-        } else {
-            String::new()
+        let s: String = self.scrollback_cells(i).iter().map(|c| c.ch).collect();
+        s.trim_end_matches(' ').to_string()
+    }
+
+    /// 第 `i` 條歷史（最舊的是 0）的各格，含顏色
+    pub fn scrollback_cells(&self, i: usize) -> &[Cell] {
+        self.scrollback.get(i).map_or(&[], |r| r.as_slice())
+    }
+
+    /// 畫面上第 `row` 列的各格（寬度固定是 `cols`）
+    pub fn row_cells(&self, row: usize) -> &[Cell] {
+        self.grid.get(row).map_or(&[], |r| r.as_slice())
+    }
+
+    /// 改變畫面大小（視窗大小改變時，與通知 shell 的大小一致）。列變少時，游標以上多出來的列
+    /// 推進歷史（像畫面往上捲），游標所在的那一列留在畫面上；欄變少時每一列截短
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        let (rows, cols) = (rows.max(1), cols.max(1));
+        if (rows, cols) == (self.rows, self.cols) {
+            return;
         }
+        if rows < self.rows && self.cy >= rows {
+            let n = self.cy + 1 - rows;
+            for _ in 0..n {
+                self.scroll_up();
+            }
+            self.cy -= n;
+        }
+        for row in &mut self.grid {
+            row.resize(cols, Cell::default());
+        }
+        self.grid.resize(rows, vec![Cell::default(); cols]);
+        self.rows = rows;
+        self.cols = cols;
+        self.cy = self.cy.min(rows - 1);
+        self.cx = self.cx.min(cols);
     }
 
     fn scroll_up(&mut self) {
-        let mut top: String = self.grid[0].iter().map(|c| c.ch).collect();
-        while top.ends_with(' ') {
+        let mut top = self.grid[0].clone();
+        while top.last().is_some_and(|c| c.ch == ' ' && c.bg == -1) {
             top.pop();
         }
         self.scrollback.push(top);
@@ -388,7 +420,20 @@ impl VtParser {
     }
 
     fn apply_sgr(&mut self, params: &[i32]) {
-        for &p in params {
+        let mut i = 0;
+        while i < params.len() {
+            let p = params[i];
+            i += 1;
+            // 256 色（38;5;n）與真彩色（38;2;r;g;b）目前不支援：連同它的參數一起略過，
+            // 免得像 38;2;31;… 裡的 31 被當成「紅色」
+            if p == 38 || p == 48 {
+                i += match params.get(i) {
+                    Some(5) => 2,
+                    Some(2) => 4,
+                    _ => 0,
+                };
+                continue;
+            }
             if p == 0 {
                 self.cur = Cell::default();
             } else if p == 1 {
