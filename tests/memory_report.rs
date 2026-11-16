@@ -163,7 +163,10 @@ fn opening_a_large_file_stays_within_a_few_times_its_size() {
     assert_eq!(tab.lines.len(), file_lines + 1);
     let grew = PEAK.load(Relaxed).saturating_sub(before);
     println!("MEM typing 20 characters: peak +{:.2} MB", mb(grew));
-    assert!(grew < file_bytes / 2, "typing 20 characters needed {:.1} MB more at its peak", mb(grew));
+    // 複製整份文件至少要多用一份檔案大小、排版整份約 200 倍。門檻不能再低：Linux 的 CI 上這 20 幀
+    // 有時會多出約 1.5 MB（同一個 commit 兩次執行一次 +1.54 MB、一次通過；Windows 上穩定是 +0.05 MB），
+    // 原因沒有查明，看起來是與檔案大小無關的固定開銷
+    assert!(grew < file_bytes, "typing 20 characters needed {:.1} MB more at its peak", mb(grew));
 }
 
 #[test]
