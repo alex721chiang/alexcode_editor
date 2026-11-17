@@ -192,3 +192,14 @@ fn replace_columns_edits_every_line_as_one_undo_step() {
     assert!(b.redo());
     assert_eq!(b.edit_text(), "abXYef\nabXY\n\u{4e2d}XYyz\nkeep");
 }
+
+#[test]
+fn replace_columns_each_puts_one_text_on_each_line() {
+    let mut b = buf("abcd\nab\nwxyz");
+    let texts: Vec<String> = ["1", "22", ""].iter().map(|s| s.to_string()).collect();
+    b.replace_columns_each(&[(0, 1, 3), (1, 1, 1), (2, 1, 3)], &texts, false);
+    assert_eq!(b.edit_text(), "a1d\na22b\nwz");
+    assert_eq!(b.selections[0].head, pos(2, 1));
+    assert!(b.undo());
+    assert_eq!(b.edit_text(), "abcd\nab\nwxyz");
+}

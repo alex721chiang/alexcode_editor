@@ -279,22 +279,32 @@ impl EditorBuffer {
     /// 矩形選取的編輯：把每一行的 `(行, 起欄, 迄欄)`（字元欄，超出行尾的會修正）換成同一段單行文字 `text`，
     /// 只記一筆復原紀錄（涵蓋第一行到最後一行）。游標放在最後一個範圍換上的文字結尾。
     pub fn replace_columns(&mut self, ranges: &[(usize, usize, usize)], text: &str, typing: bool) {
+        let texts = vec![text.to_string(); ranges.len()];
+        self.replace_columns_each(ranges, &texts, typing);
+    }
+
+    /// 同 `replace_columns`，但每一個範圍換成各自的文字（`texts[i]` 對 `ranges[i]`；矩形貼上逐行貼）
+    pub fn replace_columns_each(&mut self, ranges: &[(usize, usize, usize)], texts: &[String], typing: bool) {
         let last = self.lines.len().saturating_sub(1);
-        let ranges: Vec<(usize, usize, usize)> = ranges.iter().filter(|r| r.0 <= last).copied().collect();
-        let (Some(l0), Some(l1)) = (ranges.iter().map(|r| r.0).min(), ranges.iter().map(|r| r.0).max()) else {
+        let pairs: Vec<((usize, usize, usize), String)> = ranges
+            .iter()
+            .zip(texts)
+            .filter(|(r, _)| r.0 <= last)
+            .map(|(&r, t)| (r, t.chars().filter(|&c| c != '\n' && c != '\r').collect()))
+            .collect();
+        let (Some(l0), Some(l1)) = (pairs.iter().map(|p| p.0 .0).min(), pairs.iter().map(|p| p.0 .0).max()) else {
             return;
         };
-        let text: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
-        let n = text.chars().count();
         let removed = self.lines[l0..=l1].to_vec();
         let mut cursor = None;
-        for &(line, a, b) in &ranges {
+        for ((line, a, b), text) in &pairs {
+            let (line, a, b, n) = (*line, *a, *b, text.chars().count());
             let s = &mut self.lines[line];
             let len = s.chars().count();
             let (a, b) = (a.min(b).min(len), a.max(b).min(len));
             let byte_at = |s: &str, col: usize| s.char_indices().nth(col).map_or(s.len(), |(i, _)| i);
             let (ba, bb) = (byte_at(s, a), byte_at(s, b));
-            s.replace_range(ba..bb, &text);
+            s.replace_range(ba..bb, text);
             cursor = Some(Position { line, col: a + n });
         }
         if let Some(p) = cursor {

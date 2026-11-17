@@ -241,6 +241,8 @@ pub struct AlexCodeApp {
     box_sel: Option<BoxSel>,
     box_dragging: bool,
     box_cols: Vec<(usize, usize, usize)>,
+    /// Shift+Alt+方向鍵：要擴充（或從游標開始）矩形選取的方向，排版後在編輯區套用
+    box_keys: Vec<Key>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -875,8 +877,12 @@ struct BoxSel {
 /// 矩形選取裡的一次編輯（每一行同時套用）
 enum BoxEdit {
     Text(String),
+    /// 貼上：每一行各自的文字（行數與區塊相同時逐行，單行時每一行都貼同一段）
+    Lines(Vec<String>),
     Backspace,
     Delete,
+    /// 剪下：刪掉選到的部分（複製在前面另外做）
+    Cut,
 }
 
 /// 一個補全請求：要問的位置（UTF-16）與回覆來了之後選單的位置
@@ -1131,6 +1137,7 @@ impl AlexCodeApp {
             box_sel: None,
             box_dragging: false,
             box_cols: Vec::new(),
+            box_keys: Vec::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -2674,6 +2681,28 @@ impl AlexCodeApp {
             (Modifiers::ALT, Key::ArrowUp, Cmd::MoveLineUp),
             (Modifiers::ALT, Key::ArrowDown, Cmd::MoveLineDown),
         ];
+        // Shift+Alt+方向鍵：擴充矩形選取（沒有時從游標開始）。要在 Alt+上 / 下（移動行）之前攔下，
+        // 因為 egui 的快捷鍵比對不管多按的 Shift
+        if self.editor_focused {
+            let mut keys = Vec::new();
+            ctx.input_mut(|i| {
+                i.events.retain(|e| match e {
+                    egui::Event::Key { key, pressed, modifiers, .. }
+                        if modifiers.alt
+                            && modifiers.shift
+                            && !modifiers.command
+                            && matches!(key, Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight) =>
+                    {
+                        if *pressed {
+                            keys.push(*key);
+                        }
+                        false
+                    }
+                    _ => true,
+                })
+            });
+            self.box_keys.extend(keys);
+        }
         for (m, k, cmd) in shortcuts {
             if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(m, k))) {
                 self.run_cmd(cmd);
@@ -4332,6 +4361,8 @@ impl AlexCodeApp {
 
     fn code_editor(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) {
         let idx = self.active_tab_idx;
+        // Shift+Alt+方向鍵只用在一般編輯區（大檔案檢視沒有矩形選取）
+        let box_keys = std::mem::take(&mut self.box_keys);
         if idx >= self.tabs.len() {
             return;
         }
@@ -4398,10 +4429,15 @@ impl AlexCodeApp {
             })
         };
         let mut caret: Option<Rect> = None;
-        // 矩形選取：Ctrl+C 複製區塊（每一行選到的部分以換行連接）；打字、按鍵、貼上、沒按 Alt 的點擊都取消它
+        // 矩形選取：Ctrl+C 複製區塊（每一行選到的部分以換行連接）、Ctrl+X 剪下；打字、Backspace、Delete、
+        // 貼上（行數相同或只有一行時）每一行同時修改。其他按鍵、行數不合的貼上、沒按 Alt 的點擊都取消它
         // （之後照一般輸入處理）。內容變了、換了分頁、開了自動換行也取消
         if let Some(b) = &self.box_sel {
-            let mut cancel = b.tab != self.tabs[idx].id || b.rev != self.tabs[idx].revision() || self.config.word_wrap;
+            let mut cancel = b.tab != self.tabs[idx].id
+                || b.rev != self.tabs[idx].revision()
+                || self.config.word_wrap
+                || self.box_cols.is_empty();
+            let rows = self.box_cols.len();
             let mut copy = false;
             // 打字、Backspace、Delete：每一行同時修改（照事件順序）
             let mut edits: Vec<BoxEdit> = Vec::new();
@@ -4422,6 +4458,30 @@ impl AlexCodeApp {
                             edits.push(if *key == Key::Backspace { BoxEdit::Backspace } else { BoxEdit::Delete });
                         }
                         false
+                    }
+                    // 剪下：先複製區塊再刪掉選到的部分
+                    egui::Event::Cut if !cancel => {
+                        copy = true;
+                        edits.push(BoxEdit::Cut);
+                        false
+                    }
+                    // 貼上：剪貼簿的行數與區塊相同時逐行貼，只有一行時每一行都貼它；其他情況取消矩形選取、照一般貼上
+                    egui::Event::Paste(s) if !cancel => {
+                        let s = s.replace("\r\n", "\n").replace('\r', "\n");
+                        let mut v: Vec<String> = s.split('\n').map(str::to_string).collect();
+                        if v.len() > 1 && v.last().is_some_and(|l| l.is_empty()) {
+                            v.pop(); // 從別處複製的多行文字常以換行結尾
+                        }
+                        if v.len() == rows {
+                            edits.push(BoxEdit::Lines(v));
+                            false
+                        } else if v.len() == 1 {
+                            edits.push(BoxEdit::Lines(vec![v[0].clone(); rows]));
+                            false
+                        } else {
+                            cancel = true;
+                            true
+                        }
                     }
                     egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::CompositionStart => {
                         cancel = true;
@@ -4452,16 +4512,28 @@ impl AlexCodeApp {
                 for e in &edits {
                     // 區塊有寬度時 Backspace / Delete 刪掉選到的部分；零寬時刪游標前 / 後一個字
                     let wide = cols.iter().any(|&(_, a, b)| b > a);
-                    let (ranges, ins): (Vec<(usize, usize, usize)>, &str) = match e {
-                        BoxEdit::Text(t) => (cols.clone(), t.as_str()),
-                        _ if wide => (cols.clone(), ""),
-                        BoxEdit::Backspace => (cols.iter().map(|&(l, a, _)| (l, a.saturating_sub(1), a)).collect(), ""),
-                        BoxEdit::Delete => (cols.iter().map(|&(l, a, _)| (l, a, a + 1)).collect(), ""),
+                    let none = vec![String::new(); cols.len()];
+                    let (ranges, texts): (Vec<(usize, usize, usize)>, Vec<String>) = match e {
+                        BoxEdit::Text(t) => (cols.clone(), vec![t.clone(); cols.len()]),
+                        BoxEdit::Lines(v) => (cols.clone(), v.clone()),
+                        BoxEdit::Cut => (cols.clone(), none),
+                        _ if wide => (cols.clone(), none),
+                        BoxEdit::Backspace => (cols.iter().map(|&(l, a, _)| (l, a.saturating_sub(1), a)).collect(), none),
+                        BoxEdit::Delete => (cols.iter().map(|&(l, a, _)| (l, a, a + 1)).collect(), none),
                     };
                     let lens: Vec<usize> = ranges.iter().map(|r| self.tabs[idx].line_len(r.0)).collect();
-                    self.tabs[idx].replace_columns(&ranges, ins, true);
-                    let n = ins.chars().count();
-                    cols = ranges.iter().zip(lens).map(|(&(l, a, _), len)| (l, a.min(len) + n, a.min(len) + n)).collect();
+                    // 打字與刪字照一般輸入合併復原；貼上、剪下各自一步
+                    let typing = !matches!(e, BoxEdit::Lines(_) | BoxEdit::Cut);
+                    self.tabs[idx].replace_columns_each(&ranges, &texts, typing);
+                    cols = ranges
+                        .iter()
+                        .zip(lens)
+                        .zip(&texts)
+                        .map(|((&(l, a, _), len), t)| {
+                            let c = a.min(len) + t.chars().count();
+                            (l, c, c)
+                        })
+                        .collect();
                 }
                 let rev = self.tabs[idx].revision();
                 // 之後區塊收成零寬：x 取最右邊那一行的新欄（短的行之後照樣收在行尾）
@@ -4702,6 +4774,51 @@ impl AlexCodeApp {
                             if let Some(row) = galley.rows.get(l) {
                                 let x = row.x_offset(col);
                                 (b.a_x, b.b_x) = (x, x);
+                            }
+                        }
+                    }
+                    // Shift+Alt+方向鍵：沒有矩形選取時從游標開始；上下移動終點所在的行，左右移動終點一個字
+                    // （超過那一行的行尾時以一個字寬往右延伸，所以短的行也能往右拉）。游標跟著終點
+                    if !wrap && !box_keys.is_empty() {
+                        if self.box_sel.is_none() {
+                            if let Some(cr) = output.cursor_range {
+                                let x = galley.pos_from_cursor(&cr.primary).left();
+                                let line = cr.primary.rcursor.row;
+                                let (tab, rev) = (self.tabs[idx].id, self.tabs[idx].revision());
+                                self.box_sel = Some(BoxSel { tab, rev, a_line: line, b_line: line, a_x: x, b_x: x, col: None });
+                            }
+                        }
+                        if let Some(b) = self.box_sel.as_mut() {
+                            let last = galley.rows.len().min(line_count).saturating_sub(1);
+                            for k in &box_keys {
+                                match k {
+                                    Key::ArrowUp => b.b_line = b.b_line.saturating_sub(1),
+                                    Key::ArrowDown => b.b_line = (b.b_line + 1).min(last),
+                                    _ => {
+                                        let Some(row) = galley.rows.get(b.b_line) else { continue };
+                                        let col = galley.cursor_from_pos(egui::vec2(b.b_x, row.rect.center().y)).rcursor.column;
+                                        let len = row.char_count_excluding_newline();
+                                        let end = row.x_offset(len);
+                                        b.b_x = if *k == Key::ArrowRight {
+                                            if col < len {
+                                                row.x_offset(col + 1)
+                                            } else {
+                                                b.b_x.max(end) + char_w
+                                            }
+                                        } else if b.b_x > end + 0.5 {
+                                            (b.b_x - char_w).max(end)
+                                        } else {
+                                            row.x_offset(col.saturating_sub(1))
+                                        };
+                                    }
+                                }
+                            }
+                            if let Some(row) = galley.rows.get(b.b_line) {
+                                let cur = galley.cursor_from_pos(egui::vec2(b.b_x, row.rect.center().y));
+                                let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+                                st.cursor.set_char_range(Some(CCursorRange::one(cur.ccursor)));
+                                st.store(ui.ctx(), editor_id);
+                                new_cursor = Some((cur.rcursor.row, cur.rcursor.column));
                             }
                         }
                     }
@@ -10073,6 +10190,106 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::Text("-".into())]);
         frame(&mut app, &ctx, vec![]);
         assert_eq!(lines(&app), "a-bcdefgh\na-b\nA-BCDEFGH\nz-zzz\n");
+    }
+
+    #[test]
+    fn rectangle_cut_paste_and_keyboard_extend() {
+        let ctx = ctx();
+        let original = "abcdefgh\nab\nABCDEFGH\nzzzz\n";
+        let mut app = app_with(&ctx, original);
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
+        let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
+        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        let alt = Modifiers::ALT;
+        let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2| {
+            let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: alt };
+            for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
+                frame_with(app, &ctx, |i| {
+                    i.modifiers = alt;
+                    i.events = events;
+                });
+            }
+            frame(app, &ctx, vec![]);
+        };
+        let lines = |app: &AlexCodeApp| app.tabs[0].edit_text();
+        let sa = Modifiers::SHIFT | Modifiers::ALT;
+        let press = |app: &mut AlexCodeApp, k: Key| {
+            frame(app, &ctx, vec![key(k, sa)]);
+        };
+
+        // Shift+Alt+方向鍵：從游標開始一個矩形，往下兩行、往右三個字；內容不變（不是 Alt+下的移動行）
+        click(&mut app, &ctx, at(0, 1));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (0, 1));
+        press(&mut app, Key::ArrowDown);
+        press(&mut app, Key::ArrowDown);
+        for _ in 0..3 {
+            press(&mut app, Key::ArrowRight);
+        }
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), original, "Shift+Alt+Down does not move the line");
+        assert_eq!(app.box_ranges(), vec![(0, 1, 4), (1, 1, 2), (2, 1, 4)]);
+        assert_eq!(cursor(&app), (2, 4), "the cursor follows the end of the rectangle");
+        press(&mut app, Key::ArrowLeft);
+        press(&mut app, Key::ArrowUp);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.box_ranges(), vec![(0, 1, 3), (1, 1, 2)]);
+        assert_eq!(cursor(&app), (1, 2));
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, "bc\nb");
+        // 從短的行的行尾往右拉：超過行尾以字寬延伸，往上一行時那一行選到更多欄
+        click(&mut app, &ctx, at(1, 2));
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.box_ranges().is_empty(), "a plain click cancels the rectangle");
+        press(&mut app, Key::ArrowRight);
+        press(&mut app, Key::ArrowRight);
+        press(&mut app, Key::ArrowUp);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.box_ranges(), vec![(0, 2, 4), (1, 2, 2)]);
+        press(&mut app, Key::ArrowLeft);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.box_ranges(), vec![(0, 2, 3), (1, 2, 2)]);
+        assert_eq!(lines(&app), original);
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+
+        // Ctrl+X：複製區塊並刪掉選到的部分，一次復原
+        drag(&mut app, at(0, 2), at(2, 5));
+        let out = frame(&mut app, &ctx, vec![Event::Cut]);
+        assert_eq!(out.platform_output.copied_text, "cde\n\nCDE");
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), "abfgh\nab\nABFGH\nzzzz\n");
+        assert_eq!(app.box_ranges(), vec![(0, 2, 2), (1, 2, 2), (2, 2, 2)]);
+        // 剪貼簿的行數與區塊相同：逐行貼回去
+        frame(&mut app, &ctx, vec![Event::Paste("cde\r\n\r\nCDE".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), original);
+        assert_eq!(app.box_ranges(), vec![(0, 5, 5), (1, 2, 2), (2, 5, 5)]);
+        // 只有一行：每一行都貼它（結尾的換行不算一行）
+        frame(&mut app, &ctx, vec![Event::Paste("12\n".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), "abcde12fgh\nab12\nABCDE12FGH\nzzzz\n");
+        assert_eq!(cursor(&app), (2, 7));
+        // 貼上各自一步復原：復原一次回到貼上之前、再一次回到剪下之前
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), original);
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), "abfgh\nab\nABFGH\nzzzz\n");
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(lines(&app), original);
+
+        // 行數不合（兩行貼進三行的區塊）：取消矩形選取，照一般貼上貼在游標的位置
+        drag(&mut app, at(0, 2), at(2, 5));
+        frame(&mut app, &ctx, vec![Event::Paste("x\ny".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.box_ranges().is_empty());
+        assert_eq!(app.tabs[0].lines[2], "ABCDEx");
+        assert_eq!(app.tabs[0].lines[3], "yFGH");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
