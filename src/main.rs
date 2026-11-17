@@ -68,7 +68,7 @@ fn main() -> eframe::Result<()> {
             if let Some(rx) = incoming {
                 app.set_incoming(rx);
             }
-            Box::new(app)
+            Ok(Box::new(app))
         }),
     )
 }

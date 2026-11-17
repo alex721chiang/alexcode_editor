@@ -972,7 +972,7 @@ pub fn render_outline_panel(
                                 rt = rt.strong();
                             }
                             let resp = ui
-                                .add(egui::Label::new(rt).wrap(false).sense(Sense::click()))
+                                .add(egui::Label::new(rt).extend().sense(Sense::click()))
                                 .on_hover_cursor(CursorIcon::PointingHand)
                                 .on_hover_text(format!("跳至第 {} 行", entry.line + 1));
                             if resp.clicked() {
@@ -1408,7 +1408,7 @@ fn render_single_block(
                     egui::ScrollArea::horizontal()
                         .id_source(("md_code_block", block.start_line))
                         .show(ui, |ui| {
-                            ui.add(egui::Label::new(galley).wrap(false));
+                            ui.add(egui::Label::new(galley).extend());
                         });
                 });
                 ui.add_space(10.0);

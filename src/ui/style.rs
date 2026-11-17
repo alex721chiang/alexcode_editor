@@ -168,7 +168,7 @@ pub fn apply_style(ctx: &egui::Context, c: &Colors) {
     v.error_fg_color = c.accent2;
     v.selection.bg_fill = c.sel_bg;
     v.selection.stroke = Stroke::new(1.0_f32, c.fg);
-    v.text_cursor = Stroke::new(2.0_f32, c.accent);
+    v.text_cursor.stroke = Stroke::new(2.0_f32, c.accent);
     v.window_shadow = egui::epaint::Shadow {
         offset: egui::vec2(0.0, 6.0),
         blur: 18.0,

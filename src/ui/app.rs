@@ -3795,7 +3795,7 @@ impl AlexCodeApp {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     let name = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| root.display().to_string());
-                    ui.add(egui::Label::new(RichText::new(name).color(c.accent).strong()).truncate(true))
+                    ui.add(egui::Label::new(RichText::new(name).color(c.accent).strong()).truncate())
                         .on_hover_text(root.display().to_string());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(6.0);
@@ -4110,7 +4110,7 @@ impl AlexCodeApp {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     let seg = |ui: &mut egui::Ui, t: String, col: Color32| {
-                        let r = ui.add(egui::Label::new(RichText::new(t).size(12.0).color(col)).wrap(false));
+                        let r = ui.add(egui::Label::new(RichText::new(t).size(12.0).color(col)).extend());
                         let _ = r;
                         ui.add_space(10.0);
                         let (sr, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), Sense::hover());
@@ -4158,7 +4158,7 @@ impl AlexCodeApp {
                             _ => c.warn,
                         };
                         let text = format!("{}：{}", kind.program(), status.label());
-                        let r = ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).wrap(false));
+                        let r = ui.add(egui::Label::new(RichText::new(text).size(12.0).color(color)).extend());
                         let hint = if status == LspStatus::Ready || status == LspStatus::Starting {
                             "語言伺服器（開著的文件會同步給它）"
                         } else {
@@ -4192,7 +4192,7 @@ impl AlexCodeApp {
                             } else {
                                 full.clone()
                             };
-                            ui.add(egui::Label::new(RichText::new(short).size(12.0).color(c.fg_dim2)).truncate(true))
+                            ui.add(egui::Label::new(RichText::new(short).size(12.0).color(c.fg_dim2)).truncate())
                                 .on_hover_text(full);
                         }
                     });
@@ -4746,7 +4746,7 @@ impl AlexCodeApp {
         let (active_rect, other_rect) = if right_active { (right, left) } else { (left, right) };
         ui.painter().rect_filled(band(mid, 1.0), 0.0, c.border);
         let clip = ui.clip_rect();
-        let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other");
+        let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other", None);
         pane.set_clip_rect(other_rect.intersect(clip));
         // 另一欄的 Git 標記：內容或 HEAD 變了才重算
         if let (Some(s), Some(b)) = (self.split.as_mut(), self.tabs.get(other)) {
@@ -4781,7 +4781,7 @@ impl AlexCodeApp {
                 s.offset = offset;
             }
         }
-        let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active");
+        let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active", None);
         active.set_clip_rect(active_rect.intersect(clip));
         Some(active)
     }
@@ -4946,6 +4946,8 @@ impl AlexCodeApp {
                     let mut win = egui::Window::new(title.clone())
                         .id(egui::Id::new(("alexcode-detached-window", id)))
                         .open(&mut open)
+                        // egui 0.28 起視窗打開時會淡入：獨立視窗一開就要完整顯示（與 0.27 相同）
+                        .fade_in(false)
                         .default_size([600.0, 400.0]);
                     if let Some(r) = place {
                         win = win.default_pos(r.min);
@@ -5250,7 +5252,7 @@ impl AlexCodeApp {
                             true
                         }
                     }
-                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::CompositionStart => {
+                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Ime(egui::ImeEvent::Enabled) => {
                         cancel = true;
                         true
                     }
@@ -5779,7 +5781,7 @@ impl AlexCodeApp {
                             }
                         }
                         if !tips.is_empty() || hover_note.is_some() {
-                            egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new("lsp-diagnostic-tip"), |ui| {
+                            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("lsp-diagnostic-tip"), |ui| {
                                 ui.set_max_width(560.0);
                                 for d in &tips {
                                     ui.horizontal_top(|ui| {
@@ -7159,15 +7161,15 @@ impl AlexCodeApp {
                         }
                     }
                     // 輸入法：組字中的文字只顯示在游標處（把後面的文字往後推），選定之後才寫進文件
-                    Event::CompositionStart => preedit.clear(),
-                    Event::CompositionUpdate(t) => {
+                    Event::Ime(egui::ImeEvent::Enabled | egui::ImeEvent::Disabled) => preedit.clear(),
+                    Event::Ime(egui::ImeEvent::Preedit(t)) => {
                         // 開始組字時先刪掉選取的文字（與一般編輯區相同），組字中的文字就排在那個位置
                         if !t.is_empty() && !sel.is_empty() {
                             edit = Some((sel.start(), sel.end(), String::new(), true));
                         }
                         preedit = t.clone();
                     }
-                    Event::CompositionEnd(t) => {
+                    Event::Ime(egui::ImeEvent::Commit(t)) => {
                         preedit.clear();
                         if !t.is_empty() {
                             edit = Some((sel.start(), sel.end(), t.clone(), true));
@@ -9611,10 +9613,10 @@ mod tests {
         assert_eq!(line0(&app), "");
 
         // 輸入法：組字期間文件不變、按鍵歸輸入法；選定後才插入
-        frame(&mut app, &ctx, vec![Event::CompositionStart, Event::CompositionUpdate("zhong".into())]);
+        frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Enabled), Event::Ime(egui::ImeEvent::Preedit("zhong".into()))]);
         frame(&mut app, &ctx, vec![key(Key::Backspace, none), key(Key::ArrowDown, none)]);
         assert_eq!((line0(&app).as_str(), cursor(&app)), ("", (0, 0)));
-        let out = frame(&mut app, &ctx, vec![Event::CompositionEnd("中文".into())]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Commit("中文".into()))]);
         assert_eq!((line0(&app).as_str(), cursor(&app)), ("中文", (0, 2)));
         assert!(out.platform_output.ime.is_some(), "the IME is told where the cursor is");
 
@@ -9673,7 +9675,7 @@ mod tests {
         let caret0 = caret_x(&out);
 
         // 組字中：那一行排成「游標前的文字 + 組字中的文字 + 游標後的文字」，不是另外蓋一塊在上面
-        let out = frame(&mut app, &ctx, vec![Event::CompositionStart, Event::CompositionUpdate("zhong".into())]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Enabled), Event::Ime(egui::ImeEvent::Preedit("zhong".into()))]);
         assert!(has(&out, "linezhong 00000 some text here"), "painted: {:?}", painted_texts(&out));
         assert!(!has(&out, "zhong"), "the preedit is no longer drawn as an overlay");
         assert!(!has(&out, "line 00000 some text here"));
@@ -9688,16 +9690,16 @@ mod tests {
         assert!(has(&out, "linezhong 00000 some text here"));
 
         // 取消組字：畫面回到原樣
-        let out = frame(&mut app, &ctx, vec![Event::CompositionUpdate(String::new())]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit(String::new()))]);
         assert!(has(&out, "line 00000 some text here"));
         assert!((caret_x(&out) - caret0).abs() < 0.01);
 
         // 有選取時開始組字：選取的文字先刪掉，組字中的文字排在那個位置
         frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::SHIFT)]);
-        let out = frame(&mut app, &ctx, vec![Event::CompositionStart, Event::CompositionUpdate("z".into())]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Enabled), Event::Ime(egui::ImeEvent::Preedit("z".into()))]);
         assert_eq!((line0(&app).as_str(), cursor(&app)), (" 00000 some text here", (0, 0)));
         assert!(has(&out, "z 00000 some text here"), "painted: {:?}", painted_texts(&out));
-        let out = frame(&mut app, &ctx, vec![Event::CompositionEnd("中".into())]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Commit("中".into()))]);
         assert_eq!((line0(&app).as_str(), cursor(&app)), ("中 00000 some text here", (0, 1)));
         assert!(has(&out, "中 00000 some text here"));
         assert!(app.highlight_cache.is_none() && app.text_cache.1.is_empty(), "still the large-file view");
@@ -9737,8 +9739,9 @@ mod tests {
         let line = |out: &egui::FullOutput, prefix: &str| {
             painted_lines(out).into_iter().find(|l| l.0.starts_with(prefix)).unwrap_or_else(|| panic!("{prefix} is not on screen"))
         };
+        // 以這一幀的可見範圍為準（egui 0.28 起有水平捲軸時，裁切範圍下緣比沒有時高一點）
         let on_screen = |app: &AlexCodeApp| {
-            let caret = app.probe["large-caret"];
+            let (caret, clip) = (app.probe["large-caret"], app.probe["large-clip"]);
             caret.top() >= clip.top() - 1.0 && caret.bottom() <= clip.bottom() + 1.0
         };
 
@@ -10321,7 +10324,11 @@ mod tests {
         fn walk(shape: &Shape, found: &mut Vec<(Color32, Rect)>) {
             match shape {
                 Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
-                Shape::Path(p) => found.push((p.stroke.color, Rect::from_points(&p.points))),
+                Shape::Path(p) => {
+                    if let egui::epaint::ColorMode::Solid(col) = p.stroke.color {
+                        found.push((col, Rect::from_points(&p.points)));
+                    }
+                }
                 _ => {}
             }
         }
@@ -11383,7 +11390,7 @@ mod tests {
         let mid = 640.0;
 
         // 捲動左欄（唯讀的第一份）
-        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::Scroll(egui::vec2(0.0, -1500.0))]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -1500.0), modifiers: Modifiers::NONE }]);
         for _ in 0..40 {
             frame(&mut app, &ctx, vec![]);
         }
@@ -11614,7 +11621,7 @@ mod tests {
             fn walk(shape: &Shape, col: Color32, found: &mut Vec<(f32, f32, f32)>) {
                 match shape {
                     Shape::Vec(v) => v.iter().for_each(|s| walk(s, col, found)),
-                    Shape::LineSegment { points, stroke } if stroke.color == col && (stroke.width - 1.0).abs() < 0.01 => {
+                    Shape::LineSegment { points, stroke } if stroke.color == egui::epaint::ColorMode::Solid(col) && (stroke.width - 1.0).abs() < 0.01 => {
                         found.push((points[0].x.min(points[1].x), points[0].x.max(points[1].x), points[0].y))
                     }
                     _ => {}
