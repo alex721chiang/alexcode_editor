@@ -707,10 +707,38 @@ fn with_preedit(line: &str, col: usize, preedit: &str) -> String {
 /// 折行處的那個欄位算下一列的開頭，所以落在一列結尾右邊時退一格，游標才會留在那一列
 fn wrapped_col_at(g: &egui::Galley, pos: Vec2) -> usize {
     let cur = g.cursor_from_pos(pos);
-    let row = cur.rcursor.row;
-    let at_wrapped_end =
-        row + 1 < g.rows.len() && cur.rcursor.column > 0 && cur.rcursor.column >= g.rows[row].char_count_excluding_newline();
-    cur.ccursor.index - usize::from(at_wrapped_end)
+    let (row, column) = rc_of(g, cur);
+    let at_wrapped_end = row + 1 < g.rows.len() && column > 0 && column >= g.rows[row].char_count_excluding_newline();
+    cur.index - usize::from(at_wrapped_end)
+}
+
+/// egui 0.32 起游標只剩字元索引（`CCursor`）：換算成排版上的（第幾列, 列裡的第幾個字元）。
+/// 折行處依 `prefer_next_row` 決定算上一列的結尾還是下一列的開頭（與 0.31 的 `rcursor` 相同）
+fn rc_of(g: &egui::Galley, c: CCursor) -> (usize, usize) {
+    let l = g.layout_from_cursor(c);
+    (l.row, l.column)
+}
+
+/// 字元索引 `index` 在排版 `g` 裡是第幾段（以 `\n` 分開的段落，也就是檔案的行）、段落裡的第幾個字元
+/// （與 0.31 的 `pcursor` 相同；超過結尾時算最後一段）
+fn para_of(g: &egui::Galley, index: usize) -> (usize, usize) {
+    let (mut para, mut start, mut at) = (0, 0, 0);
+    for row in &g.rows {
+        if index <= at + row.char_count_excluding_newline() {
+            return (para, index - start);
+        }
+        at += row.char_count_including_newline();
+        if row.ends_with_newline {
+            para += 1;
+            start = at;
+        }
+    }
+    (para, index.saturating_sub(start).min(at - start))
+}
+
+/// 列裡第 `col` 個字元左緣的 x（相對於排版左上角；0.32 起字形的位置相對於所在的列）
+fn row_x(row: &egui::epaint::text::PlacedRow, col: usize) -> f32 {
+    row.pos.x + row.x_offset(col)
 }
 
 /// 欄位範圍 [a, b) 在排版 `g` 的每一列上佔的區段：(列的上緣, 列的下緣, 左, 右)，座標相對於排版左上角。
@@ -722,7 +750,7 @@ fn row_spans(g: &egui::Galley, a: usize, b: usize, eol: bool) -> Vec<(f32, f32, 
         let end = start + row.char_count_excluding_newline();
         let (lo, hi) = (a.max(start), b.min(end));
         if lo < hi || (eol && i + 1 == g.rows.len() && lo <= hi) {
-            out.push((row.rect.top(), row.rect.bottom(), row.x_offset(lo - start), row.x_offset(hi - start)));
+            out.push((row.rect().top(), row.rect().bottom(), row_x(row, lo - start), row_x(row, hi - start)));
         }
         start = end;
     }
@@ -838,10 +866,10 @@ fn diag_spans(g: &egui::Galley, lines: &[String], row_lines: &[usize], d: &Diagn
             let end = start + row.char_count_excluding_newline();
             let (lo, hi) = (a.max(start), b.min(end));
             if lo < hi {
-                out.push((row.rect.top(), row.rect.bottom(), row.x_offset(lo - start), row.x_offset(hi - start)));
+                out.push((row.rect().top(), row.rect().bottom(), row_x(row, lo - start), row_x(row, hi - start)));
             } else if a == b && a >= start && a <= end {
-                let x = row.x_offset(a - start);
-                out.push((row.rect.top(), row.rect.bottom(), x, x + min_w));
+                let x = row_x(row, a - start);
+                out.push((row.rect().top(), row.rect().bottom(), x, x + min_w));
                 break;
             }
             start = end;
@@ -2679,7 +2707,7 @@ impl AlexCodeApp {
                         let it = &m.items[i];
                         let r = ui
                             .horizontal(|ui| {
-                                let label = egui::SelectableLabel::new(k == m.selected, RichText::new(&it.label).font(font.clone()));
+                                let label = egui::Button::selectable(k == m.selected, RichText::new(&it.label).font(font.clone()));
                                 let r = ui.add(label);
                                 if !it.detail.is_empty() {
                                     let mut d: String = it.detail.chars().take(60).collect();
@@ -3082,7 +3110,7 @@ impl AlexCodeApp {
             .show(ctx, |ui| {
                 let line = if c.hud { c.accent } else { c.glow };
                 Self::paint_bar_bg(ui, c.panel, c.bg, Some((true, line)));
-                egui::menu::bar(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
                     // 龍形 Logo + Orbitron 字標
                     if let Some(tex) = &self.logo {
                         let r = ui
@@ -3104,7 +3132,7 @@ impl AlexCodeApp {
                     fn mi(ui: &mut egui::Ui, label: &str, sc: &str) -> bool {
                         let btn = egui::Button::new(label).shortcut_text(sc);
                         if ui.add(btn).clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                             true
                         } else {
                             false
@@ -3126,7 +3154,7 @@ impl AlexCodeApp {
                                 let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                                 if ui.button(name).on_hover_text(path).clicked() {
                                     cmd = Some(Cmd::OpenRecent(path.clone()));
-                                    ui.close_menu();
+                                    ui.close_kind(egui::UiKind::Menu);
                                 }
                             }
                         });
@@ -3192,31 +3220,31 @@ impl AlexCodeApp {
                         let mut ex = self.show_explorer;
                         if ui.checkbox(&mut ex, "檔案總管側邊欄 (Explorer)  Ctrl+B").clicked() {
                             cmd = Some(Cmd::ToggleExplorer);
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         if ui.checkbox(&mut self.config.auto_pair, "自動配對括號與引號").clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         if ui.checkbox(&mut self.config.sticky_scroll, "固定目前的函式標題 (Sticky Scroll)").clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         if ui.checkbox(&mut self.config.word_wrap, "自動換行 (Word Wrap)").clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         if ui.checkbox(&mut self.md_view.show_outline, "Markdown 大綱側邊欄 (Outline)").clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         ui.separator();
                         if ui.checkbox(&mut self.show_terminal, "互動終端機 (Terminal)").clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         let mut g = self.show_graph;
                         if ui.checkbox(&mut g, "Markdown 筆記關聯圖 (Graph)").clicked() {
                             cmd = Some(Cmd::ToggleGraph);
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         if ui.checkbox(&mut self.filter_active, "Log 行篩選工具列 (Filter)").clicked() {
-                            ui.close_menu();
+                            ui.close_kind(egui::UiKind::Menu);
                         }
                         ui.separator();
                         if mi(ui, "放大字型 (Zoom In)", "Ctrl++") { cmd = Some(Cmd::ZoomIn); }
@@ -3241,7 +3269,7 @@ impl AlexCodeApp {
                                 }
                                 if ui.selectable_label(is_current, *name).clicked() {
                                     cmd = Some(Cmd::Theme(name));
-                                    ui.close_menu();
+                                    ui.close_kind(egui::UiKind::Menu);
                                 }
                             });
                         }
@@ -3399,7 +3427,7 @@ impl AlexCodeApp {
                 let mut tab_action: Option<TabAction> = None;
                 let tab_count = self.tabs.len();
                 // 不接拖曳捲動：拖曳要留給分頁（拖到分頁列外面開成獨立視窗）；捲動用滾輪
-                egui::ScrollArea::horizontal().auto_shrink([false, true]).drag_to_scroll(false).show(ui, |ui| {
+                egui::ScrollArea::horizontal().auto_shrink([false, true]).scroll_source(egui::scroll_area::ScrollSource { drag: false, ..Default::default() }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         // 分割檢視另一欄顯示的分頁：細一點的強調色底線（有焦點的分頁照舊是粗線）
@@ -3506,7 +3534,7 @@ impl AlexCodeApp {
                                 let mut pick = |ui: &mut egui::Ui, enabled: bool, label: &str, a: TabAction| {
                                     if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                                         tab_action = Some(a);
-                                        ui.close_menu();
+                                        ui.close_kind(egui::UiKind::Menu);
                                     }
                                 };
                                 pick(ui, true, "開啟檔案所在資料夾", TabAction::Reveal(i));
@@ -3915,18 +3943,18 @@ impl AlexCodeApp {
                 let folder = if e.is_dir { e.path.clone() } else { e.path.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
                 if ui.button("開啟檔案所在資料夾").clicked() {
                     actions.push(TreeAction::Reveal(e.path.clone()));
-                    ui.close_menu();
+                    ui.close_kind(egui::UiKind::Menu);
                 }
                 for (kind, label) in available_shells() {
                     if ui.button(*label).clicked() {
                         actions.push(TreeAction::Shell(folder.clone(), *kind));
-                        ui.close_menu();
+                        ui.close_kind(egui::UiKind::Menu);
                     }
                 }
                 ui.separator();
                 if ui.button("複製完整路徑").clicked() {
                     actions.push(TreeAction::CopyPath(e.path.clone()));
-                    ui.close_menu();
+                    ui.close_kind(egui::UiKind::Menu);
                 }
             });
             if expanded {
@@ -4127,7 +4155,7 @@ impl AlexCodeApp {
                         for e in FileEncoding::ALL {
                             if ui.selectable_label(e == encoding, e.label()).clicked() {
                                 enc_choice = Some((e, false));
-                                ui.close_menu();
+                                ui.close_kind(egui::UiKind::Menu);
                             }
                         }
                         ui.separator();
@@ -4135,7 +4163,7 @@ impl AlexCodeApp {
                             for e in FileEncoding::ALL {
                                 if ui.button(e.label()).clicked() {
                                     enc_choice = Some((e, true));
-                                    ui.close_menu();
+                                    ui.close_kind(egui::UiKind::Menu);
                                 }
                             }
                         });
@@ -4354,7 +4382,7 @@ impl AlexCodeApp {
                                     // 排出來的字數（空的一列排的是一個佔位的空白，不算）；游標在字的後面時每格加一個字寬
                                     let blank = t.row_cells(r).iter().all(|c| c.ch == ' ' && c.bg < 0);
                                     let n = if blank { 0 } else { galley.job.text.chars().count() };
-                                    let at = |i: usize| galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(i))).left();
+                                    let at = |i: usize| galley.pos_from_cursor(CCursor::new(i)).left();
                                     let x = at(cx.min(n)) + cx.saturating_sub(n) as f32 * adv;
                                     cursor_rect = Some(Rect::from_min_size(
                                         Pos2::new(resp.rect.left() + x, resp.rect.top()),
@@ -4714,10 +4742,10 @@ impl AlexCodeApp {
             let at = Some(press).and_then(|p| {
                 let rows = &self.split.as_ref()?.rows;
                 match rows.iter().find(|(_, o, g)| p.y < o.y + g.size().y.max(1.0)) {
-                    Some((line, o, g)) => Some((*line, g.cursor_from_pos(p - *o).ccursor.index)),
+                    Some((line, o, g)) => Some((*line, g.cursor_from_pos(p - *o).index)),
                     None => rows
                         .last()
-                        .map(|(line, _, g)| (*line, g.cursor_from_pos(egui::vec2(f32::INFINITY, 0.0)).ccursor.index)),
+                        .map(|(line, _, g)| (*line, g.cursor_from_pos(egui::vec2(f32::INFINITY, 0.0)).index)),
                 }
             });
             // 換欄：兩邊的捲動位置互換，所以畫面上的內容不動（編輯區的文字多一段上邊界）
@@ -4804,7 +4832,7 @@ impl AlexCodeApp {
         // 行高取編輯區排版實際的行距（排版會把每一列對齊到像素，和 row_height 差一點點，幾百行後就差很多）
         let row_h = ui.fonts(|f| {
             let g = f.layout_no_wrap("0\n0".into(), font.clone(), Color32::WHITE);
-            g.rows.get(1).map_or_else(|| f.row_height(&font), |r| r.rect.top())
+            g.rows.get(1).map_or_else(|| f.row_height(&font), |r| r.rect().top())
         });
         let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
         let digits = buf.lines.len().to_string().len().max(3);
@@ -4824,7 +4852,7 @@ impl AlexCodeApp {
         // 不接拖曳捲動：點擊與拖曳要交給上面那個切換欄位的區域（可以捲動時捲動區會蓋掉它）
         let mut area = egui::ScrollArea::both()
             .id_salt(("split-preview", buf.id))
-            .drag_to_scroll(false)
+            .scroll_source(egui::scroll_area::ScrollSource { drag: false, ..Default::default() })
             .auto_shrink([false, false]);
         if let Some(o) = offset {
             area = area.scroll_offset(o);
@@ -4872,7 +4900,7 @@ impl AlexCodeApp {
                         let n = shown.chars().count();
                         let from = if ln == s.line { s.col.min(n) } else { 0 };
                         let to = if ln == e.line { e.col.min(n) } else { n };
-                        let x = |ci: usize| g.pos_from_cursor(&g.from_ccursor(CCursor::new(ci))).left();
+                        let x = |ci: usize| g.pos_from_cursor(CCursor::new(ci)).left();
                         let extra = if ln < e.line { char_w * 0.5 } else { 0.0 };
                         let (x0, x1) = (x(from), x(to) + extra);
                         if x1 > x0 {
@@ -4883,7 +4911,7 @@ impl AlexCodeApp {
                     // 那個分頁的游標位置：一條細線（沒有焦點，不閃爍）
                     if let Some(h) = head.filter(|h| h.line == ln) {
                         let ci = h.col.min(shown.chars().count());
-                        let r = g.pos_from_cursor(&g.from_ccursor(CCursor::new(ci)));
+                        let r = g.pos_from_cursor(CCursor::new(ci));
                         ui.painter().rect_filled(Rect::from_min_size(at + egui::vec2(r.left(), 0.0), egui::vec2(1.5, row_h)), 0.0, c.fg_dim);
                     }
                     // 波浪線：把跨到這一行的診斷換成只有這一行的範圍（開頭在前面的行就從行首、結尾在後面的行就到行尾）
@@ -4998,7 +5026,7 @@ impl AlexCodeApp {
         let pos_at = |p: Pos2| {
             rows.iter().rev().find(|(_, at, _)| at.y <= p.y).or(rows.first()).map(|(ln, at, g)| Position {
                 line: *ln,
-                col: g.cursor_from_pos(p - *at).ccursor.index,
+                col: g.cursor_from_pos(p - *at).index,
             })
         };
         let pressed = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
@@ -5352,8 +5380,9 @@ impl AlexCodeApp {
             self.scroll_to_cursor = true; // 切換後每一行的位置都變了：讓游標留在畫面上
         }
         let mut hl_cache = self.highlight_cache.take();
-        let mut layouter = |ui: &egui::Ui, s: &str, wrap_width: f32| {
+        let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
             use std::hash::{Hash, Hasher};
+            let s = buf.as_str();
             let max_width = if wrap { wrap_width.max(char_w * 20.0) } else { f32::INFINITY };
             let mut h = std::collections::hash_map::DefaultHasher::new();
             s.hash(&mut h);
@@ -5502,21 +5531,21 @@ impl AlexCodeApp {
                     // 目前游標所在的 (行, 欄)。自動換行時畫面上的列不等於行，改用段落座標。
                     let cur_row = output.cursor_range.map(|cr| {
                         if wrap {
-                            (cr.primary.pcursor.paragraph, cr.primary.pcursor.offset)
+                            para_of(galley, cr.primary.index)
                         } else {
-                            (cr.primary.rcursor.row, cr.primary.rcursor.column)
+                            rc_of(galley, cr.primary)
                         }
                     });
                     if let Some((r, col)) = cur_row {
                         new_cursor = Some((r, col));
                     }
-                    caret = output.cursor_range.map(|cr| galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2()));
+                    caret = output.cursor_range.map(|cr| galley.pos_from_cursor(cr.primary).translate(gpos.to_vec2()));
 
                     // 矩形選取：按住 Alt 時在文字上面多放一個接拖曳的區域（蓋過 TextEdit 自己的拖曳選取）。
                     // 自動換行時畫面上的列不等於行，不提供
                     if !wrap && (ui.input(|i| i.modifiers.alt) || self.box_dragging) {
                         let resp = ui.interact(output.response.rect, editor_id.with("box-select"), Sense::drag());
-                        let line_at = |p: Pos2| galley.cursor_from_pos(p - gpos).rcursor.row;
+                        let line_at = |p: Pos2| rc_of(galley, galley.cursor_from_pos(p - gpos)).0;
                         if resp.drag_started() {
                             if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
                                 let line = line_at(p);
@@ -5534,9 +5563,9 @@ impl AlexCodeApp {
                                 // 游標跟著拖曳的終點（TextEdit 自己的選取收成一個點）
                                 let cur = galley.cursor_from_pos(p - gpos);
                                 let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-                                st.cursor.set_char_range(Some(CCursorRange::one(cur.ccursor)));
+                                st.cursor.set_char_range(Some(CCursorRange::one(cur)));
                                 st.store(ui.ctx(), editor_id);
-                                new_cursor = Some((cur.rcursor.row, cur.rcursor.column));
+                                new_cursor = Some(rc_of(galley, cur));
                             }
                             if !ui.input(|i| i.pointer.primary_down()) {
                                 self.box_dragging = false;
@@ -5549,9 +5578,9 @@ impl AlexCodeApp {
                             if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                                 let cur = galley.cursor_from_pos(p - gpos);
                                 let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-                                st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(anchor), cur.ccursor)));
+                                st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(anchor), cur)));
                                 st.store(ui.ctx(), editor_id);
-                                new_cursor = Some((cur.rcursor.row, cur.rcursor.column));
+                                new_cursor = Some(rc_of(galley, cur));
                             }
                         } else {
                             // 放開的那一下 egui 算是點在別的元件上，TextEdit 會交出焦點：下一幀要回來
@@ -5564,7 +5593,7 @@ impl AlexCodeApp {
                     if let Some(b) = self.box_sel.as_mut().filter(|_| !wrap) {
                         if let Some((l, col)) = b.col.take() {
                             if let Some(row) = galley.rows.get(l) {
-                                let x = row.x_offset(col);
+                                let x = row_x(row, col);
                                 (b.a_x, b.b_x) = (x, x);
                             }
                         }
@@ -5574,8 +5603,8 @@ impl AlexCodeApp {
                     if !wrap && !box_keys.is_empty() {
                         if self.box_sel.is_none() {
                             if let Some(cr) = output.cursor_range {
-                                let x = galley.pos_from_cursor(&cr.primary).left();
-                                let line = cr.primary.rcursor.row;
+                                let x = galley.pos_from_cursor(cr.primary).left();
+                                let line = rc_of(galley, cr.primary).0;
                                 let (tab, rev) = (self.tabs[idx].id, self.tabs[idx].revision());
                                 self.box_sel = Some(BoxSel { tab, rev, a_line: line, b_line: line, a_x: x, b_x: x, col: None });
                             }
@@ -5588,29 +5617,29 @@ impl AlexCodeApp {
                                     Key::ArrowDown => b.b_line = (b.b_line + 1).min(last),
                                     _ => {
                                         let Some(row) = galley.rows.get(b.b_line) else { continue };
-                                        let col = galley.cursor_from_pos(egui::vec2(b.b_x, row.rect.center().y)).rcursor.column;
+                                        let col = rc_of(galley, galley.cursor_from_pos(egui::vec2(b.b_x, row.rect().center().y))).1;
                                         let len = row.char_count_excluding_newline();
-                                        let end = row.x_offset(len);
+                                        let end = row_x(row, len);
                                         b.b_x = if *k == Key::ArrowRight {
                                             if col < len {
-                                                row.x_offset(col + 1)
+                                                row_x(row, col + 1)
                                             } else {
                                                 b.b_x.max(end) + char_w
                                             }
                                         } else if b.b_x > end + 0.5 {
                                             (b.b_x - char_w).max(end)
                                         } else {
-                                            row.x_offset(col.saturating_sub(1))
+                                            row_x(row, col.saturating_sub(1))
                                         };
                                     }
                                 }
                             }
                             if let Some(row) = galley.rows.get(b.b_line) {
-                                let cur = galley.cursor_from_pos(egui::vec2(b.b_x, row.rect.center().y));
+                                let cur = galley.cursor_from_pos(egui::vec2(b.b_x, row.rect().center().y));
                                 let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-                                st.cursor.set_char_range(Some(CCursorRange::one(cur.ccursor)));
+                                st.cursor.set_char_range(Some(CCursorRange::one(cur)));
                                 st.store(ui.ctx(), editor_id);
-                                new_cursor = Some((cur.rcursor.row, cur.rcursor.column));
+                                new_cursor = Some(rc_of(galley, cur));
                             }
                         }
                     }
@@ -5620,14 +5649,14 @@ impl AlexCodeApp {
                         let fill = ui.visuals().selection.bg_fill;
                         let mut shapes = Vec::new();
                         for (l, row) in galley.rows.iter().enumerate().take(l1 + 1).skip(l0) {
-                            let y = row.rect.center().y;
-                            let ca = galley.cursor_from_pos(egui::vec2(x0, y)).rcursor.column;
-                            let cb = galley.cursor_from_pos(egui::vec2(x1, y)).rcursor.column;
+                            let y = row.rect().center().y;
+                            let ca = rc_of(galley, galley.cursor_from_pos(egui::vec2(x0, y))).1;
+                            let cb = rc_of(galley, galley.cursor_from_pos(egui::vec2(x1, y))).1;
                             self.box_cols.push((l, ca, cb));
-                            let (xa, xb) = (row.x_offset(ca), row.x_offset(cb));
+                            let (xa, xb) = (row_x(row, ca), row_x(row, cb));
                             let r = Rect::from_min_max(
-                                gpos + egui::vec2(xa, row.rect.top()),
-                                gpos + egui::vec2(xb.max(xa + 2.0), row.rect.top() + row_h),
+                                gpos + egui::vec2(xa, row.rect().top()),
+                                gpos + egui::vec2(xb.max(xa + 2.0), row.rect().top() + row_h),
                             );
                             shapes.push(Shape::rect_filled(r, 0.0, fill));
                         }
@@ -5635,7 +5664,7 @@ impl AlexCodeApp {
                     }
                     // 游標移到固定標頭底下（例如按方向鍵往上）時多捲一點，讓游標所在行露出來
                     if let Some(cr) = output.cursor_range.filter(|_| sticky_h > 0.0 && !scroll_to_cursor) {
-                        let r = galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2());
+                        let r = galley.pos_from_cursor(cr.primary).translate(gpos.to_vec2());
                         if cur_row != Some(prev_cursor) && r.top() < ui.clip_rect().top() + sticky_h {
                             let target = Rect::from_min_max(Pos2::new(r.left(), r.top() - sticky_h), r.max);
                             ui.scroll_to_rect(target, None);
@@ -5655,8 +5684,8 @@ impl AlexCodeApp {
                         (active_line, active_line)
                     };
                     if let (Some(row), Some(last)) = (galley.rows.get(row_a), galley.rows.get(row_b)) {
-                        let y0 = gpos.y + row.rect.top();
-                        let y1 = gpos.y + last.rect.top() + last.rect.height().max(row_h);
+                        let y0 = gpos.y + row.rect().top();
+                        let y1 = gpos.y + last.rect().top() + last.rect().height().max(row_h);
                         let r = Rect::from_min_max(
                             Pos2::new(gutter_rect.right(), y0),
                             Pos2::new(clip.right().max(output.response.rect.right()), y1),
@@ -5683,7 +5712,7 @@ impl AlexCodeApp {
                     let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
                     ui.fonts(|f| {
                         for (i, row) in galley.rows.iter().enumerate() {
-                            let y = gpos.y + row.rect.top();
+                            let y = gpos.y + row.rect().top();
                             if y + row_h < clip.top() || y > clip.bottom() {
                                 continue;
                             }
@@ -5700,7 +5729,7 @@ impl AlexCodeApp {
                                 let g = f.layout_no_wrap(format!("{}", line + 1), num_font.clone(), col);
                                 let pos = Pos2::new(
                                     gutter_rect.right() - 10.0 - g.size().x,
-                                    y + (row.rect.height().max(row_h) - g.size().y) * 0.5,
+                                    y + (row.rect().height().max(row_h) - g.size().y) * 0.5,
                                 );
                                 shapes.push(Shape::galley(pos, g, col));
                             }
@@ -5746,9 +5775,9 @@ impl AlexCodeApp {
                     hover_char = hover.filter(|p| p.x >= gutter_rect.right()).and_then(|p| {
                         let rel = p - gpos;
                         let cur = galley.cursor_from_pos(rel);
-                        let row = galley.rows.get(cur.rcursor.row)?;
-                        let inside = rel.y >= row.rect.top() && rel.y < row.rect.bottom() && rel.x <= row.rect.right();
-                        inside.then_some((cur.pcursor.paragraph, cur.pcursor.offset))
+                        let row = galley.rows.get(rc_of(galley, cur).0)?;
+                        let inside = rel.y >= row.rect().top() && rel.y < row.rect().bottom() && rel.x <= row.rect().right();
+                        inside.then_some(para_of(galley, cur.index))
                     });
                     let hover_note = self
                         .hover_text
@@ -5775,13 +5804,13 @@ impl AlexCodeApp {
                         }
                         if let Some(p) = hover.filter(|p| p.x >= gutter_rect.left() && p.x < gutter_rect.right()) {
                             let y = p.y - gpos.y;
-                            if let Some(i) = galley.rows.iter().position(|r| y >= r.rect.top() && y < r.rect.bottom()) {
+                            if let Some(i) = galley.rows.iter().position(|r| y >= r.rect().top() && y < r.rect().bottom()) {
                                 let line = if wrap { row_lines[i] } else { i };
                                 tips = diags.iter().filter(|d| d.start_line.max(0) as usize == line).collect();
                             }
                         }
                         if !tips.is_empty() || hover_note.is_some() {
-                            egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), egui::Id::new("lsp-diagnostic-tip"), |ui| {
+                            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("lsp-diagnostic-tip"), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
                                 ui.set_max_width(560.0);
                                 for d in &tips {
                                     ui.horizontal_top(|ui| {
@@ -5815,8 +5844,8 @@ impl AlexCodeApp {
 
                     // 編輯區沒有焦點時（焦點在尋找列）egui 不畫選取：自行以外框標出目前的命中
                     if let Some((a, b)) = find_current.filter(|_| !output.response.has_focus()) {
-                        let ra = galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(a)));
-                        let rb = galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(b)));
+                        let ra = galley.pos_from_cursor(CCursor::new(a));
+                        let rb = galley.pos_from_cursor(CCursor::new(b));
                         if (ra.top() - rb.top()).abs() < 0.5 {
                             let r = Rect::from_min_max(ra.left_top(), rb.right_bottom()).translate(gpos.to_vec2());
                             ui.painter().rect_stroke(r.expand(1.0), 2.0, Stroke::new(1.5_f32, c.accent), egui::StrokeKind::Middle);
@@ -5828,10 +5857,10 @@ impl AlexCodeApp {
                         let primary = output.cursor_range.map(|cr| cr.primary).or_else(|| {
                             egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
                                 .and_then(|st| st.cursor.char_range())
-                                .map(|r| galley.from_ccursor(r.primary))
+                                .map(|r| r.primary)
                         });
                         if let Some(cur) = primary {
-                            let r = galley.pos_from_cursor(&cur).translate(gpos.to_vec2());
+                            let r = galley.pos_from_cursor(cur).translate(gpos.to_vec2());
                             ui.scroll_to_rect(r.expand2(egui::vec2(40.0, row_h * 2.0)), Some(Align::Center));
                         }
                     }
@@ -6036,7 +6065,7 @@ impl AlexCodeApp {
                             let (cat, rest) = name.split_once('：').unwrap_or(("", name.as_str()));
                             let r = ui.add_sized(
                                 [ui.available_width(), 26.0],
-                                egui::SelectableLabel::new(
+                                egui::Button::selectable(
                                     i == 0,
                                     RichText::new(format!("{}  {}", cat, rest)).color(if i == 0 { c.accent } else { c.fg_list }),
                                 ),
@@ -7071,12 +7100,12 @@ impl AlexCodeApp {
                         let r = row_of(rows, p.col);
                         let g = piece(p.line, rows, r);
                         let at = CCursor { index: p.col - rows[r].0, prefer_next_row: true };
-                        (g.pos_from_cursor(&g.from_ccursor(at)).left(), r, rows.len())
+                        (g.pos_from_cursor(at).left(), r, rows.len())
                     }
                     None => {
                         let g = lay(p.line);
-                        let cur = g.from_ccursor(CCursor { index: p.col, prefer_next_row: true });
-                        (g.pos_from_cursor(&cur).left(), cur.rcursor.row, g.rows.len())
+                        let cur = CCursor { index: p.col, prefer_next_row: true };
+                        (g.pos_from_cursor(cur).left(), rc_of(&g, cur).0, g.rows.len())
                     }
                 };
                 // 目標：同一行的下 / 上一列，到頭了才換到下一行的第一列 / 上一行的最後一列
@@ -7095,7 +7124,7 @@ impl AlexCodeApp {
                     Some(rows) => {
                         let r = target.min(rows.len() - 1);
                         let g = piece(line, rows, r);
-                        let mut c = g.cursor_from_pos(egui::vec2(x, row_h * 0.5)).ccursor.index;
+                        let mut c = g.cursor_from_pos(egui::vec2(x, row_h * 0.5)).index;
                         // 落在一列的結尾（不是整行的結尾）：那個位置算下一列的開頭，退一格才會留在這一列
                         if r + 1 < rows.len() && c >= rows[r + 1].0 - rows[r].0 {
                             c = c.saturating_sub(1);
@@ -7104,7 +7133,7 @@ impl AlexCodeApp {
                     }
                     None => {
                         let g = lay(line);
-                        let y = g.rows.get(target.min(g.rows.len().saturating_sub(1))).map_or(0.0, |r| r.rect.center().y);
+                        let y = g.rows.get(target.min(g.rows.len().saturating_sub(1))).map_or(0.0, |r| r.rect().center().y);
                         Position { line, col: wrapped_col_at(&g, egui::vec2(x, y)) }
                     }
                 }
@@ -7424,7 +7453,7 @@ impl AlexCodeApp {
                     };
                     (ui.fonts(|f| f.layout_job(job)), start)
                 };
-                let x_of = |galley: &egui::Galley, col: usize| galley.pos_from_cursor(&galley.from_ccursor(cc(col))).left();
+                let x_of = |galley: &egui::Galley, col: usize| galley.pos_from_cursor(cc(col)).left();
 
                 // ---- 只排版看得到的行：(行, 這一行上緣在畫面上的 y, 排版結果, 排版從第幾個字元開始, 它的左緣離行首多遠) ----
                 let view_top = rect.top() + viewport.top();
@@ -7595,7 +7624,7 @@ impl AlexCodeApp {
                     // 游標畫在含有它的那一段：落在兩段交界時畫在後面那一段的開頭（與 egui 的折行游標相同）；
                     // 在只排了一段的長行裡、但不在這一段裡時，它在畫面外，不畫
                     if active && has_focus && caret_col >= start && (caret_col < g_end || (caret_col == g_end && line_end_here)) {
-                        let r = galley.pos_from_cursor(&galley.from_ccursor(cc(caret_col - start)));
+                        let r = galley.pos_from_cursor(cc(caret_col - start));
                         let caret = Rect::from_min_size(Pos2::new(gx + r.left(), y + r.top()), egui::vec2(1.5, row_h));
                         painter.rect_filled(caret, 0.0, c.accent);
                         caret_rect = Some(caret);
@@ -7669,7 +7698,7 @@ impl AlexCodeApp {
                         0.0
                     } else {
                         let g = line_galley(ui, head.line, false).0;
-                        g.pos_from_cursor(&g.from_ccursor(cc(caret_col))).top()
+                        g.pos_from_cursor(cc(caret_col)).top()
                     };
                     // 游標那一列目前在畫面上的 y（那一列不在畫面上時為 None）
                     let on_screen =
@@ -11430,7 +11459,7 @@ mod tests {
             .map(|(g, l)| (g, l.1))
             .expect("the editor of the first tab");
         assert!(r.left() < mid);
-        let y = r.top() + g.rows[ln].rect.top();
+        let y = r.top() + g.rows[ln].rect().top();
         assert!((y - at.top()).abs() < 1.5, "line {ln} stays at {} (now {y})", at.top());
         // 第二份移到右欄唯讀顯示，捲動位置也和它剛才在編輯區時相同（在最上面）
         let first_right = painted_lines(&out)
@@ -13100,5 +13129,37 @@ mod tests {
             frame(&mut app, &ctx, vec![]);
         }
         println!("IDLE_FRAME_MS filter view = {:.2}", t.elapsed().as_secs_f64() * 1000.0 / 20.0);
+    }
+
+    /// egui 0.32 起游標只剩字元索引：自己換算的（列, 欄）與（段落, 位移）要與排版的列對得上（含折行處）
+    #[test]
+    fn cursor_conversions_follow_rows_and_paragraphs() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+        let font = FontId::monospace(14.0);
+        let w = ctx.fonts(|f| f.glyph_width(&font, 'x'));
+        let job = egui::text::LayoutJob::simple("abcdefghij\nxy\n".into(), font, Color32::WHITE, w * 4.5);
+        let g = ctx.fonts(|f| f.layout_job(job));
+        let texts: Vec<String> = g.rows.iter().map(|r| r.text()).collect();
+        assert_eq!(texts, ["abcd", "efgh", "ij", "xy", ""], "rows of the wrapped layout");
+        // 段落（檔案的行）與段落裡的位移
+        assert_eq!(para_of(&g, 0), (0, 0));
+        assert_eq!(para_of(&g, 5), (0, 5), "the second row of a wrapped line is still the first line");
+        assert_eq!(para_of(&g, 10), (0, 10));
+        assert_eq!(para_of(&g, 11), (1, 0));
+        assert_eq!(para_of(&g, 13), (1, 2));
+        assert_eq!(para_of(&g, 14), (2, 0));
+        assert_eq!(para_of(&g, 99), (2, 0), "past the end: the last line");
+        // 排版的列與列裡的位置：折行處依 prefer_next_row 決定
+        assert_eq!(rc_of(&g, CCursor::new(5)), (1, 1));
+        assert_eq!(rc_of(&g, CCursor { index: 4, prefer_next_row: true }), (1, 0));
+        assert_eq!(rc_of(&g, CCursor { index: 4, prefer_next_row: false }), (0, 4));
+        assert_eq!(rc_of(&g, CCursor::new(12)), (3, 1));
+        // 點在第二列的結尾右邊：游標留在那一列的結尾（不跳到下一列的開頭）
+        let row1 = &g.rows[1];
+        assert_eq!(wrapped_col_at(&g, egui::vec2(row1.rect().right() + 20.0, row1.rect().center().y)), 7);
+        // x 是相對於排版的位置：列的位置 + 字形在列裡的位置
+        assert!((row_x(row1, 1) - (row1.pos.x + row1.glyphs[1].pos.x)).abs() < 0.01);
+        assert!((g.pos_from_cursor(CCursor::new(5)).left() - row_x(row1, 1)).abs() < 0.01);
     }
 }

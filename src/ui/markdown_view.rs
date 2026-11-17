@@ -810,7 +810,7 @@ pub fn render_markdown_toolbar(
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             // 1. 大綱按鈕
-            let toc_btn = egui::SelectableLabel::new(
+            let toc_btn = egui::Button::selectable(
                 state.show_outline,
                 RichText::new("📑 大綱").size(12.5).color(if state.show_outline {
                     c.accent
@@ -827,7 +827,7 @@ pub fn render_markdown_toolbar(
             // 2. 三種模式切換膠囊按鈕
             for m in [MdViewMode::Typora, MdViewMode::Split, MdViewMode::Source] {
                 let active = state.mode == m;
-                let lbl = egui::SelectableLabel::new(
+                let lbl = egui::Button::selectable(
                     active,
                     RichText::new(m.label())
                         .size(12.5)
@@ -1083,8 +1083,8 @@ pub fn render_typora_document(
 
                                 let pal_c = pal.clone();
                                 let font_c = FontId::monospace(base_font_size);
-                                let mut layouter = move |ui: &egui::Ui, s: &str, wrap_w: f32| {
-                                    let mut job = highlight(s, Lang::Markdown, &pal_c, font_c.clone(), "");
+                                let mut layouter = move |ui: &egui::Ui, s: &dyn egui::TextBuffer, wrap_w: f32| {
+                                    let mut job = highlight(s.as_str(), Lang::Markdown, &pal_c, font_c.clone(), "");
                                     job.wrap.max_width = wrap_w;
                                     ui.fonts(|f| f.layout_job(job))
                                 };
