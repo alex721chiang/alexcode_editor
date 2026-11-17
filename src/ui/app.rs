@@ -895,6 +895,8 @@ struct SplitView {
     /// 另一欄上一幀的捲動位置，與換欄後下一幀要用的捲動位置
     offset: Vec2,
     pending: Option<Vec2>,
+    /// 另一欄是 Markdown 時閱讀模式自己的狀態（圖片快取等；不與有焦點的那一欄共用）
+    md: MarkdownViewState,
 }
 
 /// 一般編輯區的文字在捲動區裡比另一欄多一段上邊界（TextEdit 的 margin）：換欄時捲動位置要差這麼多，同一行才會在同一個高度
@@ -2148,6 +2150,7 @@ impl AlexCodeApp {
                             git: ((0, 0, 0), HashMap::new()),
                             offset: Vec2::ZERO,
                             pending: None,
+                            md: MarkdownViewState::default(),
                         }),
                 };
                 self.focus_editor = true;
@@ -4404,9 +4407,13 @@ impl AlexCodeApp {
         let other_rect = if right_active { left } else { right };
         // 先看這一幀有沒有在另一欄按下滑鼠（在畫之前，這樣換過去的那一幀就畫在對的位置）。
         // 按下時就換：接著拖曳由編輯區延伸選取，放開時沒移動就只是把游標放在那裡
-        let resp = ui.interact(other_rect, ui.id().with("split-other-pane"), Sense::click());
+        // 不看那個位置最上面是哪個元件（閱讀模式的 Markdown 有自己的元件），只看是不是按在這一欄、沒有被彈出視窗蓋住
         let press = ui.input(|i| i.pointer.press_origin().filter(|_| i.pointer.primary_pressed()));
-        if let Some(press) = press.filter(|p| resp.hovered() && other_rect.contains(*p)) {
+        let layer = ui.layer_id();
+        // 右邊與下面留給捲軸（拖捲軸不換欄）
+        let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_outer_margin + ui.spacing().scroll.bar_inner_margin + 2.0;
+        let hit = Rect::from_min_max(other_rect.min, other_rect.max - egui::vec2(bar, bar));
+        if let Some(press) = press.filter(|p| hit.contains(*p) && ui.ctx().layer_id_at(*p) == Some(layer)) {
             // 按下的位置換成（行, 欄）：用上一幀畫出的那幾行；按在最後一行下面就放在那一行的行尾
             let at = Some(press).and_then(|p| {
                 let rows = &self.split.as_ref()?.rows;
@@ -4454,10 +4461,27 @@ impl AlexCodeApp {
             }
         }
         let pending = self.split.as_mut().and_then(|s| s.pending.take());
-        let (rows, offset) = self.split_preview(&mut pane, other, c, pal, pending);
-        if let Some(s) = self.split.as_mut() {
-            s.rows = rows;
-            s.offset = offset;
+        // Markdown 分頁在閱讀 / 雙欄模式下，另一欄也照閱讀模式顯示（不能在上面直接編輯；連結不跟著開）
+        let md_other = self.md_view.mode != MdViewMode::Source
+            && self.tab_lang(other) == Lang::Markdown
+            && !self.md_too_big(other);
+        if md_other {
+            pane.painter().rect_filled(pane.max_rect(), 0.0, c.panel);
+            let find = Finder::default();
+            let (root, fsize) = (self.project_root.clone(), self.config.font_size);
+            if let (Some(s), Some(buf)) = (self.split.as_mut(), self.tabs.get_mut(other)) {
+                let id = buf.id;
+                pane.push_id(("split-markdown", id), |ui| {
+                    let _ = render_typora_document(ui, &mut s.md, buf, fsize, c, pal, &find, &root, false);
+                });
+                s.rows.clear();
+            }
+        } else {
+            let (rows, offset) = self.split_preview(&mut pane, other, c, pal, pending);
+            if let Some(s) = self.split.as_mut() {
+                s.rows = rows;
+                s.offset = offset;
+            }
         }
         let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active");
         active.set_clip_rect(active_rect.intersect(clip));
@@ -10914,6 +10938,40 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::Text("Q".into())]);
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.tabs[0].edit_text(), "alpha one\nalpha two\nalphQa three\nalpha four\n");
+    }
+
+    #[test]
+    fn split_view_other_pane_shows_markdown_in_reading_mode() {
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        let mut md = EditorBuffer::from_text("# Big Title\n\nSome **bold** words\n");
+        md.file_path = Some("notes.md".into());
+        let mut b = EditorBuffer::from_text("fn main() {}\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs = vec![md, b];
+        app.active_tab_idx = 0;
+        app.md_view.mode = MdViewMode::Typora;
+        frame(&mut app, &ctx, vec![]);
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let left: Vec<String> = painted_lines(&out).into_iter().filter(|l| l.1.right() < 640.0).map(|l| l.0).collect();
+        assert!(left.iter().any(|t| t.contains("Big Title")), "{left:?}");
+        assert!(!left.iter().any(|t| t.contains("# Big") || t.contains("**")), "rendered, not the source: {left:?}");
+        // 原始碼模式時另一欄也顯示原始碼
+        app.md_view.mode = MdViewMode::Source;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let left: Vec<String> = painted_lines(&out).into_iter().filter(|l| l.1.right() < 640.0).map(|l| l.0).collect();
+        assert!(left.iter().any(|t| t == "# Big Title"), "{left:?}");
+        // 閱讀模式的另一欄也是點一下就換過去編輯它（點在文字上）
+        app.md_view.mode = MdViewMode::Typora;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let words = painted_lines(&out).into_iter().find(|l| l.0.contains("words") && l.1.right() < 640.0).expect("the paragraph").1;
+        click(&mut app, &ctx, words.center());
+        assert_eq!(app.active_tab_idx, 0);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）

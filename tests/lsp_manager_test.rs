@@ -83,7 +83,12 @@ fn handshake_then_open_change_and_close_documents() {
     let texts = ["fn main() {}", "plain"];
 
     m.sync(&docs, |i| texts[i].to_string());
-    assert_eq!(m.status(ServerKind::RustAnalyzer), Some(&LspStatus::Starting), "the .rs file starts rust-analyzer");
+    // 假伺服器回得很快時，同一次 sync 裡就可能已經收到 initialize 的回覆（CI 的 Linux 上看過），所以 Ready 也算
+    assert!(
+        matches!(m.status(ServerKind::RustAnalyzer), Some(LspStatus::Starting | LspStatus::Ready)),
+        "the .rs file starts rust-analyzer: {:?}",
+        m.status(ServerKind::RustAnalyzer)
+    );
     assert!(m.status(ServerKind::Clangd).is_none() && m.status(ServerKind::Pylsp).is_none(), "nothing else is started");
     assert!(pump(&mut m, &docs, &texts, 10, |m| m.status(ServerKind::RustAnalyzer) == Some(&LspStatus::Ready)));
     assert!(pump(&mut m, &docs, &texts, 10, |_| !sent(&log, "textDocument/didOpen").is_empty()));
