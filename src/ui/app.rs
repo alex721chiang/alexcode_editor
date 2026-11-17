@@ -882,6 +882,8 @@ struct SplitView {
     other: u64,
     /// 有焦點的是右欄
     right_active: bool,
+    /// 上一幀另一欄畫出的每一行：（行號, 文字左上角, 排版），點下去時換算成游標位置
+    rows: Vec<(usize, Pos2, Arc<egui::Galley>)>,
 }
 
 /// 矩形選取裡的一次編輯（每一行同時套用）
@@ -2119,7 +2121,10 @@ impl AlexCodeApp {
                 // 分割時新的右欄有焦點、先顯示同一份文件（左欄唯讀顯示它）；再按一次回到單欄
                 self.split = match self.split.take() {
                     Some(_) => None,
-                    None => self.tabs.get(self.active_tab_idx).map(|b| SplitView { other: b.id, right_active: true }),
+                    None => self
+                        .tabs
+                        .get(self.active_tab_idx)
+                        .map(|b| SplitView { other: b.id, right_active: true, rows: Vec::new() }),
                 };
                 self.focus_editor = true;
             }
@@ -4374,12 +4379,32 @@ impl AlexCodeApp {
         let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
         let other_rect = if right_active { left } else { right };
         // 先看這一幀有沒有點另一欄（在畫之前，這樣換過去的那一幀就畫在對的位置）
-        if ui.interact(other_rect, ui.id().with("split-other-pane"), Sense::click()).clicked() {
+        let resp = ui.interact(other_rect, ui.id().with("split-other-pane"), Sense::click());
+        if resp.clicked() {
+            // 點的位置換成（行, 欄）：用上一幀畫出的那幾行；點在最後一行下面就放在文件結尾
+            let at = resp.interact_pointer_pos().and_then(|p| {
+                let rows = &self.split.as_ref()?.rows;
+                match rows.iter().find(|(_, o, g)| p.y < o.y + g.size().y.max(1.0)) {
+                    Some((line, o, g)) => Some((*line, g.cursor_from_pos(p - *o).ccursor.index)),
+                    None => rows
+                        .last()
+                        .map(|(line, _, g)| (*line, g.cursor_from_pos(egui::vec2(f32::INFINITY, 0.0)).ccursor.index)),
+                }
+            });
             if let (Some(s), Some(cur)) = (self.split.as_mut(), self.tabs.get(self.active_tab_idx).map(|b| b.id)) {
                 s.other = cur;
                 s.right_active = !s.right_active;
             }
             self.active_tab_idx = other;
+            if let Some((line, col)) = at {
+                let buf = &mut self.tabs[other];
+                let line = line.min(buf.lines.len().saturating_sub(1));
+                let col = col.min(buf.line_len(line));
+                buf.selections = vec![Selection::point(Position { line, col })];
+                let i = buf.lines.iter().take(line).map(|s| s.chars().count() + 1).sum::<usize>() + col;
+                self.pending_select = Some((i, i));
+                self.scroll_to_cursor = true;
+            }
             other = self.tabs.iter().position(|b| Some(b.id) == self.split.as_ref().map(|s| s.other)).unwrap_or(other);
             self.focus_editor = true;
         }
@@ -4389,15 +4414,26 @@ impl AlexCodeApp {
         let clip = ui.clip_rect();
         let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other");
         pane.set_clip_rect(other_rect.intersect(clip));
-        self.split_preview(&mut pane, other, c, pal);
+        let rows = self.split_preview(&mut pane, other, c, pal);
+        if let Some(s) = self.split.as_mut() {
+            s.rows = rows;
+        }
         let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active");
         active.set_clip_rect(active_rect.intersect(clip));
         Some(active)
     }
 
-    /// 分割檢視裡沒有焦點的那一欄：唯讀顯示分頁 `idx`（行號、語法高亮，可捲動；每一行最多畫 4000 個字元）
-    fn split_preview(&self, ui: &mut egui::Ui, idx: usize, c: &Colors, pal: &crate::theme::Palette) {
-        let Some(buf) = self.tabs.get(idx) else { return };
+    /// 分割檢視裡沒有焦點的那一欄：唯讀顯示分頁 `idx`（行號、語法高亮，可捲動；每一行最多畫 4000 個字元）。
+    /// 回傳畫出的每一行（行號, 文字左上角, 排版）
+    fn split_preview(
+        &self,
+        ui: &mut egui::Ui,
+        idx: usize,
+        c: &Colors,
+        pal: &crate::theme::Palette,
+    ) -> Vec<(usize, Pos2, Arc<egui::Galley>)> {
+        let mut drawn = Vec::new();
+        let Some(buf) = self.tabs.get(idx) else { return drawn };
         let lang = self.tab_lang(idx);
         let font = FontId::monospace(self.config.font_size);
         let row_h = ui.fonts(|f| f.row_height(&font));
@@ -4423,9 +4459,12 @@ impl AlexCodeApp {
                         FontId::monospace(self.config.font_size - 1.0),
                         c.fg_dim2,
                     );
-                    ui.painter().galley(Pos2::new(rect.left() + gutter_w + 10.0, rect.top()), g, c.fg);
+                    let at = Pos2::new(rect.left() + gutter_w + 10.0, rect.top());
+                    drawn.push((ln, at, g.clone()));
+                    ui.painter().galley(at, g, c.fg);
                 }
             });
+        drawn
     }
 
     /// 上一幀算出的矩形選取：每一行的（行, 起欄, 迄欄）
@@ -10453,8 +10492,49 @@ mod tests {
         frame(&mut app, &ctx, vec![key(Key::Backslash, Modifiers::COMMAND)]);
         let out = frame(&mut app, &ctx, vec![]);
         assert!(app.split.is_none());
-        let n = painted_lines(&out).into_iter().filter(|l| l.0.contains("alpha two")).count();
+        let n = painted_lines(&out).into_iter().filter(|l| l.0.contains("ha two")).count();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn split_view_click_places_the_cursor_and_mirrors_typing() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        frame(&mut app, &ctx, vec![]);
+        let mid = 640.0;
+        let galley = |out: &egui::FullOutput, text: &str| {
+            let g = painted_galleys(out).into_iter().find(|g| g.job.text == text)?;
+            let r = painted_lines(out).into_iter().find(|l| l.0 == text)?.1;
+            Some((g, r))
+        };
+
+        // 同一份文件在兩欄：右欄打的字左欄馬上看得到
+        frame(&mut app, &ctx, vec![key(Key::Backslash, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        app.pending_select = Some((0, 0));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![Event::Text("Q".into())]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[0], "Qalpha one");
+        let (_, r) = galley(&out, "Qalpha one").expect("the read-only pane shows the typed text");
+        assert!(r.right() < mid, "{r:?}");
+
+        // 右欄換成另一個分頁，點左欄第 2 行的第 3 個字之後：游標放在那裡，打的字插在那裡
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let (g, r) = galley(&out, "alpha two").expect("the left pane shows the first tab");
+        let p = Pos2::new(r.left() + g.rows[0].x_offset(3) + 1.0, r.center().y);
+        click(&mut app, &ctx, p);
+        assert_eq!(app.active_tab_idx, 0);
+        assert_eq!(cursor(&app), (1, 3), "the cursor goes where the pane was clicked");
+        frame(&mut app, &ctx, vec![Event::Text("Z".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[1], "alpZha two");
+        assert_eq!(app.tabs[1].edit_text(), "beta one\nbeta two\n");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
