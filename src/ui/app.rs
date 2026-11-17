@@ -4722,12 +4722,14 @@ impl AlexCodeApp {
                     self.detached_git.insert(id, (key, marks));
                 }
             }
+            // 先拿出來，畫的時候才能同時改分頁（畫完放回去）
+            let cache = self.detached_git.remove(&id);
             let empty = HashMap::new();
-            let git = self.detached_git.get(&id).map_or(&empty, |(_, m)| m);
+            let git = cache.as_ref().map_or(&empty, |(_, m)| m);
             let title = format!("{} — AlexCode", Self::tab_title(&self.tabs[idx]));
             let vid = egui::ViewportId::from_hash_of(("alexcode-detached", id));
             let builder = egui::ViewportBuilder::default().with_title(title.clone()).with_inner_size([800.0, 600.0]);
-            let this = &*self;
+            let this = &mut *self;
             let close = ctx.show_viewport_immediate(vid, builder, |ctx, class| {
                 if class == egui::ViewportClass::Embedded {
                     let mut open = true;
@@ -4736,21 +4738,93 @@ impl AlexCodeApp {
                         .open(&mut open)
                         .default_size([600.0, 400.0])
                         .show(ctx, |ui| {
-                            let _ = this.split_preview(ui, idx, c, pal, None, git);
+                            this.detached_body(ui, idx, c, pal, git);
                         });
                     !open
                 } else {
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(c.panel)).show(ctx, |ui| {
-                        let _ = this.split_preview(ui, idx, c, pal, None, git);
+                        this.detached_body(ui, idx, c, pal, git);
                     });
                     ctx.input(|i| i.viewport().close_requested())
                 }
             });
+            if let Some(cache) = cache {
+                self.detached_git.insert(id, cache);
+            }
             if close {
                 closed.push(id);
             }
         }
         self.detached.retain(|id| !closed.contains(id));
+    }
+
+    /// 獨立視窗的內容：畫法與分割檢視的另一欄相同，點一下取得鍵盤焦點並放游標，
+    /// 之後打字、Enter、Backspace / Delete、方向鍵、Home / End、Ctrl+Z / Ctrl+Y 直接改那個分頁的緩衝區（與主視窗共用）
+    fn detached_body(&mut self, ui: &mut egui::Ui, idx: usize, c: &Colors, pal: &crate::theme::Palette, git: &HashMap<usize, u8>) {
+        let Some(tab_id) = self.tabs.get(idx).map(|b| b.id) else { return };
+        let (rows, _) = self.split_preview(ui, idx, c, pal, None, git);
+        let area = ui.min_rect();
+        // 右邊與下面留給捲軸
+        let hit = Rect::from_min_max(area.min, (area.max - egui::vec2(14.0, 14.0)).max(area.min));
+        let id = egui::Id::new(("alexcode-detached-edit", tab_id));
+        let resp = ui.interact(hit, id, Sense::click());
+        let pressed = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
+        if pressed || resp.clicked() {
+            resp.request_focus();
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                if let Some((ln, at, g)) = rows.iter().rev().find(|(_, at, _)| at.y <= p.y).or(rows.first()) {
+                    let col = g.cursor_from_pos(p - *at).ccursor.index;
+                    self.tabs[idx].selections = vec![Selection::point(Position { line: *ln, col })];
+                }
+            }
+        }
+        if !ui.memory(|m| m.has_focus(id)) {
+            return;
+        }
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(id, egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: false })
+        });
+        let events = ui.input(|i| i.events.clone());
+        let buf = &mut self.tabs[idx];
+        for e in events {
+            let Some(sel) = buf.selections.first().copied() else { break };
+            let (a, h) = (sel.anchor, sel.head);
+            let n = buf.lines.len();
+            let len = |b: &EditorBuffer, l: usize| b.line_len(l);
+            let at = |line, col| Position { line, col };
+            let go = |b: &mut EditorBuffer, p: Position| b.selections = vec![Selection::point(p)];
+            match e {
+                egui::Event::Text(t) if !t.is_empty() => buf.replace_range(a, h, &t, true),
+                egui::Event::Key { key, pressed: true, modifiers, .. } => match key {
+                    Key::Z if modifiers.command && modifiers.shift => {
+                        buf.redo();
+                    }
+                    Key::Z if modifiers.command => {
+                        buf.undo();
+                    }
+                    Key::Y if modifiers.command => {
+                        buf.redo();
+                    }
+                    Key::Enter => buf.replace_range(a, h, "\n", true),
+                    Key::Backspace if a != h => buf.replace_range(a, h, "", true),
+                    Key::Backspace if h.col > 0 => buf.replace_range(at(h.line, h.col - 1), h, "", true),
+                    Key::Backspace if h.line > 0 => buf.replace_range(at(h.line - 1, len(buf, h.line - 1)), h, "", true),
+                    Key::Delete if a != h => buf.replace_range(a, h, "", true),
+                    Key::Delete if h.col < len(buf, h.line) => buf.replace_range(h, at(h.line, h.col + 1), "", true),
+                    Key::Delete if h.line + 1 < n => buf.replace_range(h, at(h.line + 1, 0), "", true),
+                    Key::ArrowLeft if h.col > 0 => go(buf, at(h.line, h.col - 1)),
+                    Key::ArrowLeft if h.line > 0 => go(buf, at(h.line - 1, len(buf, h.line - 1))),
+                    Key::ArrowRight if h.col < len(buf, h.line) => go(buf, at(h.line, h.col + 1)),
+                    Key::ArrowRight if h.line + 1 < n => go(buf, at(h.line + 1, 0)),
+                    Key::ArrowUp if h.line > 0 => go(buf, at(h.line - 1, h.col.min(len(buf, h.line - 1)))),
+                    Key::ArrowDown if h.line + 1 < n => go(buf, at(h.line + 1, h.col.min(len(buf, h.line + 1)))),
+                    Key::Home => go(buf, at(h.line, 0)),
+                    Key::End => go(buf, at(h.line, len(buf, h.line))),
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
     }
 
     /// 上一幀分割檢視中間分隔線的 x
@@ -11388,6 +11462,48 @@ mod tests {
         let on = |r: &Rect, l: Rect| r.center().y > l.top() && r.center().y < l.bottom() && r.right() < l.left();
         assert!(warn.iter().any(|r| on(r, one)), "the changed line has a modified bar: {warn:?}");
         assert!(!warn.iter().any(|r| on(r, two)));
+    }
+
+    #[test]
+    fn the_detached_window_can_edit_the_shared_buffer() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        app.active_tab_idx = 1;
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let two = painted_lines(&out).into_iter().find(|l| l.0 == "alpha two").map(|l| l.1).unwrap();
+        // 在視窗裡點一下：游標放到點的位置，主視窗的編輯區交出焦點
+        click(&mut app, &ctx, Pos2::new(two.left() + 1.0, two.center().y));
+        assert_eq!(cursor(&app), (1, 0), "the click puts the cursor at the start of line 2");
+        assert!(!app.editor_focused, "the main editor gives up the keyboard");
+        // 打字改的是那個分頁（與主視窗共用的同一份緩衝區），主視窗的分頁不動
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        assert_eq!(app.tabs[0].lines[1], "Xalpha two");
+        assert_eq!(cursor(&app), (1, 1));
+        assert_eq!(app.tabs[1].lines[0], "beta one");
+        frame(&mut app, &ctx, vec![key(Key::Backspace, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].lines[1], "alpha two");
+        frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].lines[1..3], ["", "alpha two"]);
+        assert_eq!(cursor(&app), (2, 0));
+        // 方向鍵與 Home / End 移動游標
+        frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE), key(Key::ArrowUp, Modifiers::NONE)]);
+        assert_eq!(cursor(&app), (0, 0));
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::NONE)]);
+        assert_eq!(cursor(&app), (0, 9));
+        frame(&mut app, &ctx, vec![key(Key::ArrowLeft, Modifiers::NONE), key(Key::Delete, Modifiers::NONE)]);
+        assert_eq!(app.tabs[0].lines[0], "alpha on");
+        // 復原用那份緩衝區的紀錄
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        assert_ne!(app.tabs[0].lines[0], "alpha on", "Ctrl+Z undoes the edit made in the window");
+        let out = frame(&mut app, &ctx, vec![]);
+        let texts: Vec<String> = painted_lines(&out).into_iter().map(|l| l.0).collect();
+        assert!(texts.iter().any(|t| t == &app.tabs[0].lines[0]), "the window shows the buffer: {texts:?}");
+        assert_eq!(app.active_tab_idx, 1, "the main window stays on its own tab");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
