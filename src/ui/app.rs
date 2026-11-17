@@ -147,6 +147,7 @@ pub enum Cmd {
     CommandPalette,
     DiffHead,
     SplitEditor,
+    SplitOrientation,
     ToggleTerminal,
     ToggleGraph,
     ToggleFilterBar,
@@ -899,8 +900,10 @@ struct SplitView {
     pending: Option<Vec2>,
     /// 另一欄是 Markdown 時閱讀模式自己的狀態（圖片快取等；不與有焦點的那一欄共用）
     md: MarkdownViewState,
-    /// 左欄佔編輯區寬度的比例（拖曳分隔線改變）
+    /// 左欄佔編輯區寬度的比例（拖曳分隔線改變）；上下分割時是上欄佔的高度比例
     ratio: f32,
+    /// 上下分割（right_active 時有焦點的是下面那一欄）
+    vertical: bool,
 }
 
 /// 一般編輯區的文字在捲動區裡比另一欄多一段上邊界（TextEdit 的 margin）：換欄時捲動位置要差這麼多，同一行才會在同一個高度
@@ -1320,6 +1323,7 @@ impl AlexCodeApp {
                     other_file,
                     right_active: s.right_active,
                     ratio: s.ratio,
+                    vertical: s.vertical,
                 })
             }),
         }
@@ -1373,6 +1377,7 @@ impl AlexCodeApp {
                     pending: None,
                     md: MarkdownViewState::default(),
                     ratio: if sp.ratio.is_finite() { sp.ratio.clamp(0.1, 0.9) } else { 0.5 },
+                    vertical: sp.vertical,
                 });
             }
         }
@@ -2025,6 +2030,7 @@ impl AlexCodeApp {
             ("檢視：Markdown 關聯圖 (Graph)".into(), Cmd::ToggleGraph),
             ("檢視：與 Git HEAD 比較 (Diff)".into(), Cmd::DiffHead),
             ("檢視：分割編輯器 (Split Editor)".into(), Cmd::SplitEditor),
+            ("檢視：切換左右 / 上下分割 (Toggle Split Orientation)".into(), Cmd::SplitOrientation),
             ("檢視：Log 篩選工具列 (Filter Bar)".into(), Cmd::ToggleFilterBar),
             ("檢視：放大字型 (Zoom In)".into(), Cmd::ZoomIn),
             ("檢視：縮小字型 (Zoom Out)".into(), Cmd::ZoomOut),
@@ -2181,9 +2187,19 @@ impl AlexCodeApp {
                             pending: None,
                             md: MarkdownViewState::default(),
                             ratio: 0.5,
+                            vertical: false,
                         }),
                 };
                 self.focus_editor = true;
+            }
+            Cmd::SplitOrientation => {
+                // 還沒分割時先分割再切成上下
+                if self.split.is_none() {
+                    self.run_cmd(Cmd::SplitEditor);
+                }
+                if let Some(s) = self.split.as_mut() {
+                    s.vertical = !s.vertical;
+                }
             }
             Cmd::ToggleTerminal => self.show_terminal = !self.show_terminal,
             Cmd::ToggleGraph => {
@@ -2977,6 +2993,10 @@ impl AlexCodeApp {
                         let split_label = if self.split.is_some() { "取消分割編輯器" } else { "分割編輯器 (Split Editor)" };
                         if mi(ui, split_label, "Ctrl+\\") {
                             cmd = Some(Cmd::SplitEditor);
+                        }
+                        let vertical = self.split.as_ref().is_some_and(|s| s.vertical);
+                        if mi(ui, if vertical { "改成左右分割" } else { "上下分割" }, "") {
+                            cmd = Some(Cmd::SplitOrientation);
                         }
                         let mut ex = self.show_explorer;
                         if ui.checkbox(&mut ex, "檔案總管側邊欄 (Explorer)  Ctrl+B").clicked() {
@@ -4437,24 +4457,37 @@ impl AlexCodeApp {
             return None;
         };
         let full = ui.max_rect();
-        // 中間的分隔線可以左右拖曳改兩欄的寬度（存成比例，視窗改大小時照比例；兩欄都至少留 120 像素）
+        // 中間的分隔線可以拖曳改兩欄的寬度（上下分割時是高度；存成比例，視窗改大小時照比例；兩欄都至少留 120 像素）。
+        // 以下的 left / right 在上下分割時是上 / 下
+        let vertical = self.split.as_ref().is_some_and(|s| s.vertical);
+        let (edge, span) = if vertical { (full.top(), full.height()) } else { (full.left(), full.width()) };
+        let along = move |p: &Pos2| if vertical { p.y } else { p.x };
+        let band = |at: f32, half: f32| {
+            if vertical {
+                Rect::from_min_max(Pos2::new(full.left(), at - half), Pos2::new(full.right(), at + half))
+            } else {
+                Rect::from_min_max(Pos2::new(at - half, full.top()), Pos2::new(at + half, full.bottom()))
+            }
+        };
         let ratio = self.split.as_ref().map_or(0.5, |s| s.ratio);
-        let old_mid = (full.left() + full.width() * ratio).round();
-        let grip = Rect::from_min_max(Pos2::new(old_mid - 4.0, full.top()), Pos2::new(old_mid + 4.0, full.bottom()));
-        let grip_resp = ui.interact(grip, ui.id().with("split-divider"), Sense::drag());
+        let old_mid = (edge + span * ratio).round();
+        let grip_resp = ui.interact(band(old_mid, 4.0), ui.id().with("split-divider"), Sense::drag());
         if grip_resp.hovered() || grip_resp.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
         }
         if let (true, Some(p), Some(s)) = (grip_resp.dragged(), ui.input(|i| i.pointer.interact_pos()), self.split.as_mut()) {
-            let lo = (120.0 / full.width()).min(0.5);
-            s.ratio = ((p.x - full.left()) / full.width()).clamp(lo, 1.0 - lo);
+            let lo = (120.0 / span).min(0.5);
+            s.ratio = ((along(&p) - edge) / span).clamp(lo, 1.0 - lo);
         }
         let ratio = self.split.as_ref().map_or(0.5, |s| s.ratio);
-        let mid = (full.left() + full.width() * ratio).round();
+        let mid = (edge + span * ratio).round();
         self.split_mid = Some(mid);
-        let on_grip = |p: &Pos2| (p.x - old_mid).abs() <= 4.0 || grip_resp.dragged();
-        let left = Rect::from_min_max(full.min, Pos2::new(mid - 1.0, full.max.y));
-        let right = Rect::from_min_max(Pos2::new(mid + 1.0, full.min.y), full.max);
+        let on_grip = |p: &Pos2| (along(p) - old_mid).abs() <= 4.0 || grip_resp.dragged();
+        let (left, right) = if vertical {
+            (Rect::from_min_max(full.min, Pos2::new(full.max.x, mid - 1.0)), Rect::from_min_max(Pos2::new(full.min.x, mid + 1.0), full.max))
+        } else {
+            (Rect::from_min_max(full.min, Pos2::new(mid - 1.0, full.max.y)), Rect::from_min_max(Pos2::new(mid + 1.0, full.min.y), full.max))
+        };
         let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
         let other_rect = if right_active { left } else { right };
         // 先看這一幀有沒有在另一欄按下滑鼠（在畫之前，這樣換過去的那一幀就畫在對的位置）。
@@ -4500,7 +4533,7 @@ impl AlexCodeApp {
         }
         let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
         let (active_rect, other_rect) = if right_active { (right, left) } else { (left, right) };
-        ui.painter().rect_filled(Rect::from_min_max(Pos2::new(mid - 1.0, full.min.y), Pos2::new(mid + 1.0, full.max.y)), 0.0, c.border);
+        ui.painter().rect_filled(band(mid, 1.0), 0.0, c.border);
         let clip = ui.clip_rect();
         let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other");
         pane.set_clip_rect(other_rect.intersect(clip));
@@ -11101,6 +11134,7 @@ mod tests {
         if let Some(s) = app.split.as_mut() {
             s.right_active = false;
             s.ratio = 0.3;
+            s.vertical = true;
         }
         app.persist_state();
 
@@ -11112,6 +11146,7 @@ mod tests {
         assert_eq!(app2.tabs[app2.active_tab_idx].file_path.as_deref(), b.to_str());
         assert!(!s.right_active);
         assert!((s.ratio - 0.3).abs() < 1e-6);
+        assert!(s.vertical, "top / bottom split is restored");
 
         // 不分割時存的檔不還原分割；另一欄的檔案已經不存在時也不還原
         app.run_cmd(Cmd::SplitEditor);
@@ -11166,6 +11201,55 @@ mod tests {
         app.run_cmd(Cmd::SplitEditor);
         let out = frame(&mut app, &ctx, vec![]);
         assert!(marks(&out).is_empty());
+    }
+
+    #[test]
+    fn split_view_can_stack_the_panes_vertically() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        frame(&mut app, &ctx, vec![]);
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        // 切成上下分割：上面是另一欄（第一份），下面是有焦點的編輯區（第二份），左右都是整個寬度
+        app.run_cmd(Cmd::SplitOrientation);
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let mid = app.split_divider_x().expect("the divider");
+        let alpha = painted_lines(&out).into_iter().find(|l| l.0 == "alpha one").unwrap().1;
+        let beta = painted_lines(&out).into_iter().find(|l| l.0.starts_with("beta one")).unwrap().1;
+        assert!(alpha.bottom() < mid && beta.top() > mid, "top / bottom: {alpha:?} {beta:?} at {mid}");
+        assert!(alpha.left() < 200.0 && beta.left() < 200.0, "both start at the left edge");
+        // 拖曳分隔線改高度
+        let x = 600.0;
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let (from, to) = (Pos2::new(x, mid), Pos2::new(x, mid - 120.0));
+        for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(Pos2::new(x, mid - 60.0))], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
+            frame(&mut app, &ctx, events);
+        }
+        frame(&mut app, &ctx, vec![]);
+        let m2 = app.split_divider_x().unwrap();
+        assert!((m2 - (mid - 120.0)).abs() < 2.0, "the divider follows the drag: {m2}");
+        assert_eq!(app.active_tab_idx, 1);
+        // 點上面那一欄：換成編輯第一份，位置不變
+        let out = frame(&mut app, &ctx, vec![]);
+        let alpha = painted_lines(&out).into_iter().find(|l| l.0 == "alpha two").unwrap().1;
+        click(&mut app, &ctx, Pos2::new(alpha.left() + 10.0, alpha.center().y));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.active_tab_idx, 0);
+        let alpha = painted_lines(&out).into_iter().find(|l| l.0.starts_with("alpha one\n")).unwrap().1;
+        let beta = painted_lines(&out).into_iter().find(|l| l.0 == "beta one").unwrap().1;
+        assert!(alpha.top() < m2 && beta.top() > m2);
+        // 再切一次回到左右分割
+        app.run_cmd(Cmd::SplitOrientation);
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let beta = painted_lines(&out).into_iter().find(|l| l.0 == "beta one").unwrap().1;
+        // （寬度比例沿用剛才拖過的高度比例）
+        let x = app.split_divider_x().unwrap();
+        assert!(beta.left() > x && beta.top() < m2 - 100.0, "side by side again: {beta:?} at {x}");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）

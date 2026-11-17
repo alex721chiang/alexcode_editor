@@ -37,6 +37,8 @@ pub struct SplitState {
     pub other_file: String,
     pub right_active: bool,
     pub ratio: f32,
+    /// 上下分割
+    pub vertical: bool,
 }
 
 impl AppState {
