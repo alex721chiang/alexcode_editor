@@ -12469,24 +12469,36 @@ mod tests {
         let want = reply(rows2, cols2);
         assert!(wait(&mut app, &|t| t.lines().any(|l| l.trim() == want)), "the shell sees {rows2} x {cols2}:\n{}", screen(&app));
 
-        // 游標畫在畫面上，輸入的字讓它往右移（先等提示字元印完、畫面 0.5 秒沒有變化）
-        let mut last = (screen(&app), Instant::now());
-        let end = Instant::now() + Duration::from_secs(20);
-        while last.1.elapsed() < Duration::from_millis(500) && Instant::now() < end {
-            run(&mut app, vec![]);
-            let now = screen(&app);
-            if now != last.0 {
-                last = (now, Instant::now());
+        // 游標畫在畫面上，輸入的字讓它往右移。shell 的輸出是分批到的（提示字元、重畫），
+        // 量位置前先等畫面與游標 0.5 秒沒有變化，不要量到印到一半的樣子
+        let settle = |app: &mut AlexCodeApp| {
+            let state = |app: &AlexCodeApp| (screen(app), app.probe.get("terminal-cursor").map(|r| (r.left(), r.top())));
+            let mut last = (state(app), Instant::now());
+            let end = Instant::now() + Duration::from_secs(20);
+            while last.1.elapsed() < Duration::from_millis(500) && Instant::now() < end {
+                run(app, vec![]);
+                let now = state(app);
+                if now != last.0 {
+                    last = (now, Instant::now());
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        };
+        settle(&mut app);
         let cursor = app.probe["terminal-cursor"];
         assert!(app.probe["terminal-output"].contains(cursor.center()), "the cursor is inside the output area");
+        // 用同樣的視窗大小點擊：共用的 click() 用預設的 1280 寬，會讓終端機先變寬再變回來（shell 收到兩次 SIGWINCH 而重畫提示字元），
+        // 之前 macOS 上偶爾因此量到重畫到一半的游標（「the cursor moved -79.75797 px for 3 characters」）
         let out = app.probe["terminal-output"].center();
-        click(&mut app, &ctx, out);
+        let button = |pressed| Event::PointerButton { pos: out, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        run(&mut app, vec![Event::PointerMoved(out)]);
+        run(&mut app, vec![button(true)]);
+        run(&mut app, vec![button(false)]);
+        run(&mut app, vec![]);
+        assert_eq!((app.terminal.rows(), app.terminal.cols()), (rows2, cols2), "clicking does not resize the terminal");
         run(&mut app, vec![Event::Text("abc".into())]);
         assert!(wait(&mut app, &|t| t.contains("abc")));
-        run(&mut app, vec![]);
+        settle(&mut app);
         let moved = app.probe["terminal-cursor"].left() - cursor.left();
         assert!((moved - 3.0 * adv).abs() < 1.5, "the cursor moved {moved} px for 3 characters");
     }
