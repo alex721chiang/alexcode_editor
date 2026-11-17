@@ -3225,7 +3225,8 @@ impl AlexCodeApp {
                 let mut close_idx = None;
                 let mut tab_action: Option<TabAction> = None;
                 let tab_count = self.tabs.len();
-                egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
+                // 不接拖曳捲動：拖曳要留給分頁（拖到分頁列外面開成獨立視窗）；捲動用滾輪
+                egui::ScrollArea::horizontal().auto_shrink([false, true]).drag_to_scroll(false).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         // 分割檢視另一欄顯示的分頁：細一點的強調色底線（有焦點的分頁照舊是粗線）
@@ -3243,8 +3244,25 @@ impl AlexCodeApp {
                             let pad = egui::vec2(16.0, 7.0);
                             let close_w = 18.0;
                             let size = egui::vec2(galley.size().x + pad.x * 2.0 + close_w, galley.size().y + pad.y * 2.0);
-                            let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+                            let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
                             let hovered = resp.hovered();
+                            // 拖曳分頁：指標旁邊跟著分頁名稱；在分頁列外面放開就把分頁開成獨立視窗（主視窗也留著）
+                            if resp.dragged() {
+                                if let Some(pp) = ui.input(|inp| inp.pointer.hover_pos()) {
+                                    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("alexcode-tab-drag"));
+                                    let gp = ui.ctx().layer_painter(layer);
+                                    let at = pp + egui::vec2(14.0, 10.0);
+                                    let g = gp.layout_no_wrap(title.clone(), FontId::proportional(13.0), c.fg);
+                                    gp.rect(Rect::from_min_size(at, g.size()).expand2(egui::vec2(8.0, 4.0)), 3.0, c.panel, Stroke::new(1.0_f32, c.accent));
+                                    gp.galley(at, g, c.fg);
+                                }
+                            }
+                            if resp.drag_stopped() {
+                                let out = ui.input(|inp| inp.pointer.interact_pos()).is_some_and(|pp| !full.expand(24.0).contains(pp));
+                                if out {
+                                    tab_action = Some(TabAction::Detach(i));
+                                }
+                            }
                             let p = ui.painter();
                             if is_active {
                                 let grad = Rect::from_min_max(
@@ -3331,7 +3349,7 @@ impl AlexCodeApp {
                                 pick(ui, i + 1 < tab_count, "關閉右側分頁", TabAction::CloseRight(i));
                                 pick(ui, true, "全部關閉", TabAction::CloseAll);
                                 ui.separator();
-                                pick(ui, true, "在新視窗檢視（唯讀）", TabAction::Detach(i));
+                                pick(ui, true, "在新視窗開啟", TabAction::Detach(i));
                             });
                         }
                     });
@@ -4716,7 +4734,7 @@ impl AlexCodeApp {
         (drawn, out.state.offset)
     }
 
-    /// 在獨立視窗裡唯讀顯示的分頁（分頁右鍵「在新視窗檢視」）。每個分頁一個作業系統視窗（egui 的 viewport），
+    /// 在獨立視窗裡顯示、可編輯的分頁（分頁右鍵「在新視窗開啟」，或把分頁拖到分頁列外面）。每個分頁一個作業系統視窗（egui 的 viewport），
     /// 不支援多視窗的環境（例如測試）改畫成主視窗裡的浮動視窗。分頁關掉或視窗被關掉時就不再顯示
     fn detached_windows(&mut self, ctx: &egui::Context, c: &Colors, pal: &crate::theme::Palette) {
         let alive: Vec<u64> = self.tabs.iter().map(|b| b.id).collect();
@@ -11625,6 +11643,41 @@ mod tests {
         let st = egui::text_edit::TextEditState::load(&ctx, editor_id).expect("main editor state");
         let r = st.cursor.char_range().expect("main editor cursor");
         assert_eq!(r.primary.index, 6, "the main editor's cursor follows the window");
+    }
+
+    #[test]
+    fn dragging_a_tab_out_of_the_tab_bar_opens_its_window() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\n");
+        let mut b = EditorBuffer::from_text("beta one\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        let out = frame(&mut app, &ctx, vec![]);
+        let tab = |out: &egui::FullOutput, name: &str| painted_lines(out).into_iter().find(|l| l.0 == name).map(|l| l.1).unwrap();
+        let (t0, t1) = (tab(&out, "t.rs"), tab(&out, "b.rs"));
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2| {
+            frame(app, &ctx, vec![Event::PointerMoved(from)]);
+            frame(app, &ctx, vec![button(from, true)]);
+            frame(app, &ctx, vec![Event::PointerMoved(from + (to - from) * 0.5)]);
+            let out = frame(app, &ctx, vec![Event::PointerMoved(to)]);
+            frame(app, &ctx, vec![button(to, false)]);
+            frame(app, &ctx, vec![]);
+            out
+        };
+        // 在分頁列裡拖一小段：不開視窗
+        drag(&mut app, t1.center(), t1.center() + egui::vec2(30.0, 2.0));
+        assert!(app.detached.is_empty(), "a short drag inside the tab bar does nothing");
+        // 拖到分頁列外面放開：那個分頁開成獨立視窗；拖的時候指標旁邊跟著分頁名稱
+        let out = drag(&mut app, t0.center(), Pos2::new(t0.center().x + 200.0, 400.0));
+        assert!(
+            painted_lines(&out).iter().any(|l| l.0 == "t.rs" && l.1.top() > t0.bottom() + 100.0),
+            "the dragged tab's name follows the pointer"
+        );
+        assert_eq!(app.detached, vec![app.tabs[0].id]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(painted_lines(&out).iter().any(|l| l.0 == "t.rs — AlexCode"), "the window is shown");
+        assert_eq!(app.tabs.len(), 2, "the tab stays in the main window too");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
