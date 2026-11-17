@@ -168,3 +168,27 @@ fn replace_range_stores_only_the_lines_it_touched() {
     assert_eq!(b.lines.len(), 100_001);
     assert!(!b.undo());
 }
+#[test]
+fn replace_columns_edits_every_line_as_one_undo_step() {
+    let mut b = buf("abcdef\nab\n\u{4e2d}\u{6587}xyz\nkeep");
+    // (line, start, end) per line; zero-width ranges insert, short lines are clamped to their end
+    b.replace_columns(&[(0, 2, 4), (1, 2, 2), (2, 1, 3)], "XY", true);
+    assert_eq!(b.edit_text(), "abXYef\nabXY\n\u{4e2d}XYyz\nkeep");
+    assert_eq!(b.selections[0].head, pos(2, 3), "the cursor ends after the text on the last line");
+    assert!(b.modified);
+    // deleting (empty text); a range past the end of a line is clamped
+    b.replace_columns(&[(0, 1, 2), (1, 9, 9)], "", false);
+    assert_eq!(b.edit_text(), "aXYef\nabXY\n\u{4e2d}XYyz\nkeep");
+    // nothing changes: no undo record
+    let rev = b.revision();
+    b.replace_columns(&[(1, 0, 0)], "", false);
+    assert_eq!(b.revision(), rev);
+
+    assert!(b.undo());
+    assert_eq!(b.edit_text(), "abXYef\nabXY\n\u{4e2d}XYyz\nkeep");
+    assert!(b.undo(), "the edit on three lines is one undo step");
+    assert_eq!(b.edit_text(), "abcdef\nab\n\u{4e2d}\u{6587}xyz\nkeep");
+    assert!(!b.modified);
+    assert!(b.redo());
+    assert_eq!(b.edit_text(), "abXYef\nabXY\n\u{4e2d}XYyz\nkeep");
+}

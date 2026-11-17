@@ -276,6 +276,37 @@ impl EditorBuffer {
         self.record_edit(start.line, removed, inserted, typing);
     }
 
+    /// 矩形選取的編輯：把每一行的 `(行, 起欄, 迄欄)`（字元欄，超出行尾的會修正）換成同一段單行文字 `text`，
+    /// 只記一筆復原紀錄（涵蓋第一行到最後一行）。游標放在最後一個範圍換上的文字結尾。
+    pub fn replace_columns(&mut self, ranges: &[(usize, usize, usize)], text: &str, typing: bool) {
+        let last = self.lines.len().saturating_sub(1);
+        let ranges: Vec<(usize, usize, usize)> = ranges.iter().filter(|r| r.0 <= last).copied().collect();
+        let (Some(l0), Some(l1)) = (ranges.iter().map(|r| r.0).min(), ranges.iter().map(|r| r.0).max()) else {
+            return;
+        };
+        let text: String = text.chars().filter(|&c| c != '\n' && c != '\r').collect();
+        let n = text.chars().count();
+        let removed = self.lines[l0..=l1].to_vec();
+        let mut cursor = None;
+        for &(line, a, b) in &ranges {
+            let s = &mut self.lines[line];
+            let len = s.chars().count();
+            let (a, b) = (a.min(b).min(len), a.max(b).min(len));
+            let byte_at = |s: &str, col: usize| s.char_indices().nth(col).map_or(s.len(), |(i, _)| i);
+            let (ba, bb) = (byte_at(s, a), byte_at(s, b));
+            s.replace_range(ba..bb, &text);
+            cursor = Some(Position { line, col: a + n });
+        }
+        if let Some(p) = cursor {
+            self.selections = vec![Selection::point(p)];
+        }
+        let inserted = self.lines[l0..=l1].to_vec();
+        if removed == inserted {
+            return;
+        }
+        self.record_edit(l0, removed, inserted, typing);
+    }
+
     /// 把一筆修改（`start` 起的 `removed` 換成了 `inserted`，`self.lines` 已經是修改後的內容）記進復原紀錄
     fn record_edit(&mut self, start: usize, removed: Vec<String>, inserted: Vec<String>, typing: bool) {
         let prefix = start;
