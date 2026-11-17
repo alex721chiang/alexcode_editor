@@ -4622,6 +4622,7 @@ impl AlexCodeApp {
         // 尋找列開著時與編輯區用同樣的條件標示命中
         let finder = (self.show_find_bar && !self.find_bar_text.is_empty()).then(|| Finder::new(&self.find_bar_text, &self.find_opts));
         let head = buf.selections.first().map(|s| s.head);
+        let sel_range = buf.selections.first().filter(|s| s.anchor != s.head).map(|s| (s.start(), s.end()));
         // 語言伺服器的診斷：行號以那一行最嚴重的診斷上色，範圍畫波浪線（與編輯區相同）
         let diags = buf.file_path.as_deref().map(|p| self.lsp.diagnostics(p)).unwrap_or_default();
         let mut diag_sev: HashMap<usize, i32> = HashMap::new();
@@ -4675,6 +4676,19 @@ impl AlexCodeApp {
                         }
                     }
                     let at = Pos2::new(rect.left() + gutter_w + 10.0, rect.top());
+                    // 選取範圍的底色（跨到下一行的部分在行尾多畫半個字寬，表示換行也選到了）
+                    if let Some((s, e)) = sel_range.filter(|(s, e)| s.line <= ln && ln <= e.line) {
+                        let n = shown.chars().count();
+                        let from = if ln == s.line { s.col.min(n) } else { 0 };
+                        let to = if ln == e.line { e.col.min(n) } else { n };
+                        let x = |ci: usize| g.pos_from_cursor(&g.from_ccursor(CCursor::new(ci))).left();
+                        let extra = if ln < e.line { char_w * 0.5 } else { 0.0 };
+                        let (x0, x1) = (x(from), x(to) + extra);
+                        if x1 > x0 {
+                            let r = Rect::from_min_max(Pos2::new(at.x + x0, rect.top()), Pos2::new(at.x + x1, rect.top() + row_h));
+                            ui.painter().rect_filled(r, 0.0, c.sel_bg);
+                        }
+                    }
                     // 那個分頁的游標位置：一條細線（沒有焦點，不閃爍）
                     if let Some(h) = head.filter(|h| h.line == ln) {
                         let ci = h.col.min(shown.chars().count());
@@ -4767,20 +4781,50 @@ impl AlexCodeApp {
         // 右邊與下面留給捲軸
         let hit = Rect::from_min_max(area.min, (area.max - egui::vec2(14.0, 14.0)).max(area.min));
         let id = egui::Id::new(("alexcode-detached-edit", tab_id));
-        let resp = ui.interact(hit, id, Sense::click());
+        let resp = ui.interact(hit, id, Sense::click_and_drag());
+        let before = (self.tabs[idx].revision(), self.tabs[idx].selections.first().copied());
+        // 指標位置換成 (行, 欄)：在最後一行下面就算最後一行
+        let pos_at = |p: Pos2| {
+            rows.iter().rev().find(|(_, at, _)| at.y <= p.y).or(rows.first()).map(|(ln, at, g)| Position {
+                line: *ln,
+                col: g.cursor_from_pos(p - *at).ccursor.index,
+            })
+        };
         let pressed = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
+        let pointer = ui.input(|i| i.pointer.interact_pos());
         if pressed || resp.clicked() {
             resp.request_focus();
-            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-                if let Some((ln, at, g)) = rows.iter().rev().find(|(_, at, _)| at.y <= p.y).or(rows.first()) {
-                    let col = g.cursor_from_pos(p - *at).ccursor.index;
-                    self.tabs[idx].selections = vec![Selection::point(Position { line: *ln, col })];
-                }
+            if let Some(pos) = pointer.and_then(pos_at) {
+                let buf = &mut self.tabs[idx];
+                // Shift+點擊延伸選取，否則從這裡重新開始
+                let anchor = match buf.selections.first() {
+                    Some(s) if ui.input(|i| i.modifiers.shift) => s.anchor,
+                    _ => pos,
+                };
+                buf.selections = vec![Selection { anchor, head: pos }];
+            }
+        } else if resp.dragged() {
+            if let (Some(pos), Some(s)) = (pointer.and_then(pos_at), self.tabs[idx].selections.first_mut()) {
+                s.head = pos;
             }
         }
-        if !ui.memory(|m| m.has_focus(id)) {
-            return;
+        if ui.memory(|m| m.has_focus(id)) {
+            self.detached_keys(ui, idx, id);
         }
+        // 同一個分頁也是主視窗目前的分頁：主視窗編輯區的游標跟上（不搶焦點）
+        let after = (self.tabs[idx].revision(), self.tabs[idx].selections.first().copied());
+        if after != before && idx == self.active_tab_idx {
+            if let Some(s) = after.1 {
+                let buf = &self.tabs[idx];
+                let (a, b) = (Self::char_index_of(buf, s.anchor.line, s.anchor.col), Self::char_index_of(buf, s.head.line, s.head.col));
+                self.pending_select = Some((a, b));
+                self.select_keeps_focus = true;
+            }
+        }
+    }
+
+    /// 獨立視窗有鍵盤焦點時的按鍵：編輯、移動游標（按著 Shift 時延伸選取）、剪貼簿、復原
+    fn detached_keys(&mut self, ui: &mut egui::Ui, idx: usize, id: egui::Id) {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(id, egui::EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: false })
         });
@@ -4792,9 +4836,17 @@ impl AlexCodeApp {
             let n = buf.lines.len();
             let len = |b: &EditorBuffer, l: usize| b.line_len(l);
             let at = |line, col| Position { line, col };
-            let go = |b: &mut EditorBuffer, p: Position| b.selections = vec![Selection::point(p)];
+            let shift = matches!(e, egui::Event::Key { modifiers, .. } if modifiers.shift);
+            // 移動游標；按著 Shift 時起點不動、延伸選取
+            let go = |b: &mut EditorBuffer, p: Position| b.selections = vec![Selection { anchor: if shift { a } else { p }, head: p }];
             match e {
                 egui::Event::Text(t) if !t.is_empty() => buf.replace_range(a, h, &t, true),
+                egui::Event::Copy if a != h => ui.ctx().copy_text(Self::selection_text(buf, sel)),
+                egui::Event::Cut if a != h => {
+                    ui.ctx().copy_text(Self::selection_text(buf, sel));
+                    buf.replace_range(a, h, "", false);
+                }
+                egui::Event::Paste(t) if !t.is_empty() => buf.replace_range(a, h, &t, false),
                 egui::Event::Key { key, pressed: true, modifiers, .. } => match key {
                     Key::Z if modifiers.command && modifiers.shift => {
                         buf.redo();
@@ -11504,6 +11556,75 @@ mod tests {
         let texts: Vec<String> = painted_lines(&out).into_iter().map(|l| l.0).collect();
         assert!(texts.iter().any(|t| t == &app.tabs[0].lines[0]), "the window shows the buffer: {texts:?}");
         assert_eq!(app.active_tab_idx, 1, "the main window stays on its own tab");
+    }
+
+    #[test]
+    fn the_detached_window_selects_copies_and_pastes() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        app.active_tab_idx = 1;
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let one = painted_lines(&out).into_iter().find(|l| l.0 == "alpha one").map(|l| l.1).unwrap();
+        click(&mut app, &ctx, Pos2::new(one.left() + 1.0, one.center().y));
+        assert_eq!(cursor(&app), (0, 0));
+        // Shift+End / Shift+方向鍵擴充選取；Ctrl+C 複製選到的文字
+        let shift = |k| key(k, Modifiers::SHIFT);
+        frame(&mut app, &ctx, vec![shift(Key::End)]);
+        assert_eq!(frame(&mut app, &ctx, vec![Event::Copy]).platform_output.copied_text, "alpha one");
+        frame(&mut app, &ctx, vec![shift(Key::ArrowDown)]);
+        assert_eq!(app.tabs[0].selections[0].anchor, Position { line: 0, col: 0 }, "the anchor stays put");
+        assert_eq!(frame(&mut app, &ctx, vec![Event::Copy]).platform_output.copied_text, "alpha one\nalpha two");
+        // 選取的範圍畫出底色
+        let out = frame(&mut app, &ctx, vec![]);
+        let pal = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud());
+        fn walk(shape: &Shape, fill: Color32, found: &mut Vec<Rect>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, found)),
+                Shape::Rect(r) if r.fill == fill => found.push(r.rect),
+                _ => {}
+            }
+        }
+        let mut sel = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, c.sel_bg, &mut sel));
+        assert!(sel.iter().any(|r| r.center().y > one.top() && r.center().y < one.bottom()), "selection is shaded: {sel:?}");
+        // 剪下、貼上
+        let out = frame(&mut app, &ctx, vec![Event::Cut]);
+        assert_eq!(out.platform_output.copied_text, "alpha one\nalpha two");
+        assert_eq!(app.tabs[0].lines, ["", ""]);
+        frame(&mut app, &ctx, vec![Event::Paste("hello".into())]);
+        assert_eq!(app.tabs[0].lines[0], "hello");
+        assert_eq!(cursor(&app), (0, 5));
+        // 滑鼠拖曳選取
+        let out = frame(&mut app, &ctx, vec![]);
+        let hello = painted_lines(&out).into_iter().find(|l| l.0 == "hello").map(|l| l.1).unwrap();
+        let (p0, p1) = (Pos2::new(hello.left() + 1.0, hello.center().y), Pos2::new(hello.right() + 30.0, hello.center().y));
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&mut app, &ctx, vec![Event::PointerMoved(p0)]);
+        frame(&mut app, &ctx, vec![button(p0, true)]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(p0.x + 20.0, p0.y))]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(p1)]);
+        frame(&mut app, &ctx, vec![button(p1, false)]);
+        assert_eq!(frame(&mut app, &ctx, vec![Event::Copy]).platform_output.copied_text, "hello", "dragging selects");
+        // 同一個分頁也在主視窗時，主視窗編輯區的游標跟著獨立視窗走
+        app.active_tab_idx = 0;
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let hello = painted_lines(&out).into_iter().rev().find(|l| l.0 == "hello").map(|l| l.1).unwrap();
+        click(&mut app, &ctx, Pos2::new(hello.right() + 30.0, hello.center().y));
+        frame(&mut app, &ctx, vec![Event::Text("!".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[0], "hello!");
+        let editor_id = egui::Id::new(("alexcode-editor", 0usize, String::from("t.rs")));
+        let st = egui::text_edit::TextEditState::load(&ctx, editor_id).expect("main editor state");
+        let r = st.cursor.char_range().expect("main editor cursor");
+        assert_eq!(r.primary.index, 6, "the main editor's cursor follows the window");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
