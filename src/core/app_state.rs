@@ -27,6 +27,16 @@ pub struct AppState {
     pub auto_pair: bool,
     /// 設定對話框的內容；None = 由沒有設定對話框的舊版本存的檔（沿用上面的 `font_size` / `auto_pair`）
     pub config: Option<EditorConfig>,
+    /// 分割檢視：另一欄顯示的檔案、有焦點的是不是右欄、左欄佔的寬度比例；None = 沒有分割
+    pub split: Option<SplitState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplitState {
+    pub other_file: String,
+    pub right_active: bool,
+    pub ratio: f32,
 }
 
 impl AppState {

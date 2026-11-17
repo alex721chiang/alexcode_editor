@@ -1313,6 +1313,15 @@ impl AlexCodeApp {
                 theme: self.theme_mgr.current_theme_name().to_string(),
                 ..self.config.clone()
             }),
+            // 另一欄的分頁是存過的檔案時才記（新檔沒有路徑可以還原）
+            split: self.split.as_ref().and_then(|s| {
+                let other_file = self.tabs.iter().find(|b| b.id == s.other)?.file_path.clone()?;
+                Path::new(&other_file).is_absolute().then_some(crate::core::app_state::SplitState {
+                    other_file,
+                    right_active: s.right_active,
+                    ratio: s.ratio,
+                })
+            }),
         }
     }
 
@@ -1351,6 +1360,21 @@ impl AlexCodeApp {
         self.recent_files = recent;
         if let Some(i) = st.active_file.and_then(|a| self.tabs.iter().position(|b| b.file_path.as_deref() == Some(a.as_str()))) {
             self.active_tab_idx = i;
+        }
+        // 分割檢視：另一欄的檔案有重新開起來才還原
+        if let Some(sp) = st.split {
+            if let Some(b) = self.tabs.iter().find(|b| b.file_path.as_deref() == Some(sp.other_file.as_str())) {
+                self.split = Some(SplitView {
+                    other: b.id,
+                    right_active: sp.right_active,
+                    rows: Vec::new(),
+                    git: ((0, 0, 0), HashMap::new()),
+                    offset: Vec2::ZERO,
+                    pending: None,
+                    md: MarkdownViewState::default(),
+                    ratio: if sp.ratio.is_finite() { sp.ratio.clamp(0.1, 0.9) } else { 0.5 },
+                });
+            }
         }
     }
 
@@ -11046,6 +11070,56 @@ mod tests {
         }
         frame(&mut app, &ctx, vec![]);
         assert!(app.split_divider_x().unwrap() > 100.0);
+    }
+
+    #[test]
+    fn split_view_is_saved_and_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        let (a, b) = (write("a.rs", "fn a() {}"), write("b.rs", "fn b() {}"));
+        let state_file = dir.path().join("cfg").join("state.json");
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.open_path(&a);
+        app.open_path(&b);
+        let ia = app.tabs.iter().position(|t| t.file_path.as_deref() == Some(a.to_str().unwrap())).unwrap();
+        let ib = app.tabs.iter().position(|t| t.file_path.as_deref() == Some(b.to_str().unwrap())).unwrap();
+        // b 在左欄（有焦點），a 在右欄（另一欄），左欄佔 30%
+        app.active_tab_idx = ia;
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = ib;
+        if let Some(s) = app.split.as_mut() {
+            s.right_active = false;
+            s.ratio = 0.3;
+        }
+        app.persist_state();
+
+        let mut app2 = AlexCodeApp::new();
+        app2.apply_state(AppState::load(&state_file).unwrap());
+        let s = app2.split.as_ref().expect("the split is restored");
+        let other = app2.tabs.iter().find(|t| t.id == s.other).and_then(|t| t.file_path.clone());
+        assert_eq!(other.as_deref(), a.to_str(), "the other pane shows a.rs again");
+        assert_eq!(app2.tabs[app2.active_tab_idx].file_path.as_deref(), b.to_str());
+        assert!(!s.right_active);
+        assert!((s.ratio - 0.3).abs() < 1e-6);
+
+        // 不分割時存的檔不還原分割；另一欄的檔案已經不存在時也不還原
+        app.run_cmd(Cmd::SplitEditor);
+        assert!(app.split.is_none());
+        app.persist_state();
+        let mut app3 = AlexCodeApp::new();
+        app3.apply_state(AppState::load(&state_file).unwrap());
+        assert!(app3.split.is_none());
+        app.run_cmd(Cmd::SplitEditor);
+        app.persist_state();
+        std::fs::remove_file(&b).unwrap();
+        let mut app4 = AlexCodeApp::new();
+        app4.apply_state(AppState::load(&state_file).unwrap());
+        assert!(app4.split.is_none(), "the other pane's file is gone");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
