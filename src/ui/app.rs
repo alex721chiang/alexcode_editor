@@ -257,6 +257,8 @@ pub struct AlexCodeApp {
     split_mid: Option<f32>,
     /// 在獨立視窗裡顯示的分頁（分頁 id）
     detached: Vec<u64>,
+    /// 各獨立視窗的 Git 標記快取：((revision, HEAD 指標), 標記)
+    detached_git: HashMap<u64, DetachedGit>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -913,6 +915,9 @@ struct SplitView {
 /// 一般編輯區的文字在捲動區裡比另一欄多一段上邊界（TextEdit 的 margin）：換欄時捲動位置要差這麼多，同一行才會在同一個高度
 const SPLIT_TEXT_MARGIN_Y: f32 = 4.0;
 
+/// 一個獨立視窗的 Git 標記快取：((內容版本, HEAD 指標), 行號 → 標記)
+type DetachedGit = ((u64, usize), HashMap<usize, u8>);
+
 /// 矩形選取裡的一次編輯（每一行同時套用）
 enum BoxEdit {
     Text(String),
@@ -1183,6 +1188,7 @@ impl AlexCodeApp {
             split_drag: None,
             split_mid: None,
             detached: Vec::new(),
+            detached_git: HashMap::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -4701,10 +4707,23 @@ impl AlexCodeApp {
     fn detached_windows(&mut self, ctx: &egui::Context, c: &Colors, pal: &crate::theme::Palette) {
         let alive: Vec<u64> = self.tabs.iter().map(|b| b.id).collect();
         self.detached.retain(|id| alive.contains(id));
+        self.detached_git.retain(|id, _| alive.contains(id));
         let mut closed = Vec::new();
-        let empty = HashMap::new();
         for id in self.detached.clone() {
             let Some(idx) = self.tabs.iter().position(|b| b.id == id) else { continue };
+            // 獨立視窗的 Git 標記：內容或 HEAD 變了才重算
+            {
+                let b = &self.tabs[idx];
+                let head = self.git_head.get(&id).and_then(|h| h.as_ref());
+                let key = (b.revision(), head.map_or(0, |h| Arc::as_ptr(h) as usize));
+                let stale = self.detached_git.get(&id).is_none_or(|(k, _)| *k != key);
+                if stale {
+                    let marks = head.map(|h| diff_line_states(h, &b.lines, 800)).unwrap_or_default();
+                    self.detached_git.insert(id, (key, marks));
+                }
+            }
+            let empty = HashMap::new();
+            let git = self.detached_git.get(&id).map_or(&empty, |(_, m)| m);
             let title = format!("{} — AlexCode", Self::tab_title(&self.tabs[idx]));
             let vid = egui::ViewportId::from_hash_of(("alexcode-detached", id));
             let builder = egui::ViewportBuilder::default().with_title(title.clone()).with_inner_size([800.0, 600.0]);
@@ -4717,12 +4736,12 @@ impl AlexCodeApp {
                         .open(&mut open)
                         .default_size([600.0, 400.0])
                         .show(ctx, |ui| {
-                            let _ = this.split_preview(ui, idx, c, pal, None, &empty);
+                            let _ = this.split_preview(ui, idx, c, pal, None, git);
                         });
                     !open
                 } else {
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(c.panel)).show(ctx, |ui| {
-                        let _ = this.split_preview(ui, idx, c, pal, None, &empty);
+                        let _ = this.split_preview(ui, idx, c, pal, None, git);
                     });
                     ctx.input(|i| i.viewport().close_requested())
                 }
@@ -11338,6 +11357,37 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         assert!(app.detached.is_empty());
         assert!(!painted_lines(&out).iter().any(|l| l.0.contains("alpha one")));
+    }
+
+    #[test]
+    fn the_detached_window_shows_git_marks() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha ONE\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        app.active_tab_idx = 1;
+        let id = app.tabs[0].id;
+        app.git_head.insert(id, Some(Arc::new(vec!["alpha one".into(), "alpha two".into(), String::new()])));
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let pal = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud());
+        let line = |text: &str| painted_lines(&out).into_iter().find(|l| l.0 == text).map(|l| l.1).unwrap();
+        let (one, two) = (line("alpha ONE"), line("alpha two"));
+        fn walk(shape: &Shape, fill: Color32, found: &mut Vec<Rect>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, found)),
+                Shape::Rect(r) if r.fill == fill => found.push(r.rect),
+                _ => {}
+            }
+        }
+        let mut warn = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, c.warn, &mut warn));
+        let on = |r: &Rect, l: Rect| r.center().y > l.top() && r.center().y < l.bottom() && r.right() < l.left();
+        assert!(warn.iter().any(|r| on(r, one)), "the changed line has a modified bar: {warn:?}");
+        assert!(!warn.iter().any(|r| on(r, two)));
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
