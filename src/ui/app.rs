@@ -332,8 +332,8 @@ pub struct AlexCodeApp {
     /// 有未儲存修改、同時又被外部修改的分頁 id：等待使用者決定
     disk_conflict: Option<u64>,
 
-    // ---- 單一實例：其他實例交來的檔案 ----
-    incoming: Option<Receiver<Vec<PathBuf>>>,
+    // ---- 外部交來要開啟的檔案：單一實例（其他實例）、macOS 的 Finder 開檔（Apple 事件） ----
+    incoming: Vec<Receiver<Vec<PathBuf>>>,
 
     // ---- Git 行號區標記 ----
     /// 各分頁（依 id）在 HEAD 的內容；None = 不在 Git 儲存庫內或未追蹤
@@ -1323,7 +1323,7 @@ impl AlexCodeApp {
             watcher: None,
             disk_stamps: HashMap::new(),
             disk_conflict: None,
-            incoming: None,
+            incoming: Vec::new(),
             git_head: HashMap::new(),
             git_chan: unbounded(),
             git_marks: ((0, 0), HashMap::new()),
@@ -1398,9 +1398,9 @@ impl AlexCodeApp {
         app
     }
 
-    /// 接上單一實例的通道：之後其他實例交來的檔案會在本視窗開啟
-    pub fn set_incoming(&mut self, rx: Receiver<Vec<PathBuf>>) {
-        self.incoming = Some(rx);
+    /// 接上一條「要開啟的檔案」通道（單一實例、macOS 的 Finder 開檔）：之後送來的檔案會在本視窗開啟。可以接多條
+    pub fn add_incoming(&mut self, rx: Receiver<Vec<PathBuf>>) {
+        self.incoming.push(rx);
     }
 
     /// 已存檔（磁碟上有對應檔案）的分頁路徑
@@ -8030,7 +8030,7 @@ impl AlexCodeApp {
                 self.handle_disk_events(events);
             }
         }
-        let batches: Vec<Vec<PathBuf>> = self.incoming.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        let batches: Vec<Vec<PathBuf>> = self.incoming.iter().flat_map(|rx| rx.try_iter()).collect();
         for files in batches {
             for f in files {
                 self.open_path(&f);
@@ -8477,6 +8477,33 @@ mod tests {
         assert_eq!(app.project_root, dir.path(), "a pinned folder is not changed by opening files");
         assert_eq!(app.recent_files.len(), 2);
         assert!(app.recent_files[0].ends_with("b.txt"));
+    }
+
+    #[test]
+    fn files_from_every_incoming_channel_open_in_this_window() {
+        // 單一實例（其他實例交來的檔案）與 macOS 的 Finder 開檔（Apple 事件）各有一條通道，兩條都要接得上
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(&dir, "a.txt", "a");
+        let b = write(&dir, "b.txt", "b");
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        let (tx1, rx1) = unbounded();
+        let (tx2, rx2) = unbounded();
+        app.add_incoming(rx1);
+        app.add_incoming(rx2);
+        tx1.send(vec![a.clone()]).unwrap();
+        tx2.send(vec![b.clone()]).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        let open: Vec<String> = app.tabs.iter().filter_map(|t| t.file_path.clone()).collect();
+        for p in [&a, &b] {
+            let p = p.to_string_lossy().to_string();
+            assert!(open.contains(&p), "{p} should be open, tabs: {open:?}");
+        }
+        // 之後再送來的檔案也會開啟
+        let c = write(&dir, "c.txt", "c");
+        tx2.send(vec![c.clone()]).unwrap();
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[app.active_tab_idx].file_path.as_deref(), Some(c.to_string_lossy().as_ref()));
     }
 
     #[test]

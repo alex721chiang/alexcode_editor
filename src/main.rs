@@ -19,7 +19,7 @@ fn main() -> eframe::Result<()> {
         .map(|p| std::path::absolute(&p).unwrap_or(p))
         .collect();
     let waker: Arc<Mutex<Option<egui::Context>>> = Arc::default();
-    let mut incoming = None;
+    let mut incoming = Vec::new();
     let mut _guard = None;
     if !force_new {
         if let Some(dir) = alexcode::core::config_dir() {
@@ -32,12 +32,25 @@ fn main() -> eframe::Result<()> {
             match acquire(&dir, &files, wake) {
                 Ok(Instance::Forwarded) => return Ok(()),
                 Ok(Instance::Primary(rx, guard)) => {
-                    incoming = Some(rx);
+                    incoming.push(rx);
                     _guard = Some(guard);
                 }
                 Err(_) => {} // 無法建立通道：照常啟動，只是沒有單一實例功能
             }
         }
+    }
+
+    // macOS：Finder 開檔是送 Apple 事件，不是命令列參數（程式已開著時也一樣送給現有的程式）
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let w = waker.clone();
+        alexcode::core::macos_open::install(tx, move || {
+            if let Some(ctx) = w.lock().ok().and_then(|g| g.clone()) {
+                ctx.request_repaint();
+            }
+        });
+        incoming.push(rx);
     }
 
     // 載入原版龍形圖示作為視窗圖示（與原版 Qt 的 a.setWindowIcon(":/icon.png") 一致）
@@ -65,8 +78,8 @@ fn main() -> eframe::Result<()> {
                 *g = Some(cc.egui_ctx.clone());
             }
             let mut app = AlexCodeApp::with_context(cc);
-            if let Some(rx) = incoming {
-                app.set_incoming(rx);
+            for rx in incoming {
+                app.add_incoming(rx);
             }
             Ok(Box::new(app))
         }),

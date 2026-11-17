@@ -3,6 +3,8 @@ pub mod config;
 pub mod dir_listing;
 pub mod file_watch;
 pub mod hot_exit;
+#[cfg(target_os = "macos")]
+pub mod macos_open;
 pub mod single_instance;
 pub mod path_kind;
 pub mod shell_open;

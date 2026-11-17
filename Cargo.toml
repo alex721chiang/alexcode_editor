@@ -47,6 +47,18 @@ portable-pty = "0.9.0"
 # Remote AI completion: blocking HTTP(S) client used on a background thread (rustls, no system TLS needed)
 ureq = "2.12"
 
+# macOS：接 Finder 開檔時送來的 Apple 事件（winit 0.30 沒有處理）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSAppleEventDescriptor",
+    "NSAppleEventManager",
+    "NSNotification",
+    "NSString",
+    "NSURL",
+] }
+
 [dev-dependencies]
 tempfile = "3.10"
 
