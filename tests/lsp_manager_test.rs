@@ -434,3 +434,45 @@ fn real_clangd_describes_symbols_on_hover() {
     println!("after {:?}:\n{shown}", t0.elapsed());
     assert!(shown.contains("twice"), "the hover names the function");
 }
+
+#[test]
+#[ignore]
+fn real_clangd_completes_names() {
+    // cargo test --test lsp_manager_test real_clangd -- --ignored --nocapture：裝了 clangd 才有意義
+    let dir = tempfile::tempdir().unwrap();
+    let c = dir.path().join("complete.c");
+    let text = "struct point { int x_coord; int y_coord; };\nstatic int twice_value(int x) { return x * 2; }\n\nint main(void) {\n    struct point p = {0};\n    tw\n    p.\n}\n";
+    std::fs::write(&c, text).unwrap();
+    let path = c.to_string_lossy().into_owned();
+    let mut m = LspManager::new(dir.path().to_path_buf(), Box::new(spawn_server));
+    let docs = vec![OpenDoc { path: path.clone(), revision: 1 }];
+    assert!(pump(&mut m, &docs, &[text], 60, |m| m.status(ServerKind::Clangd) == Some(&LspStatus::Ready)));
+    m.sync(&docs, |_| text.to_string());
+    println!("trigger characters: {:?}", m.completion_triggers(&path));
+    assert!(m.completion_triggers(&path).contains('.'));
+    let mut ask = |line: i32, ch: i32, trigger: Option<char>| {
+        let params = alexcode::lsp::completion_params(&path, line, ch, trigger);
+        let r = m.request(&path, "textDocument/completion", params).unwrap();
+        let t0 = Instant::now();
+        let mut reply = None;
+        while reply.is_none() && t0.elapsed() < Duration::from_secs(30) {
+            m.sync(&docs, |_| text.to_string());
+            reply = m.take_reply(r);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let v = reply.expect("a reply").expect("not an error");
+        let (items, incomplete) = alexcode::lsp::extract_completion_items(&v, 200);
+        println!("after {:?}: {} items, incomplete {incomplete}", t0.elapsed(), items.len());
+        for it in items.iter().take(5) {
+            println!("  {:?} insert {:?} filter {:?} detail {:?}", it.label, it.insert, it.filter, it.detail);
+        }
+        items
+    };
+    // `tw` 後面（第 6 行第 6 個字元）：有 twice_value，插入的是純文字（沒有 snippet 的 ${…}）
+    let items = ask(5, 6, None);
+    let it = items.iter().find(|i| i.filter == "twice_value").expect("twice_value is offered");
+    assert!(it.insert.starts_with("twice_value") && !it.insert.contains('$'), "{:?}", it.insert);
+    // `p.` 後面：結構的欄位
+    let items = ask(6, 6, Some('.'));
+    assert!(items.iter().any(|i| i.filter == "x_coord") && items.iter().any(|i| i.filter == "y_coord"));
+}

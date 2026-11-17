@@ -6,7 +6,10 @@
 //! 免得伺服器一直等。介面每一幀呼叫 `sync`。
 
 use super::client::{LspClient, Waker};
-use super::protocol::{make_notification, make_request, make_response, parse_diagnostics, uri_from_path, uri_key, Diagnostic};
+use super::protocol::{
+    make_notification, make_request, make_response, parse_diagnostics, parse_server_capabilities, uri_from_path, uri_key,
+    Diagnostic,
+};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -115,6 +118,8 @@ struct Server {
     /// 送出、還在等回覆的請求，與已經收到的回覆（`Err` 是伺服器回的錯誤訊息）
     waiting: HashSet<i64>,
     replies: HashMap<i64, Result<Value, String>>,
+    /// 打了就要問補全的字元（initialize 回覆的 completionProvider.triggerCharacters）
+    triggers: String,
 }
 
 impl Server {
@@ -123,6 +128,7 @@ impl Server {
             client,
             status,
             init_id,
+            triggers: String::new(),
             docs: HashMap::new(),
             diags: HashMap::new(),
             waiting: HashSet::new(),
@@ -162,6 +168,9 @@ impl Server {
                         self.status = LspStatus::Failed(text);
                     } else if c.send_message(&make_notification("initialized", json!({}))).is_ok() {
                         self.status = LspStatus::Ready;
+                        if let Some(result) = msg.get("result") {
+                            self.triggers = parse_server_capabilities(result).completion_triggers;
+                        }
                     } else {
                         self.status = LspStatus::Failed("無法送出 initialized".into());
                     }
@@ -259,6 +268,14 @@ impl LspManager {
         None
     }
 
+    /// 負責 `path` 的伺服器的補全觸發字元（例如 `.`、`:`、`>`；伺服器沒就緒或沒有時是空的）
+    pub fn completion_triggers(&self, path: &str) -> &str {
+        ServerKind::for_path(path)
+            .and_then(|k| self.servers.get(&k))
+            .filter(|s| s.status == LspStatus::Ready)
+            .map_or("", |s| s.triggers.as_str())
+    }
+
     /// 不再需要這個回覆（之後收到就丟掉）
     pub fn forget(&mut self, req: RequestId) {
         if let Some(s) = self.servers.get_mut(&req.0) {
@@ -295,7 +312,9 @@ impl LspManager {
                     "capabilities": {
                         "textDocument": {
                             "synchronization": { "dynamicRegistration": false, "didSave": false },
-                            "publishDiagnostics": {}
+                            "publishDiagnostics": {},
+                            // 插入的是純文字：不要 snippet（`${1:x}` 這類佔位符）
+                            "completion": { "completionItem": { "snippetSupport": false }, "contextSupport": true }
                         },
                         "workspace": { "workspaceFolders": true, "configuration": true }
                     }

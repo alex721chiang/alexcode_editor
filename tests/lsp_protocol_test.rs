@@ -152,3 +152,35 @@ fn test_incremental_edit_computation() {
     assert_eq!(edit.start_line, 0);
     assert_eq!(apply_text_edits(old_text, &[edit]), new_text);
 }
+
+#[test]
+fn completion_items_prefer_text_edit_and_sort_by_sort_text() {
+    let v = json!({ "isIncomplete": true, "items": [
+        { "label": "zeta", "sortText": "2" },
+        { "label": " alpha", "filterText": "alpha", "sortText": "1", "detail": " int ",
+          "textEdit": { "range": {}, "newText": "alpha_text" } },
+        { "label": "snip", "insertText": "snip(${1:x})", "insertTextFormat": 2, "sortText": "3" },
+        { "label": "" }
+    ]});
+    let (items, incomplete) = extract_completion_items(&v, 10);
+    assert!(incomplete);
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels, ["alpha", "zeta", "snip"]);
+    assert_eq!((items[0].insert.as_str(), items[0].filter.as_str(), items[0].detail.as_str()), ("alpha_text", "alpha", "int"));
+    assert_eq!(items[1].insert, "zeta");
+    assert_eq!(items[2].insert, "snip(x)");
+    // 純陣列：不是 incomplete；最多 max 項（排序之後才截斷）
+    let (items, incomplete) = extract_completion_items(&json!([{ "label": "b" }, { "label": "a" }]), 1);
+    assert!(!incomplete);
+    assert_eq!(items[0].label, "a");
+    assert_eq!(items.len(), 1);
+    assert!(extract_completion_items(&json!(null), 10).0.is_empty());
+}
+
+#[test]
+fn completion_params_carry_the_trigger() {
+    let p = completion_params("C:/x/a.rs", 3, 7, Some('.'));
+    assert_eq!(p["position"], json!({ "line": 3, "character": 7 }));
+    assert_eq!(p["context"], json!({ "triggerKind": 2, "triggerCharacter": "." }));
+    assert_eq!(completion_params("C:/x/a.rs", 0, 0, None)["context"], json!({ "triggerKind": 1 }));
+}

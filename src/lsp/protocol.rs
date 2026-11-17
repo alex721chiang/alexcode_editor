@@ -310,6 +310,68 @@ pub fn extract_completions(result: &Value, max_items: usize) -> Vec<String> {
     out
 }
 
+/// 補全選單的一項
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionItem {
+    /// 選單上顯示的名稱（去掉前後空白）
+    pub label: String,
+    /// 接受時插入的文字（取代游標前已經打的那個字）：textEdit.newText > insertText > label
+    pub insert: String,
+    /// 依打過的字篩選時比對的文字（filterText，沒有時是 label）
+    pub filter: String,
+    /// 排序用（sortText，沒有時是 label）
+    pub sort: String,
+    /// 顯示在名稱右邊的說明（例如型別）
+    pub detail: String,
+}
+
+/// 解析 `textDocument/completion` 的回覆（CompletionItem[] 或 CompletionList），最多 `max_items` 項，
+/// 依 sortText 排序。第二個值是 isIncomplete（伺服器只給了一部分，再打字要重問）
+pub fn extract_completion_items(result: &Value, max_items: usize) -> (Vec<CompletionItem>, bool) {
+    let (items, incomplete) = if let Some(arr) = result.as_array() {
+        (arr, false)
+    } else if let Some(arr) = result["items"].as_array() {
+        (arr, result["isIncomplete"].as_bool().unwrap_or(false))
+    } else {
+        return (Vec::new(), false);
+    };
+    let mut out = Vec::new();
+    for v in items {
+        let label = v["label"].as_str().unwrap_or("").trim().to_string();
+        let mut insert = v["textEdit"]["newText"]
+            .as_str()
+            .or_else(|| v["insertText"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if insert.is_empty() {
+            insert = label.clone();
+        }
+        if v["insertTextFormat"].as_i64().unwrap_or(1) == 2 {
+            insert = strip_snippet_placeholders(&insert);
+        }
+        if label.is_empty() || insert.is_empty() {
+            continue;
+        }
+        let filter = v["filterText"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(&label).to_string();
+        let sort = v["sortText"].as_str().unwrap_or(&label).to_string();
+        let detail = v["detail"].as_str().unwrap_or("").trim().to_string();
+        out.push(CompletionItem { label, insert, filter, sort, detail });
+    }
+    out.sort_by(|a, b| a.sort.cmp(&b.sort));
+    out.truncate(max_items);
+    (out, incomplete)
+}
+
+/// `textDocument/completion` 的參數。`trigger` 是觸發的字元（打了它才問的）；None 表示手動叫出或打字時問的
+pub fn completion_params(path: &str, line: i32, character: i32, trigger: Option<char>) -> Value {
+    let mut p = text_document_position_params(path, line, character);
+    p["context"] = match trigger {
+        Some(c) => json!({ "triggerKind": 2, "triggerCharacter": c.to_string() }),
+        None => json!({ "triggerKind": 1 }),
+    };
+    p
+}
+
 /// ---- 定義解析 ----
 pub fn extract_definition(result: &Value) -> Option<(String, i32, i32)> {
     let loc = if result.is_object() {

@@ -29,7 +29,7 @@ use crate::git::{blame_contents, blame_status_text, diff_line_states, LineInfo, 
 use crate::git::{align_trimmed, change_starts, Row as DiffRow, RowType as DiffRowType};
 use crate::filter::{FilterEngine, FilterLogic};
 use crate::lsp::{
-    char_col_to_utf16, extract_definition, text_document_position_params, utf16_to_char_col, Diagnostic, Launcher,
+    char_col_to_utf16, completion_params, extract_completion_items, extract_definition, text_document_position_params, utf16_to_char_col, Diagnostic, Launcher,
     LspManager, LspStatus, OpenDoc, RequestId, ServerKind,
 };
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
@@ -228,6 +228,15 @@ pub struct AlexCodeApp {
     hover_want: Option<(String, usize, usize, HoverKey)>,
     hover_wait: Option<(RequestId, HoverKey)>,
     hover_text: Option<(HoverKey, String)>,
+    /// 自動完成：目前的選單、等著送出 / 已送出在等回覆的請求、要接受的項目（`items` 的索引）、
+    /// 按了 Ctrl+Space、上一幀選單畫在哪裡（點選單時編輯區會失去焦點，指標在選單上就不關閉）
+    comp: Option<CompletionMenu>,
+    comp_want: Option<CompletionReq>,
+    comp_wait: Option<(RequestId, CompletionReq)>,
+    comp_accept: Option<usize>,
+    comp_invoke: bool,
+    comp_rect: Option<Rect>,
+    comp_caret: Option<Rect>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -816,6 +825,46 @@ type HoverKey = (u64, u64, usize, usize);
 /// 指標在同一個字元上停這麼久才問語言伺服器（移動中不送請求）
 const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// 補全選單最多留幾項、一次顯示幾列
+const COMPLETION_MAX: usize = 200;
+const COMPLETION_ROWS: usize = 10;
+
+/// 名稱（識別字）裡的字元：補全以游標前連續的這些字元當作「打到一半的字」
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// `needle` 的字元依序出現在 `hay` 裡（不必相連）
+fn is_subsequence(needle: &str, hay: &str) -> bool {
+    let mut it = hay.chars();
+    needle.chars().all(|n| it.any(|h| h == n))
+}
+
+/// 語言伺服器的補全選單：第 `line` 行、從第 `start` 個字元開始的那個字（接受時取代游標前的這一段）
+struct CompletionMenu {
+    tab: u64,
+    line: usize,
+    start: usize,
+    items: Vec<crate::lsp::CompletionItem>,
+    /// 伺服器只給了一部分（isIncomplete）：再打字要重問
+    incomplete: bool,
+    /// 符合目前打過的字的項目（`items` 的索引），依顯示順序
+    shown: Vec<usize>,
+    /// 上一次篩選時打過的字（變了就選回第一項）
+    prefix: String,
+    selected: usize,
+}
+
+/// 一個補全請求：要問的位置（UTF-16）與回覆來了之後選單的位置
+struct CompletionReq {
+    path: String,
+    tab: u64,
+    line: usize,
+    start: usize,
+    utf16: usize,
+    trigger: Option<char>,
+}
+
 /// 語言伺服器的說明（通常是 Markdown）轉成要顯示的文字：拿掉程式碼區塊的 ``` 與分隔線
 fn hover_display_text(result: &serde_json::Value) -> String {
     let text = crate::lsp::extract_hover_text(result, 4000);
@@ -1048,6 +1097,13 @@ impl AlexCodeApp {
             hover_want: None,
             hover_wait: None,
             hover_text: None,
+            comp: None,
+            comp_want: None,
+            comp_wait: None,
+            comp_accept: None,
+            comp_invoke: false,
+            comp_rect: None,
+            comp_caret: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -2178,6 +2234,156 @@ impl AlexCodeApp {
                 self.hover_text = Some((key, reply.map(|v| hover_display_text(&v)).unwrap_or_default()));
             }
         }
+
+        // 自動完成：新的請求取代還在等的那一個；問不了、伺服器回錯誤或沒有項目時就是沒有選單（不在狀態列說明）
+        if let Some(req) = self.comp_want.take() {
+            if let Some((r, _)) = self.comp_wait.take() {
+                self.lsp.forget(r);
+            }
+            let params = completion_params(&req.path, req.line as i32, req.utf16 as i32, req.trigger);
+            if let Ok(r) = self.lsp.request(&req.path, "textDocument/completion", params) {
+                self.comp_wait = Some((r, req));
+            }
+        }
+        if let Some(reply) = self.comp_wait.as_ref().and_then(|(r, _)| self.lsp.take_reply(*r)) {
+            let (_, req) = self.comp_wait.take().unwrap();
+            let (items, incomplete) = reply.map(|v| extract_completion_items(&v, COMPLETION_MAX)).unwrap_or_default();
+            self.comp = (!items.is_empty()).then(|| CompletionMenu {
+                tab: req.tab,
+                line: req.line,
+                start: req.start,
+                items,
+                incomplete,
+                shown: Vec::new(),
+                prefix: String::new(),
+                selected: 0,
+            });
+        }
+    }
+
+    /// 程式碼編輯區每一幀最後呼叫（編輯與游標都已套用）：游標離開那個字就關閉選單；
+    /// 依打的字決定要不要問（Ctrl+Space、打名稱的字元而還沒有選單、伺服器的觸發字元），再依打過的字篩選
+    fn update_completion(&mut self, ctx: &egui::Context, idx: usize, changed: bool, typed: Option<char>) {
+        let invoke = std::mem::take(&mut self.comp_invoke);
+        let buf = &self.tabs[idx];
+        let Some(path) = buf.file_path.clone().filter(|p| ServerKind::for_path(p).is_some()) else {
+            self.comp = None;
+            return;
+        };
+        let sel = buf.selections[0];
+        let head = sel.head;
+        let line: Vec<char> = buf.lines.get(head.line).map(|l| l.chars().collect()).unwrap_or_default();
+        let col = head.col.min(line.len());
+        let mut word_start = col;
+        while word_start > 0 && is_ident_char(line[word_start - 1]) {
+            word_start -= 1;
+        }
+        let over_menu = ctx
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|p| self.comp_rect.is_some_and(|r| r.contains(p)));
+        if let Some(m) = &self.comp {
+            let ok = m.tab == buf.id
+                && m.line == head.line
+                && sel.anchor == sel.head
+                && col >= m.start
+                && line[m.start..col].iter().all(|&c| is_ident_char(c))
+                && (self.editor_focused || over_menu || self.comp_accept.is_some());
+            if !ok {
+                self.comp = None;
+            }
+        }
+        let mut want: Option<(usize, Option<char>)> = None;
+        if invoke {
+            want = Some((word_start, None));
+        } else if let Some(ch) = typed.filter(|_| changed) {
+            if is_ident_char(ch) {
+                match &self.comp {
+                    None if !line[word_start].is_ascii_digit() => want = Some((word_start, None)),
+                    Some(m) if m.incomplete => want = Some((m.start, None)),
+                    _ => {}
+                }
+            } else if self.lsp.completion_triggers(&path).contains(ch) {
+                self.comp = None;
+                want = Some((col, Some(ch)));
+            }
+        }
+        if let Some((start, trigger)) = want {
+            let utf16 = buf.lines.get(head.line).map_or(0, |l| char_col_to_utf16(l, col));
+            self.comp_want = Some(CompletionReq { path, tab: buf.id, line: head.line, start, utf16, trigger });
+            ctx.request_repaint();
+        }
+        // 篩選（不分大小寫）：開頭相同的在前，其次是第一個字相同、其餘字元依序出現的（例如 gtv → get_value）；
+        // 各自維持伺服器的順序
+        if let Some(m) = &mut self.comp {
+            let prefix: String = line[m.start..col].iter().collect::<String>().to_lowercase();
+            let (mut first, mut rest) = (Vec::new(), Vec::new());
+            for (i, it) in m.items.iter().enumerate() {
+                let f = it.filter.to_lowercase();
+                if f.starts_with(&prefix) {
+                    first.push(i);
+                } else if f.chars().next() == prefix.chars().next() && is_subsequence(&prefix, &f) {
+                    rest.push(i);
+                }
+            }
+            first.extend(rest);
+            m.shown = first;
+            if m.prefix != prefix {
+                m.prefix = prefix;
+                m.selected = 0;
+            }
+            m.selected = m.selected.min(m.shown.len().saturating_sub(1));
+            if m.shown.is_empty() && !m.incomplete {
+                self.comp = None;
+            }
+        }
+        if self.comp.is_none() {
+            self.comp_rect = None;
+        }
+    }
+
+    /// 在游標底下畫出補全選單；點一項就接受它（下一幀在編輯區套用）
+    fn completion_popup(&mut self, ctx: &egui::Context, c: &Colors, caret: Rect, font: &FontId) {
+        let Some(m) = self.comp.as_ref().filter(|m| !m.shown.is_empty()) else { return };
+        let first = m.selected.saturating_sub(COMPLETION_ROWS - 1);
+        let mut clicked = None;
+        let resp = egui::Area::new(egui::Id::new("lsp-completion"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(caret.left_bottom() + egui::vec2(0.0, 2.0))
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(220.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (k, &i) in m.shown.iter().enumerate().skip(first).take(COMPLETION_ROWS) {
+                        let it = &m.items[i];
+                        let r = ui
+                            .horizontal(|ui| {
+                                let label = egui::SelectableLabel::new(k == m.selected, RichText::new(&it.label).font(font.clone()));
+                                let r = ui.add(label);
+                                if !it.detail.is_empty() {
+                                    let mut d: String = it.detail.chars().take(60).collect();
+                                    if d.len() < it.detail.len() {
+                                        d.push('…');
+                                    }
+                                    ui.label(RichText::new(d).color(c.fg_dim2).small());
+                                }
+                                r
+                            })
+                            .inner;
+                        if r.clicked() {
+                            clicked = Some(i);
+                        }
+                    }
+                    if m.shown.len() > COMPLETION_ROWS {
+                        ui.label(RichText::new(format!("{} / {}", m.selected + 1, m.shown.len())).color(c.fg_dim2).small());
+                    }
+                });
+            });
+        self.comp_rect = Some(resp.response.rect);
+        if let Some(i) = clicked {
+            self.comp_accept = Some(i);
+            self.focus_editor = true;
+            ctx.request_repaint();
+        }
     }
 
     /// 程式碼編輯區每一幀呼叫：指標停在 `at`（行, 字元欄；不在文字上是 None）。
@@ -2461,6 +2667,30 @@ impl AlexCodeApp {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F2))) {
             self.run_cmd(Cmd::ToggleBookmark);
+        }
+        // 自動完成：Ctrl+Space 叫出選單；選單開著時上下鍵選擇、Enter / Tab 接受、Esc 關閉（這些鍵不交給編輯區）
+        if self.editor_focused {
+            let space = |m| KeyboardShortcut::new(m, Key::Space);
+            if ctx.input_mut(|i| i.consume_shortcut(&space(Modifiers::CTRL)) || i.consume_shortcut(&space(Modifiers::COMMAND))) {
+                self.comp_invoke = true;
+            }
+            if let Some(m) = self.comp.as_mut().filter(|m| !m.shown.is_empty()) {
+                let n = m.shown.len();
+                ctx.input_mut(|i| {
+                    if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
+                        m.selected = (m.selected + 1) % n;
+                    }
+                    if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
+                        m.selected = (m.selected + n - 1) % n;
+                    }
+                });
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Tab)) {
+                    self.comp_accept = Some(m.shown[m.selected]);
+                } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                    self.comp = None;
+                    self.focus_editor = true; // egui 收到 Esc 時會拿掉鍵盤焦點：留在編輯區
+                }
+            }
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.commit_md_edit();
@@ -4097,6 +4327,40 @@ impl AlexCodeApp {
         if std::mem::take(&mut self.focus_editor) {
             ui.ctx().memory_mut(|m| m.request_focus(editor_id));
         }
+        // 接受補全選單的一項：選取游標前已經打的那個字，再以輸入事件換成那一項（TextEdit 照一般輸入處理，一次復原）
+        let mut accepted = false;
+        if let Some(i) = self.comp_accept.take() {
+            let head = self.tabs[idx].selections[0].head;
+            let menu = self.comp.take().filter(|m| m.tab == self.tabs[idx].id && m.line == head.line && head.col >= m.start);
+            let state = egui::text_edit::TextEditState::load(ui.ctx(), editor_id);
+            if let (Some(m), Some(mut st)) = (menu, state) {
+                let back = head.col - m.start;
+                if let (Some(item), Some(r)) = (m.items.get(i), st.cursor.char_range().filter(|r| r.primary.index >= back)) {
+                    let ci = r.primary.index;
+                    st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(ci - back), CCursor::new(ci))));
+                    st.store(ui.ctx(), editor_id);
+                    let text = item.insert.clone();
+                    ui.input_mut(|inp| inp.events.push(egui::Event::Text(text)));
+                    accepted = true;
+                }
+            }
+        }
+        // 這一幀剛好打了一個字元（決定要不要問補全）：要在自動配對改寫事件之前看
+        let typed: Option<char> = if accepted {
+            None
+        } else {
+            ui.input(|i| {
+                let mut texts = i.events.iter().filter_map(|e| match e {
+                    egui::Event::Text(t) => Some(t),
+                    _ => None,
+                });
+                match (texts.next(), texts.next()) {
+                    (Some(t), None) if t.chars().count() == 1 => t.chars().next(),
+                    _ => None,
+                }
+            })
+        };
+        let mut caret: Option<Rect> = None;
         let find_current = if self.show_find_bar {
             self.find_current.filter(|(_, rev)| *rev == self.tabs[idx].revision()).map(|(r, _)| r)
         } else {
@@ -4214,7 +4478,7 @@ impl AlexCodeApp {
                     let gutter_idx = ui.painter().add(Shape::Noop);
 
                     let cursor_shift =
-                        if pair_enabled && was_focused { Self::auto_pair_events(ui, editor_id, &text) } else { 0 };
+                        if pair_enabled && was_focused && !accepted { Self::auto_pair_events(ui, editor_id, &text) } else { 0 };
                     if self.config.insert_spaces && was_focused {
                         Self::tab_to_spaces_events(ui, editor_id, &text, self.config.tab_size);
                     }
@@ -4271,6 +4535,7 @@ impl AlexCodeApp {
                     if let Some((r, col)) = cur_row {
                         new_cursor = Some((r, col));
                     }
+                    caret = output.cursor_range.map(|cr| galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2()));
                     // 游標移到固定標頭底下（例如按方向鍵往上）時多捲一點，讓游標所在行露出來
                     if let Some(cr) = output.cursor_range.filter(|_| sticky_h > 0.0 && !scroll_to_cursor) {
                         let r = galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2());
@@ -4567,6 +4832,15 @@ impl AlexCodeApp {
             self.goto_definition();
         }
         self.track_hover(ui.ctx(), idx, hover_char);
+        self.update_completion(ui.ctx(), idx, changed, typed);
+        // 點選單的那一幀編輯區可能已經失去焦點（沒有游標位置）：沿用上一幀的位置
+        let caret = caret.or(self.comp_caret.filter(|_| self.comp.is_some()));
+        self.comp_caret = caret;
+        match caret {
+            Some(r) if ui.clip_rect().intersects(r) => self.completion_popup(ui.ctx(), c, r, &font),
+            // 游標捲出畫面（或沒有焦點、沒有游標）時不畫選單
+            _ => {}
+        }
     }
 
     /// Log 篩選結果檢視（僅顯示符合的行，保留原始行號）
@@ -9255,6 +9529,188 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         frame(&mut app, &ctx, vec![]);
         assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn typing_shows_the_completion_menu_and_accepting_inserts_the_item() {
+        use serde_json::{json, Value};
+        use std::io::{Read, Write};
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&ctx, "fn main() {\n    😀\n}\n");
+        app.tabs[0].file_path = Some(dir.path().join("main.rs").to_string_lossy().into_owned());
+        // 假的伺服器：`.` 是觸發字元；補全一律回同樣的四項（sortText 決定順序，最後一項用 textEdit + filterText）
+        let asked = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let a = asked.clone();
+        let launcher: Launcher = Box::new(move |_, _| {
+            let (client_read, mut server_write) = std::io::pipe()?;
+            let (mut server_read, client_write) = std::io::pipe()?;
+            let a = a.clone();
+            std::thread::spawn(move || {
+                let mut frames = crate::lsp::Reader::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = server_read.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    frames.feed(&buf[..n]);
+                    for m in frames.take_messages() {
+                        let result = match m["method"].as_str() {
+                            Some("initialize") => {
+                                assert_eq!(m["params"]["capabilities"]["textDocument"]["completion"]["completionItem"]["snippetSupport"], json!(false));
+                                json!({ "capabilities": { "completionProvider": { "triggerCharacters": ["."] } } })
+                            }
+                            Some("textDocument/completion") => {
+                                a.lock().unwrap().push(m["params"].clone());
+                                let p = &m["params"]["position"];
+                                let range = json!({ "start": p, "end": p });
+                                json!({ "isIncomplete": false, "items": [
+                                    { "label": "helper_two", "sortText": "b" },
+                                    { "label": "other", "sortText": "c" },
+                                    { "label": "helper_one", "detail": "fn() -> u32", "sortText": "a" },
+                                    { "label": " helper_three", "filterText": "helper_three", "sortText": "d",
+                                      "textEdit": { "range": range, "newText": "helper_three" } }
+                                ]})
+                            }
+                            _ => continue,
+                        };
+                        let _ = server_write.write_all(&crate::lsp::frame(&json!({ "jsonrpc": "2.0", "id": m["id"], "result": result })));
+                    }
+                }
+            });
+            Ok(crate::lsp::LspClient::from_io(client_read, client_write))
+        });
+        app.lsp = LspManager::new(dir.path().to_path_buf(), launcher);
+        let pump = |app: &mut AlexCodeApp, what: &str, done: &dyn Fn(&egui::FullOutput) -> bool| {
+            let end = Instant::now() + Duration::from_secs(10);
+            loop {
+                let out = frame(app, &ctx, vec![]);
+                if done(&out) {
+                    return out;
+                }
+                assert!(Instant::now() < end, "{what}; painted: {:?}", painted_texts(&out));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let shown = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t == s);
+        let line1 = |app: &AlexCodeApp| app.tabs[0].lines[1].clone();
+        let head = |app: &AlexCodeApp| {
+            let h = app.tabs[0].selections[0].head;
+            (h.line, h.col)
+        };
+        let end = Instant::now() + Duration::from_secs(10);
+        while app.lsp.status(ServerKind::RustAnalyzer) != Some(&LspStatus::Ready) && Instant::now() < end {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // 游標放在表情符號後面（第 2 行第 5 個字元）
+        app.pending_select = Some((17, 17));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(head(&app), (1, 5));
+
+        // 打一個字：送出補全請求（UTF-16：4 個空白 + 表情符號 2 個單位 + h = 7），選單只列出符合 "h" 的項目，依 sortText 排序
+        frame(&mut app, &ctx, vec![Event::Text("h".into())]);
+        let out = pump(&mut app, "the menu appears after typing", &|o| shown(o, "helper_one"));
+        assert!(shown(&out, "helper_two") && shown(&out, "helper_three") && shown(&out, "fn() -> u32"));
+        assert!(!shown(&out, "other"), "items that do not match the typed prefix are filtered out");
+        let q = asked.lock().unwrap()[0].clone();
+        assert_eq!(q["textDocument"]["uri"], json!(crate::lsp::uri_from_path(app.tabs[0].file_path.as_deref().unwrap())));
+        assert_eq!(q["position"], json!({ "line": 1, "character": 7 }));
+        assert_eq!(q["context"]["triggerKind"], json!(1));
+        let y = |out: &egui::FullOutput, s: &str| painted_lines(out).into_iter().find(|l| l.0 == s).unwrap().1.top();
+        assert!(y(&out, "helper_one") < y(&out, "helper_two") && y(&out, "helper_two") < y(&out, "helper_three"));
+
+        // 再打一個字：在已經收到的清單裡篩選，不重問
+        frame(&mut app, &ctx, vec![Event::Text("e".into())]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "helper_one") && shown(&out, "helper_two"));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+
+        // 下鍵選第二項、Enter 接受：打過的 "he" 換成完整的名稱，不插入換行
+        frame(&mut app, &ctx, vec![key(Key::ArrowDown, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(line1(&app), "    😀helper_two");
+        assert_eq!(app.tabs[0].lines.len(), 4, "Enter accepted the item instead of breaking the line");
+        assert_eq!(head(&app), (1, 15));
+        assert!(!shown(&out, "helper_one"), "the menu closes after accepting");
+        // 接受與前面連續打的字算同一步復原（復原紀錄把連續輸入合併）：一次復原回到打字之前，重做再回來
+        frame(&mut app, &ctx, vec![key(Key::Z, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(line1(&app), "    😀", "one undo step");
+        frame(&mut app, &ctx, vec![key(Key::Y, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(line1(&app), "    😀helper_two");
+        app.pending_select = Some((27, 27));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(head(&app), (1, 15));
+
+        // 觸發字元 "."：triggerKind 2，還沒打字所以全部列出；Esc 關閉，內容不變
+        frame(&mut app, &ctx, vec![Event::Text(".".into())]);
+        let out = pump(&mut app, "the menu appears after a trigger character", &|o| shown(o, "other"));
+        assert!(shown(&out, "helper_one"));
+        let q = asked.lock().unwrap()[1].clone();
+        assert_eq!(q["context"], json!({ "triggerKind": 2, "triggerCharacter": "." }));
+        assert_eq!(q["position"], json!({ "line": 1, "character": 17 }));
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!shown(&out, "other"), "Esc closes the menu");
+        assert_eq!(line1(&app), "    😀helper_two.");
+        assert!(app.editor_focused);
+
+        // Ctrl+Space 手動叫出、Tab 接受第一項
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        pump(&mut app, "Ctrl+Space opens the menu", &|o| shown(o, "other"));
+        assert_eq!(asked.lock().unwrap()[2]["context"]["triggerKind"], json!(1));
+        frame(&mut app, &ctx, vec![key(Key::Tab, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(line1(&app), "    😀helper_two.helper_one");
+
+        // 打了不是名稱的字元：選單關閉
+        frame(&mut app, &ctx, vec![Event::Text(" ".into()), ]);
+        frame(&mut app, &ctx, vec![Event::Text("h".into())]);
+        pump(&mut app, "the menu appears again", &|o| shown(o, "helper_three"));
+        frame(&mut app, &ctx, vec![Event::Text(";".into())]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!shown(&out, "helper_three"), "typing a non-identifier character closes the menu");
+        // 選單開著時上下鍵在選單裡移動（游標不動）；游標移出那個字（Home）時選單關閉
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        pump(&mut app, "Ctrl+Space opens the menu", &|o| shown(o, "other"));
+        let at = head(&app);
+        frame(&mut app, &ctx, vec![key(Key::ArrowUp, Modifiers::NONE)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "other"));
+        assert_eq!(head(&app), at);
+        frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::NONE)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!shown(&out, "other"), "moving the cursor out of the word closes the menu");
+        assert!(head(&app).1 < at.1);
+
+        // 用滑鼠點選：textEdit 的 newText 插入（標籤前面的空白不算）
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![Event::Text("h".into())]);
+        let out = pump(&mut app, "the menu appears", &|o| shown(o, "helper_three"));
+        let r = painted_lines(&out).into_iter().find(|l| l.0 == "helper_three").unwrap().1;
+        click(&mut app, &ctx, r.center());
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(line1(&app), "    😀helper_two.helper_one h;helper_three");
+        assert!(app.editor_focused, "the editor keeps the keyboard focus after clicking an item");
+
+        // 沒有語言伺服器的檔案：Ctrl+Space 不送請求
+        let n = asked.lock().unwrap().len();
+        let mut b = EditorBuffer::from_text("notes");
+        b.file_path = Some(dir.path().join("notes.txt").to_string_lossy().into_owned());
+        app.tabs.push(b);
+        app.active_tab_idx = 1;
+        app.pending_select = Some((5, 5));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        frame(&mut app, &ctx, vec![Event::Text("h".into())]);
+        std::thread::sleep(Duration::from_millis(100));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(asked.lock().unwrap().len(), n);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
