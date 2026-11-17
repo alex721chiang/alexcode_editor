@@ -77,7 +77,7 @@ fn frame(app: &mut AlexCodeApp, ctx: &egui::Context) {
         focused: true,
         ..Default::default()
     };
-    let _ = ctx.run(input, |ctx| app.ui_frame(ctx));
+    let _ = ctx.run_ui(input, |ui| app.ui_frame(ui));
 }
 
 /// 類似 log 的純文字：每行約 72 位元組
@@ -129,7 +129,7 @@ fn type_chars(app: &mut AlexCodeApp, ctx: &egui::Context, n: usize) -> f64 {
             events: vec![egui::Event::Text("x".into())],
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| app.ui_frame(ctx));
+        let _ = ctx.run_ui(input, |ui| app.ui_frame(ui));
     }
     t.elapsed().as_secs_f64() * 1000.0 / n as f64
 }
@@ -154,18 +154,21 @@ fn opening_a_large_file_stays_within_a_few_times_its_size() {
     assert!(ratio <= 4.0, "memory after opening is {ratio:.1}x the file size ({:.1} MB)", mb(settled));
     assert!(peak as f64 <= 8.0 * file_bytes as f64, "peak while opening is {:.1} MB", mb(peak));
 
-    // 直接在大檔案裡打字：內容真的改了，而且不會因此排版或複製整份文件
+    // 直接在大檔案裡打字：內容真的改了，而且不會因此排版或複製整份文件。
+    // 先打幾個字暖身：egui 0.34 起字形以次像素位置分別點陣化，每打一個字，那一行後面的字就移到新的次像素位置，
+    // 頭幾個字會讓字型圖集長大（量過：1 MB / 2 MB 的圖集影像擴大與交給繪圖端的複本，與檔案大小無關）
+    type_chars(&mut app, &ctx, 8);
     let before = live();
     reset_peak();
     type_chars(&mut app, &ctx, 20);
     let tab = &app.tabs[app.active_tab_idx];
-    assert!(tab.lines[0].starts_with(&"x".repeat(20)), "typed text is in the document: {:?}", &tab.lines[0][..30]);
+    assert!(tab.lines[0].starts_with(&"x".repeat(28)), "typed text is in the document: {:?}", &tab.lines[0][..40]);
     assert_eq!(tab.lines.len(), file_lines + 1);
     let grew = PEAK.load(Relaxed).saturating_sub(before);
     println!("MEM typing 20 characters: peak +{:.2} MB", mb(grew));
     // 複製整份文件至少要多用一份檔案大小、排版整份約 200 倍。門檻不能再低：Linux 的 CI 上這 20 幀
     // 有時會多出約 1.5 MB（同一個 commit 兩次執行一次 +1.54 MB、一次通過；Windows 上穩定是 +0.05 MB），
-    // 原因沒有查明，看起來是與檔案大小無關的固定開銷
+    // 原因沒有查明，看起來是與檔案大小無關的固定開銷；可能也是字型圖集長大，暖身之後是否還會發生沒有在 Linux 上確認
     assert!(grew < file_bytes, "typing 20 characters needed {:.1} MB more at its peak", mb(grew));
 }
 
@@ -203,7 +206,8 @@ fn large_file_memory_report() {
         drop(buf);
 
         // 編輯區把整份文字交給 egui 排版成一個 Galley（每個字元一個字形 + 4 個頂點 + 6 個索引）
-        let _ = ctx.run(RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(RawInput::default(), |ui| {
+            let ctx = ui.ctx();
             let base = live();
             let job = LayoutJob::simple(joined.clone(), FontId::monospace(14.0), Color32::WHITE, f32::INFINITY);
             let galley = ctx.fonts_mut(|f| f.layout_job(job));
@@ -268,7 +272,7 @@ fn frame_with(app: &mut AlexCodeApp, ctx: &egui::Context, events: Vec<egui::Even
         events,
         ..Default::default()
     };
-    let _ = ctx.run(input, |ctx| app.ui_frame(ctx));
+    let _ = ctx.run_ui(input, |ui| app.ui_frame(ui));
 }
 
 /// 大檔案其餘部分的記憶體量測（待辦 3e）：追蹤中的檔案多握的 HEAD 內容、尋找列的全文快取、

@@ -151,7 +151,7 @@ pub fn setup_fonts(ctx: &egui::Context) {
 
 /// 依目前調色盤套用 egui Visuals（對應原版 QSS 各元件規則）
 pub fn apply_style(ctx: &egui::Context, c: &Colors) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     let mut v = if c.light { egui::Visuals::light() } else { egui::Visuals::dark() };
 
     v.override_text_color = None;
@@ -230,7 +230,7 @@ pub fn apply_style(ctx: &egui::Context, c: &Colors) {
     style
         .text_styles
         .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 /// 垂直漸層矩形（QSS qlineargradient(x1:0,y1:0,x2:0,y2:1) 的等價物）

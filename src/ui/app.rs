@@ -3108,11 +3108,11 @@ impl AlexCodeApp {
         }
     }
 
-    fn menu_bar(&mut self, ctx: &egui::Context, c: &Colors) {
-        egui::TopBottomPanel::top("menu_bar")
+    fn menu_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
+        egui::Panel::top("menu_bar")
             .frame(Self::bar_frame(c))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 let line = if c.hud { c.accent } else { c.glow };
                 Self::paint_bar_bg(ui, c.panel, c.bg, Some((true, line)));
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -3315,11 +3315,11 @@ impl AlexCodeApp {
             });
     }
 
-    fn tool_bar(&mut self, ctx: &egui::Context, c: &Colors) {
-        egui::TopBottomPanel::top("tool_bar")
+    fn tool_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
+        egui::Panel::top("tool_bar")
             .frame(Self::bar_frame(c).inner_margin(egui::Margin::symmetric(6, 4)))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 let line = if c.hud { c.glow } else { c.border };
                 Self::paint_bar_bg(ui, c.panel, c.bg, Some((true, line)));
                 ui.horizontal(|ui| {
@@ -3421,11 +3421,12 @@ impl AlexCodeApp {
         }
     }
 
-    fn tab_bar(&mut self, ctx: &egui::Context, c: &Colors) {
-        egui::TopBottomPanel::top("tab_bar")
+    fn tab_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
+        let ctx = &root.ctx().clone();
+        egui::Panel::top("tab_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin { left: 4, right: 4, top: 2, bottom: 0 }))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 1.0));
                 ui.painter().add(vgradient(full, c.panel, c.bg));
                 let mut close_idx = None;
@@ -3667,7 +3668,8 @@ impl AlexCodeApp {
         }
     }
 
-    fn find_bar(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn find_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
+        let ctx = &root.ctx().clone();
         if !self.show_find_bar {
             return;
         }
@@ -3706,10 +3708,10 @@ impl AlexCodeApp {
         // (往下找?), 取代, 全部取代
         let mut go: Option<bool> = None;
         let (mut do_replace, mut do_replace_all) = (false, false);
-        egui::TopBottomPanel::top("find_bar")
+        egui::Panel::top("find_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 5)))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 ui.painter().hline(
                     ui.max_rect().expand(10.0).x_range(),
                     ui.max_rect().bottom() + 5.0,
@@ -3805,7 +3807,8 @@ impl AlexCodeApp {
     }
 
     /// 左側檔案總管：專案資料夾的樹狀檢視（資料夾內容在背景載入）
-    fn explorer_panel(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn explorer_panel(&mut self, root_ui: &mut egui::Ui, c: &Colors) {
+        let ctx = &root_ui.ctx().clone();
         if !self.show_explorer {
             return;
         }
@@ -3816,12 +3819,12 @@ impl AlexCodeApp {
         let active = self.active_buffer().and_then(|b| b.file_path.clone());
         let mut actions: Vec<TreeAction> = Vec::new();
         let (mut close, mut open_folder, mut refresh) = (false, false, false);
-        egui::SidePanel::left("explorer_panel")
+        egui::Panel::left("explorer_panel")
             .resizable(true)
-            .default_width(240.0)
-            .width_range(160.0..=520.0)
+            .default_size(240.0)
+            .size_range(160.0..=520.0)
             .frame(egui::Frame::NONE.fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
-            .show(ctx, |ui| {
+            .show_inside(root_ui, |ui| {
                 if Self::dock_title(ui, c, "EXPLORER  檔案總管") {
                     close = true;
                 }
@@ -3969,14 +3972,14 @@ impl AlexCodeApp {
     }
 
     /// 分頁有未儲存的修改、檔案又被其他程式改了：讓使用者決定要哪一份
-    fn disk_conflict_bar(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn disk_conflict_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
         let idx = self.active_tab_idx;
         let Some(buf) = self.tabs.get(idx).filter(|b| Some(b.id) == self.disk_conflict) else { return };
         let name = Self::tab_title(buf);
         let mut choice: Option<bool> = None; // true = 重新載入
-        egui::TopBottomPanel::top("disk_conflict_bar")
+        egui::Panel::top("disk_conflict_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 5)))
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("「{}」已被其他程式修改，而你有尚未儲存的變更。", name)).color(c.warn));
                     if ui.button("重新載入（放棄我的修改）").clicked() {
@@ -4115,11 +4118,11 @@ impl AlexCodeApp {
         }
     }
 
-    fn status_bar(&mut self, ctx: &egui::Context, c: &Colors) {
-        egui::TopBottomPanel::bottom("status_bar")
+    fn status_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
+        egui::Panel::bottom("status_bar")
             .frame(egui::Frame::NONE.fill(c.bg).inner_margin(egui::Margin::symmetric(4, 3)))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 3.0));
                 ui.painter().add(vgradient(full, c.bg, c.panel));
                 let line = if c.hud { c.accent } else { c.glow };
@@ -4276,7 +4279,8 @@ impl AlexCodeApp {
         resp.clicked()
     }
 
-    fn terminal_dock(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn terminal_dock(&mut self, root: &mut egui::Ui, c: &Colors) {
+        let ctx = &root.ctx().clone();
         // 互動式 shell：終端機第一次打開時在虛擬終端裡啟動；輸出由背景執行緒讀進來後要求重畫，
         // 這裡每一幀把讀到的部分餵給 `terminal`（終端機收起來時也照讀，免得輸出堆著）
         if self.show_terminal && self.term_pty.is_none() && !self.term_pty_failed && !self.term_pty_exited {
@@ -4294,11 +4298,11 @@ impl AlexCodeApp {
         if !self.show_terminal {
             return;
         }
-        egui::TopBottomPanel::bottom("terminal_dock")
+        egui::Panel::bottom("terminal_dock")
             .resizable(true)
-            .default_height(200.0)
+            .default_size(200.0)
             .frame(egui::Frame::NONE.fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 self.mark_rect("terminal-panel", ui.max_rect());
                 if Self::dock_title(ui, c, "TERMINAL  整合終端機") {
                     self.show_terminal = false;
@@ -4442,15 +4446,15 @@ impl AlexCodeApp {
             });
     }
 
-    fn graph_dock(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn graph_dock(&mut self, root: &mut egui::Ui, c: &Colors) {
         if !self.show_graph {
             return;
         }
-        egui::TopBottomPanel::bottom("graph_dock")
+        egui::Panel::bottom("graph_dock")
             .resizable(true)
-            .default_height(240.0)
+            .default_size(240.0)
             .frame(egui::Frame::NONE.fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 if Self::dock_title(ui, c, "GRAPH  Markdown 筆記關聯圖") {
                     self.show_graph = false;
                 }
@@ -4533,13 +4537,14 @@ impl AlexCodeApp {
             });
     }
 
-    fn editor_area(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn editor_area(&mut self, root: &mut egui::Ui, c: &Colors) {
+        let ctx = &root.ctx().clone();
         // 內容還在背景載入的分頁：只顯示「載入中」，沒有可以輸入的編輯區
         if self.is_loading(self.active_tab_idx) {
             self.editor_was_focused = false;
             self.editor_focused = false;
             let path = self.tabs[self.active_tab_idx].file_path.clone().unwrap_or_default();
-            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.bg)).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.bg)).show_inside(root, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space((ui.available_height() * 0.4).max(0.0));
                     ui.spinner();
@@ -4557,15 +4562,15 @@ impl AlexCodeApp {
         let is_md = md_lang && !md_big;
         let filtering = self.filter_active && !self.filter_query.trim().is_empty();
         if !filtering && md_big {
-            self.md_big_bar(ctx, c);
+            self.md_big_bar(root, c);
         }
 
         if !filtering && is_md {
             // Markdown 專屬頂部工具列（Typora 閱讀 / 雙欄 / 原始碼 切換 + 快速格式插入）
-            egui::TopBottomPanel::top("md_typora_toolbar")
+            egui::Panel::top("md_typora_toolbar")
                 .frame(egui::Frame::NONE.fill(c.panel))
                 .show_separator_line(false)
-                .show(ctx, |ui| {
+                .show_inside(root, |ui| {
                     if let Some(buf) = self.tabs.get_mut(self.active_tab_idx) {
                         render_markdown_toolbar(ui, &mut self.md_view, buf, c);
                     }
@@ -4573,13 +4578,13 @@ impl AlexCodeApp {
 
             // 左側 Typora 章節大綱 (Outline) 面板
             if self.md_view.show_outline {
-                egui::SidePanel::left("md_outline_panel")
+                egui::Panel::left("md_outline_panel")
                     .resizable(true)
-                    .default_width(220.0)
-                    .min_width(150.0)
-                    .max_width(380.0)
+                    .default_size(220.0)
+                    .min_size(150.0)
+                    .max_size(380.0)
                     .frame(egui::Frame::NONE.fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
-                    .show(ctx, |ui| {
+                    .show_inside(root, |ui| {
                         if let Some(buf) = self.tabs.get(self.active_tab_idx) {
                             if let Some(line) = render_outline_panel(ui, &buf.lines, c) {
                                 self.md_view.scroll_to_line = Some(line);
@@ -4592,13 +4597,13 @@ impl AlexCodeApp {
             }
         }
 
-        self.disk_conflict_bar(ctx, c);
+        self.disk_conflict_bar(root, c);
         self.editor_was_focused = self.editor_focused;
         self.editor_focused = false; // 由 code_editor 在本幀重新設定
         let mut md_action = MdAction::None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(c.bg))
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 let full_rect = ui.max_rect();
                 // 分割檢視：另一欄畫成唯讀，下面照常把目前分頁畫在有焦點的那一欄
                 let mut pane = self.split_panes(ui, c, &pal);
@@ -4972,8 +4977,10 @@ impl AlexCodeApp {
                 builder = builder.with_position(r.min).with_inner_size(r.size());
             }
             let this = &mut *self;
-            let (close, rect) = ctx.show_viewport_immediate(vid, builder, |ctx, class| {
-                if class == egui::ViewportClass::Embedded {
+            // 不能開作業系統視窗時（例如無視窗測試）自己畫成主視窗裡的浮動視窗：egui 0.34 起會自動包一個視窗，
+            // 但那個視窗沒有關閉鈕、也不能指定位置，所以這種情況不交給 show_viewport_immediate
+            let (close, rect) = if ctx.embed_viewports() {
+                {
                     let mut open = true;
                     let mut win = egui::Window::new(title.clone())
                         .id(egui::Id::new(("alexcode-detached-window", id)))
@@ -4989,16 +4996,18 @@ impl AlexCodeApp {
                     });
                     // 內嵌的浮動視窗：記整個視窗的左上角（大小固定用預設的）
                     (!open, shown.map(|s| Rect::from_min_size(s.response.rect.min, egui::vec2(600.0, 400.0))))
-                } else {
-                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.panel)).show(ctx, |ui| {
+                }
+            } else {
+                ctx.show_viewport_immediate(vid, builder, |ui, _class| {
+                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.panel)).show_inside(ui, |ui| {
                         this.detached_body(ui, idx, c, pal, git);
                     });
                     // 作業系統視窗：外框左上角 + 內容大小（與 with_position / with_inner_size 對應）
-                    let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+                    let (outer, inner) = ui.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
                     let rect = outer.zip(inner).map(|(o, i)| Rect::from_min_size(o.min, i.size()));
-                    (ctx.input(|i| i.viewport().close_requested()), rect)
-                }
-            });
+                    (ui.input(|i| i.viewport().close_requested()), rect)
+                })
+            };
             if let Some(r) = rect {
                 self.detached_rects.insert(id, r);
             }
@@ -5496,8 +5505,8 @@ impl AlexCodeApp {
                         .id(editor_id)
                         .font(font.clone())
                         .code_editor()
-                        .frame(false)
-                        .margin(egui::vec2(10.0, 4.0))
+                        // 沒有外框、文字四周留白（0.34 起自訂外框時留白改由外框的 inner_margin 決定）
+                        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 4)))
                         .desired_width(f32::INFINITY)
                         .desired_rows((min_h / row_h) as usize)
                         .lock_focus(true)
@@ -6874,7 +6883,7 @@ impl AlexCodeApp {
             .order(egui::Order::Tooltip)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                egui::Frame::window(&ctx.style()).show(ui, |ui| {
+                egui::Frame::window(&ctx.global_style()).show(ui, |ui| {
                 ui.set_min_width(380.0);
                 ui.label(RichText::new("尚未儲存的變更").color(c.accent).strong());
                 ui.add_space(6.0);
@@ -6951,14 +6960,15 @@ impl AlexCodeApp {
     }
 
     /// 很大的 Markdown 檔以原始碼顯示時的說明列：為什麼，以及怎麼換回閱讀模式
-    fn md_big_bar(&mut self, ctx: &egui::Context, c: &Colors) {
+    fn md_big_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
+        let ctx = &root.ctx().clone();
         let Some(id) = self.tabs.get(self.active_tab_idx).map(|b| b.id) else { return };
         let size = self.large_stats.1 .0 as f64 / (1024.0 * 1024.0);
         let mut preview = false;
-        egui::TopBottomPanel::top("md_big_bar")
+        egui::Panel::top("md_big_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 4)))
             .show_separator_line(false)
-            .show(ctx, |ui| {
+            .show_inside(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(format!(
@@ -7970,8 +7980,8 @@ impl AlexCodeApp {
 }
 
 impl eframe::App for AlexCodeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.ui_frame(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.ui_frame(ui);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -8022,10 +8032,10 @@ impl AlexCodeApp {
 
 impl AlexCodeApp {
     /// 一幀的完整 UI（與 eframe 無關，測試可用無視窗的 `egui::Context` 直接驅動）
-    pub fn ui_frame(&mut self, ctx: &egui::Context) {
-        self.check_font_atlas(ctx);
-        self.ui_frame_inner(ctx);
-        self.check_font_atlas(ctx);
+    pub fn ui_frame(&mut self, ui: &mut egui::Ui) {
+        self.check_font_atlas(&ui.ctx().clone());
+        self.ui_frame_inner(ui);
+        self.check_font_atlas(&ui.ctx().clone());
     }
 
     /// egui 快填滿字型圖集時會在下一幀開始時重建它，之前排好的文字（編輯區的排版快取）字形座標就失效了。
@@ -8041,7 +8051,8 @@ impl AlexCodeApp {
         self.atlas_probe = Some(probe);
     }
 
-    fn ui_frame_inner(&mut self, ctx: &egui::Context) {
+    fn ui_frame_inner(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         let pal = self.theme_mgr.current_palette().clone();
         let colors = Colors::from_palette(&pal, self.theme_mgr.is_neon_hud());
 
@@ -8101,16 +8112,16 @@ impl AlexCodeApp {
             self.handle_shortcuts(ctx);
         }
 
-        self.menu_bar(ctx, &colors);
+        self.menu_bar(ui, &colors);
         self.detached_windows(ctx, &colors, &pal);
-        self.tool_bar(ctx, &colors);
-        self.status_bar(ctx, &colors);
-        self.terminal_dock(ctx, &colors);
-        self.graph_dock(ctx, &colors);
-        self.explorer_panel(ctx, &colors);
-        self.tab_bar(ctx, &colors);
-        self.find_bar(ctx, &colors);
-        self.editor_area(ctx, &colors);
+        self.tool_bar(ui, &colors);
+        self.status_bar(ui, &colors);
+        self.terminal_dock(ui, &colors);
+        self.graph_dock(ui, &colors);
+        self.explorer_panel(ui, &colors);
+        self.tab_bar(ui, &colors);
+        self.find_bar(ui, &colors);
+        self.editor_area(ui, &colors);
         self.popup_windows(ctx, &colors);
     }
 }
@@ -8133,7 +8144,7 @@ mod tests {
             ..Default::default()
         };
         edit(&mut input);
-        ctx.run(input, |ctx| app.ui_frame(ctx))
+        ctx.run_ui(input, |ui| app.ui_frame(ui))
     }
 
     /// 這一幀複製到剪貼簿的文字（egui 0.31 起放在 `platform_output.commands` 的 CopyText；沒有複製時是空字串）
@@ -10963,7 +10974,7 @@ mod tests {
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
         let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
-        let sel_fill = ctx.style().visuals.selection.bg_fill;
+        let sel_fill = ctx.global_style().visuals.selection.bg_fill;
         let sel_rects = |out: &egui::FullOutput| {
             fn walk(shape: &Shape, fill: Color32, found: &mut Vec<Rect>) {
                 match shape {
@@ -11492,7 +11503,7 @@ mod tests {
         let mid = 640.0;
 
         // 捲動左欄（唯讀的第一份）
-        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -1500.0), modifiers: Modifiers::NONE }]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -1500.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE }]);
         for _ in 0..40 {
             frame(&mut app, &ctx, vec![]);
         }
@@ -13195,7 +13206,7 @@ mod tests {
     #[test]
     fn cursor_conversions_follow_rows_and_paragraphs() {
         let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |_| {});
+        let _ = ctx.run_ui(Default::default(), |_| {});
         let font = FontId::monospace(14.0);
         let w = ctx.fonts_mut(|f| f.glyph_width(&font, 'x'));
         let job = egui::text::LayoutJob::simple("abcdefghij\nxy\n".into(), font, Color32::WHITE, w * 4.5);
