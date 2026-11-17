@@ -396,8 +396,8 @@ impl VtParser {
                 } else {
                     (0, self.cols - 1)
                 };
-                for c in from..=to {
-                    self.grid[self.cy][c] = Cell::default();
+                for cell in &mut self.grid[self.cy][from..=to] {
+                    *cell = Cell::default();
                 }
             }
             'm' => {
