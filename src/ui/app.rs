@@ -740,6 +740,16 @@ fn para_of(g: &egui::Galley, index: usize) -> (usize, usize) {
     (para, index.saturating_sub(start).min(at - start))
 }
 
+/// 一個字元排版時往右移的距離。egui 0.35 起字型裡沒有的字（例如沒有中文字型的 Linux / macOS CI 上的「中」）
+/// `glyph_width` 回傳 0，但排版時會畫成替代字元、有寬度：這時改量排出那一個字的寬度
+fn advance_of(f: &mut egui::epaint::text::FontsView<'_>, font: &FontId, ch: char) -> f32 {
+    let w = f.glyph_width(font, ch);
+    if w > 0.0 || ch == '\n' {
+        return w;
+    }
+    f.layout_no_wrap(ch.to_string(), font.clone(), Color32::WHITE).size().x
+}
+
 /// 列裡第 `col` 個字元左緣的 x（相對於排版左上角；0.32 起字形的位置相對於所在的列）
 fn row_x(row: &egui::epaint::text::PlacedRow, col: usize) -> f32 {
     row.pos.x + row.x_offset((col).into())
@@ -7233,7 +7243,7 @@ impl AlexCodeApp {
                                 let rows_key = (tab_id, buf.revision(), w.to_bits());
                                 if self.large_rows.key != rows_key {
                                     self.large_rows = ui.fonts_mut(|f| {
-                                        LongRows::build(rows_key, &buf.lines, w, adv, |ch| f.glyph_width(&font, ch))
+                                        LongRows::build(rows_key, &buf.lines, w, adv, |ch| advance_of(f, &font, ch))
                                     });
                                 }
                                 head = row_step(buf, &self.large_rows, head, *key == Key::ArrowDown, w);
@@ -7402,7 +7412,7 @@ impl AlexCodeApp {
                     let key = (tab_id, buf.revision(), w.to_bits());
                     if self.large_rows.key != key {
                         self.large_rows =
-                            ui.fonts_mut(|f| LongRows::build(key, &buf.lines, w, adv, |ch| f.glyph_width(&font, ch)));
+                            ui.fonts_mut(|f| LongRows::build(key, &buf.lines, w, adv, |ch| advance_of(f, &font, ch)));
                     }
                 }
                 // （沒有開自動換行時用不到，裡面可能是舊的）
@@ -7440,7 +7450,7 @@ impl AlexCodeApp {
                 let line_galley = |ui: &egui::Ui, line: usize, hits: bool| -> (Arc<egui::Galley>, usize, f32) {
                     let full = buf.lines.get(line).map_or("", |s| s.as_str());
                     let (shown, start, end, x0) = if !wrap && full.len() > LARGE_VIEW_MAX_COLS {
-                        let (a, b, x0) = ui.fonts_mut(|f| line_window(full, win.0, win.1, adv, |ch| f.glyph_width(&font, ch)));
+                        let (a, b, x0) = ui.fonts_mut(|f| line_window(full, win.0, win.1, adv, |ch| advance_of(f, &font, ch)));
                         (&full[char_byte(full, a)..char_byte(full, b)], a, b, x0)
                     } else {
                         (full, 0, usize::MAX, 0.0)
@@ -7759,7 +7769,7 @@ impl AlexCodeApp {
                         text_x + x0 + x_of(&g, caret_col - start)
                     } else {
                         let full = &buf.lines[sel.head.line];
-                        text_x + ui.fonts_mut(|f| prefix_x(full, sel.head.col, adv, |ch| f.glyph_width(&font, ch)))
+                        text_x + ui.fonts_mut(|f| prefix_x(full, sel.head.col, adv, |ch| advance_of(f, &font, ch)))
                     };
                     let r = Rect::from_min_size(Pos2::new(x, y_of(sel.head.line)), egui::vec2(char_w, row_h));
                     if scroll_to_cursor {
@@ -9333,7 +9343,7 @@ mod tests {
         // 狀態列顯示的文字（短 SHA、作者、日期、「·」、摘要）每個字元在內建字型中都有字形，不會畫成方框。
         // 中文訊息用的是系統的中文字型（CI 的 Linux / macOS 機器上沒有），不在這裡檢查。
         assert!(!text.contains('⎇'), "{text}");
-        let has = ctx.fonts_mut(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), &text));
+        let has = ctx.fonts_mut(|fonts| text.chars().all(|c| fonts.glyph_width(&FontId::proportional(12.0), c) > 0.0));
         assert!(has, "every character of `{text}` must be drawable");
     }
 
