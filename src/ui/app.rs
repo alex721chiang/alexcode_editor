@@ -3190,8 +3190,11 @@ impl AlexCodeApp {
                 egui::ScrollArea::horizontal().auto_shrink([false, true]).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
+                        // 分割檢視另一欄顯示的分頁：細一點的強調色底線（有焦點的分頁照舊是粗線）
+                        let other_id = self.split.as_ref().map(|s| s.other);
                         for i in 0..self.tabs.len() {
                             let is_active = i == self.active_tab_idx;
+                            let is_other = !is_active && Some(self.tabs[i].id) == other_id;
                             let mut title = Self::tab_title(&self.tabs[i]);
                             if self.is_loading(i) {
                                 title += "（載入中…）";
@@ -3212,12 +3215,14 @@ impl AlexCodeApp {
                                 );
                                 p.add(vgradient(grad, Color32::TRANSPARENT, c.accent_faint));
                                 p.hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0_f32, c.accent));
+                            } else if is_other {
+                                p.hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(1.0_f32, c.accent));
                             } else if hovered {
                                 p.hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0_f32, c.glow));
                             }
                             let tcol = if is_active {
                                 c.accent
-                            } else if hovered {
+                            } else if hovered || is_other {
                                 c.fg_list
                             } else {
                                 c.fg_dim2
@@ -3264,7 +3269,8 @@ impl AlexCodeApp {
                                 close_idx = Some(i);
                             }
                             let on_disk = self.tabs[i].file_path.as_deref().map_or(false, |p| Path::new(p).is_absolute());
-                            let resp = resp.on_hover_text(self.tabs[i].file_path.clone().unwrap_or_default());
+                            let tip = self.tabs[i].file_path.clone().unwrap_or_default();
+                            let resp = resp.on_hover_text(if is_other { format!("{tip}\n（顯示在分割檢視的另一欄）") } else { tip });
                             // 右鍵選單：檔案總管 / 終端機 / 複製路徑 / 關閉
                             resp.context_menu(|ui| {
                                 ui.set_min_width(250.0);
@@ -11120,6 +11126,46 @@ mod tests {
         let mut app4 = AlexCodeApp::new();
         app4.apply_state(AppState::load(&state_file).unwrap());
         assert!(app4.split.is_none(), "the other pane's file is gone");
+    }
+
+    #[test]
+    fn split_view_marks_the_other_panes_tab() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "fn a() {}\n");
+        let mut b = EditorBuffer::from_text("fn b() {}\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        let pal = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud());
+        let marks = |out: &egui::FullOutput| {
+            fn walk(shape: &Shape, col: Color32, found: &mut Vec<(f32, f32, f32)>) {
+                match shape {
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, col, found)),
+                    Shape::LineSegment { points, stroke } if stroke.color == col && (stroke.width - 1.0).abs() < 0.01 => {
+                        found.push((points[0].x.min(points[1].x), points[0].x.max(points[1].x), points[0].y))
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| walk(&s.shape, c.accent, &mut found));
+            found
+        };
+        let tab = |out: &egui::FullOutput, name: &str| painted_lines(out).into_iter().find(|l| l.0 == name).unwrap().1;
+        let under = |m: &(f32, f32, f32), r: Rect| m.0 <= r.left() && m.1 >= r.right() && m.2 > r.bottom() && m.2 < r.bottom() + 12.0;
+
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(marks(&out).is_empty(), "no split, no mark");
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let m = marks(&out);
+        assert!(m.iter().any(|m| under(m, tab(&out, "t.rs"))), "the other pane's tab is underlined: {m:?}");
+        assert!(!m.iter().any(|m| under(m, tab(&out, "b.rs"))), "the focused tab keeps its own mark");
+        app.run_cmd(Cmd::SplitEditor);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(marks(&out).is_empty());
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
