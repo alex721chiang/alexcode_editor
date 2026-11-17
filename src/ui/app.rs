@@ -582,12 +582,13 @@ fn char_byte(line: &str, col: usize) -> usize {
     line.char_indices().nth(col).map_or(line.len(), |(i, _)| i)
 }
 
-/// 前 `col` 個字元排出來的寬度（像素）。`width` 是每個字元的寬度；全是 ASCII 又沒有 Tab 時直接以 `cw` 計算
-fn prefix_x(line: &str, col: usize, cw: f32, width: impl FnMut(char) -> f32) -> f32 {
+/// 前 `col` 個字元排出來的寬度（像素）。`width` 是每個字元的寬度；全是 ASCII 又沒有 Tab 時直接以 `cw` 計算。
+/// 逐字累加用 f64：很長的行（幾十萬像素寬）以 f32 累加會差到幾十像素
+fn prefix_x(line: &str, col: usize, cw: f32, mut width: impl FnMut(char) -> f32) -> f32 {
     if line.is_ascii() && !line.contains('\t') {
         return col.min(line.len()) as f32 * cw;
     }
-    line.chars().take(col).map(width).sum()
+    line.chars().take(col).map(|c| f64::from(width(c))).sum::<f64>() as f32
 }
 
 /// 不換行時的一行很長的文字，只排版水平範圍 `x0..x1`（相對於行首的像素）涵蓋到的字元：
@@ -599,13 +600,15 @@ fn line_window(line: &str, x0: f32, x1: f32, cw: f32, mut width: impl FnMut(char
         let b = ((x1 / cw).ceil().max(0.0) as usize).clamp(a, n);
         return (a, b, a as f32 * cw);
     }
+    // 逐字累加用 f64（同 `prefix_x`）
     let mut start = None;
-    let (mut x, mut i) = (0.0_f32, 0);
+    let (x0, x1) = (f64::from(x0), f64::from(x1));
+    let (mut x, mut i) = (0.0_f64, 0);
     for ch in line.chars() {
         if x >= x1 && start.is_some() {
             break;
         }
-        let w = width(ch);
+        let w = f64::from(width(ch));
         if start.is_none() && x + w > x0 {
             start = Some((i, x));
         }
@@ -613,7 +616,7 @@ fn line_window(line: &str, x0: f32, x1: f32, cw: f32, mut width: impl FnMut(char
         i += 1;
     }
     let (a, ax) = start.unwrap_or((i, x));
-    (a, i.max(a), ax)
+    (a, i.max(a), ax as f32)
 }
 
 /// 自動換行時把一行很長的文字切成寬度不超過 `max_w` 的列（不看字的邊界，排滿就換列）：
@@ -10210,8 +10213,13 @@ mod tests {
         let (text, r, _) = painted_lines(&out).into_iter().find(|l| l.0.contains('中')).expect("line 0 is on screen");
         assert!(wide.ends_with(&text) && text.chars().count() < 2000);
         let start = total - text.chars().count();
-        let prefix: String = wide.chars().take(start).collect();
-        let w = width_of(&ctx2, &prefix);
+        // 整行（88 萬像素寬）交給 egui 排版時 f32 累加的誤差有幾十像素（Linux / macOS CI 上差 61 px），
+        // 所以以 f64 逐字累加每個字往右移的距離當標準答案；另外以 egui 排版前 2000 個字（誤差可以忽略）確認逐字累加與 egui 相同
+        let adv_of = |c: char| ctx2.fonts_mut(|f| advance_of(f, &font, c)) as f64;
+        let w = wide.chars().take(start).map(adv_of).sum::<f64>() as f32;
+        let short: String = wide.chars().take(2000).collect();
+        let ws = short.chars().map(adv_of).sum::<f64>() as f32;
+        assert!((width_of(&ctx2, &short) - ws).abs() < 1.0, "egui lays out the first 2000 characters {} wide, the sum is {ws}", width_of(&ctx2, &short));
         assert!((r.left() - (app2.probe["large-text"].left() + w)).abs() < 2.0, "{} vs {}", r.left() - app2.probe["large-text"].left(), w);
         // 點在畫面中間再輸入一個字：畫出來的那個字就在點的位置（差不到一個字元寬，Tab 是 4 個字寬）
         let at = Pos2::new(app2.probe["large-clip"].center().x, r.center().y);
