@@ -15,6 +15,7 @@
 - [ ] 升級 egui / eframe 到最新穩定版，升級後實測中文輸入法。升級後把 `.github/workflows/rust-release.yml` 的 macOS 工具鏈從 `1.99.1` 改回 `stable`（目前固定是因為 eframe 0.27 依賴的 objc2 0.4.1 無法以 Rust 1.100.0 編譯；在 macOS 上用 1.100 以後的 Rust 自行建置也會失敗）
 - [ ] macOS：包成 `.app`（含圖示與檔案關聯）並產生 universal（arm64 + x86_64）版本
 - [ ] 清理 clippy 警告（目前約 40 個），之後 CI 改為 `-D warnings`
+- [ ] 查出 macOS CI 上偶爾失敗的 `terminal_follows_the_dock_size_and_draws_its_cursor` 並讓它穩定：2026-11-17 `87c43e4` 在 main 的 run 44045657603 第一次失敗（「the cursor moved -79.75797 px for 3 characters」，打了 3 個字後游標反而往左），重跑一次就通過；同一個 commit 在 rust-edition 的 run 也通過。和這次的修改無關（矩形選取沒有動到終端機），原因還沒查（可能是 zsh 在提示字元重畫時移動了游標）
 
 ## 已完成
 
