@@ -712,15 +712,15 @@ fn with_preedit(line: &str, col: usize, preedit: &str) -> String {
 fn wrapped_col_at(g: &egui::Galley, pos: Vec2) -> usize {
     let cur = g.cursor_from_pos(pos);
     let (row, column) = rc_of(g, cur);
-    let at_wrapped_end = row + 1 < g.rows.len() && column > 0 && column >= g.rows[row].char_count_excluding_newline();
-    cur.index - usize::from(at_wrapped_end)
+    let at_wrapped_end = row + 1 < g.rows.len() && column > 0 && column >= g.rows[row].char_count_excluding_newline().0;
+    cur.index.0 - usize::from(at_wrapped_end)
 }
 
 /// egui 0.32 起游標只剩字元索引（`CCursor`）：換算成排版上的（第幾列, 列裡的第幾個字元）。
 /// 折行處依 `prefer_next_row` 決定算上一列的結尾還是下一列的開頭（與 0.31 的 `rcursor` 相同）
 fn rc_of(g: &egui::Galley, c: CCursor) -> (usize, usize) {
     let l = g.layout_from_cursor(c);
-    (l.row, l.column)
+    (l.row, l.column.0)
 }
 
 /// 字元索引 `index` 在排版 `g` 裡是第幾段（以 `\n` 分開的段落，也就是檔案的行）、段落裡的第幾個字元
@@ -728,10 +728,10 @@ fn rc_of(g: &egui::Galley, c: CCursor) -> (usize, usize) {
 fn para_of(g: &egui::Galley, index: usize) -> (usize, usize) {
     let (mut para, mut start, mut at) = (0, 0, 0);
     for row in &g.rows {
-        if index <= at + row.char_count_excluding_newline() {
+        if index <= at + row.char_count_excluding_newline().0 {
             return (para, index - start);
         }
-        at += row.char_count_including_newline();
+        at += row.char_count_including_newline().0;
         if row.ends_with_newline {
             para += 1;
             start = at;
@@ -742,7 +742,7 @@ fn para_of(g: &egui::Galley, index: usize) -> (usize, usize) {
 
 /// 列裡第 `col` 個字元左緣的 x（相對於排版左上角；0.32 起字形的位置相對於所在的列）
 fn row_x(row: &egui::epaint::text::PlacedRow, col: usize) -> f32 {
-    row.pos.x + row.x_offset(col)
+    row.pos.x + row.x_offset((col).into())
 }
 
 /// 欄位範圍 [a, b) 在排版 `g` 的每一列上佔的區段：(列的上緣, 列的下緣, 左, 右)，座標相對於排版左上角。
@@ -751,7 +751,7 @@ fn row_spans(g: &egui::Galley, a: usize, b: usize, eol: bool) -> Vec<(f32, f32, 
     let mut out = Vec::new();
     let mut start = 0;
     for (i, row) in g.rows.iter().enumerate() {
-        let end = start + row.char_count_excluding_newline();
+        let end = start + row.char_count_excluding_newline().0;
         let (lo, hi) = (a.max(start), b.min(end));
         if lo < hi || (eol && i + 1 == g.rows.len() && lo <= hi) {
             out.push((row.rect().top(), row.rect().bottom(), row_x(row, lo - start), row_x(row, hi - start)));
@@ -867,7 +867,7 @@ fn diag_spans(g: &egui::Galley, lines: &[String], row_lines: &[usize], d: &Diagn
         };
         let mut start = 0;
         for row in g.rows.get(r0..r1.max(r0)).unwrap_or(&[]) {
-            let end = start + row.char_count_excluding_newline();
+            let end = start + row.char_count_excluding_newline().0;
             let (lo, hi) = (a.max(start), b.min(end));
             if lo < hi {
                 out.push((row.rect().top(), row.rect().bottom(), row_x(row, lo - start), row_x(row, hi - start)));
@@ -3112,7 +3112,7 @@ impl AlexCodeApp {
         egui::Panel::top("menu_bar")
             .frame(Self::bar_frame(c))
             .show_separator_line(false)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let line = if c.hud { c.accent } else { c.glow };
                 Self::paint_bar_bg(ui, c.panel, c.bg, Some((true, line)));
                 egui::MenuBar::new().ui(ui, |ui| {
@@ -3319,7 +3319,7 @@ impl AlexCodeApp {
         egui::Panel::top("tool_bar")
             .frame(Self::bar_frame(c).inner_margin(egui::Margin::symmetric(6, 4)))
             .show_separator_line(false)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let line = if c.hud { c.glow } else { c.border };
                 Self::paint_bar_bg(ui, c.panel, c.bg, Some((true, line)));
                 ui.horizontal(|ui| {
@@ -3426,14 +3426,14 @@ impl AlexCodeApp {
         egui::Panel::top("tab_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin { left: 4, right: 4, top: 2, bottom: 0 }))
             .show_separator_line(false)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 1.0));
                 ui.painter().add(vgradient(full, c.panel, c.bg));
                 let mut close_idx = None;
                 let mut tab_action: Option<TabAction> = None;
                 let tab_count = self.tabs.len();
                 // 不接拖曳捲動：拖曳要留給分頁（拖到分頁列外面開成獨立視窗）；捲動用滾輪
-                egui::ScrollArea::horizontal().auto_shrink([false, true]).scroll_source(egui::scroll_area::ScrollSource { drag: false, ..Default::default() }).show(ui, |ui| {
+                egui::ScrollArea::horizontal().auto_shrink([false, true]).scroll_source(egui::scroll_area::ScrollSource { drag: egui::scroll_area::DragScroll::Never, ..Default::default() }).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
                         // 分割檢視另一欄顯示的分頁：細一點的強調色底線（有焦點的分頁照舊是粗線）
@@ -3711,7 +3711,7 @@ impl AlexCodeApp {
         egui::Panel::top("find_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 5)))
             .show_separator_line(false)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.painter().hline(
                     ui.max_rect().expand(10.0).x_range(),
                     ui.max_rect().bottom() + 5.0,
@@ -3824,7 +3824,7 @@ impl AlexCodeApp {
             .default_size(240.0)
             .size_range(160.0..=520.0)
             .frame(egui::Frame::NONE.fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
-            .show_inside(root_ui, |ui| {
+            .show(root_ui, |ui| {
                 if Self::dock_title(ui, c, "EXPLORER  檔案總管") {
                     close = true;
                 }
@@ -3979,7 +3979,7 @@ impl AlexCodeApp {
         let mut choice: Option<bool> = None; // true = 重新載入
         egui::Panel::top("disk_conflict_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 5)))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("「{}」已被其他程式修改，而你有尚未儲存的變更。", name)).color(c.warn));
                     if ui.button("重新載入（放棄我的修改）").clicked() {
@@ -4024,7 +4024,7 @@ impl AlexCodeApp {
             return;
         };
         let tab_size = tab_size.max(1);
-        let start = range.primary.index.min(range.secondary.index);
+        let start = range.primary.index.0.min(range.secondary.index.0);
         // 選取範圍起點所在的欄（既有的 Tab 字元算到它的下一個定位點）
         let mut col = 0usize;
         for ch in text.chars().take(start) {
@@ -4050,7 +4050,7 @@ impl AlexCodeApp {
         let Some(range) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).and_then(|s| s.cursor.char_range()) else {
             return 0;
         };
-        let (a, b) = (range.primary.index.min(range.secondary.index), range.primary.index.max(range.secondary.index));
+        let (a, b) = (range.primary.index.0.min(range.secondary.index.0), range.primary.index.0.max(range.secondary.index.0));
         // 本幀恰好輸入一個字元（輸入法組字、貼上等情況不處理）
         let typed: Option<char> = ui.input(|i| {
             let mut texts = i.events.iter().filter_map(|e| match e {
@@ -4122,7 +4122,7 @@ impl AlexCodeApp {
         egui::Panel::bottom("status_bar")
             .frame(egui::Frame::NONE.fill(c.bg).inner_margin(egui::Margin::symmetric(4, 3)))
             .show_separator_line(false)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 3.0));
                 ui.painter().add(vgradient(full, c.bg, c.panel));
                 let line = if c.hud { c.accent } else { c.glow };
@@ -4302,7 +4302,7 @@ impl AlexCodeApp {
             .resizable(true)
             .default_size(200.0)
             .frame(egui::Frame::NONE.fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 self.mark_rect("terminal-panel", ui.max_rect());
                 if Self::dock_title(ui, c, "TERMINAL  整合終端機") {
                     self.show_terminal = false;
@@ -4454,7 +4454,7 @@ impl AlexCodeApp {
             .resizable(true)
             .default_size(240.0)
             .frame(egui::Frame::NONE.fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 if Self::dock_title(ui, c, "GRAPH  Markdown 筆記關聯圖") {
                     self.show_graph = false;
                 }
@@ -4544,7 +4544,7 @@ impl AlexCodeApp {
             self.editor_was_focused = false;
             self.editor_focused = false;
             let path = self.tabs[self.active_tab_idx].file_path.clone().unwrap_or_default();
-            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.bg)).show_inside(root, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.bg)).show(root, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space((ui.available_height() * 0.4).max(0.0));
                     ui.spinner();
@@ -4570,7 +4570,7 @@ impl AlexCodeApp {
             egui::Panel::top("md_typora_toolbar")
                 .frame(egui::Frame::NONE.fill(c.panel))
                 .show_separator_line(false)
-                .show_inside(root, |ui| {
+                .show(root, |ui| {
                     if let Some(buf) = self.tabs.get_mut(self.active_tab_idx) {
                         render_markdown_toolbar(ui, &mut self.md_view, buf, c);
                     }
@@ -4584,7 +4584,7 @@ impl AlexCodeApp {
                     .min_size(150.0)
                     .max_size(380.0)
                     .frame(egui::Frame::NONE.fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
-                    .show_inside(root, |ui| {
+                    .show(root, |ui| {
                         if let Some(buf) = self.tabs.get(self.active_tab_idx) {
                             if let Some(line) = render_outline_panel(ui, &buf.lines, c) {
                                 self.md_view.scroll_to_line = Some(line);
@@ -4603,7 +4603,7 @@ impl AlexCodeApp {
         let mut md_action = MdAction::None;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(c.bg))
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 let full_rect = ui.max_rect();
                 // 分割檢視：另一欄畫成唯讀，下面照常把目前分頁畫在有焦點的那一欄
                 let mut pane = self.split_panes(ui, c, &pal);
@@ -4751,10 +4751,10 @@ impl AlexCodeApp {
             let at = Some(press).and_then(|p| {
                 let rows = &self.split.as_ref()?.rows;
                 match rows.iter().find(|(_, o, g)| p.y < o.y + g.size().y.max(1.0)) {
-                    Some((line, o, g)) => Some((*line, g.cursor_from_pos(p - *o).index)),
+                    Some((line, o, g)) => Some((*line, g.cursor_from_pos(p - *o).index.0)),
                     None => rows
                         .last()
-                        .map(|(line, _, g)| (*line, g.cursor_from_pos(egui::vec2(f32::INFINITY, 0.0)).index)),
+                        .map(|(line, _, g)| (*line, g.cursor_from_pos(egui::vec2(f32::INFINITY, 0.0)).index.0)),
                 }
             });
             // 換欄：兩邊的捲動位置互換，所以畫面上的內容不動（編輯區的文字多一段上邊界）
@@ -4861,7 +4861,7 @@ impl AlexCodeApp {
         // 不接拖曳捲動：點擊與拖曳要交給上面那個切換欄位的區域（可以捲動時捲動區會蓋掉它）
         let mut area = egui::ScrollArea::both()
             .id_salt(("split-preview", buf.id))
-            .scroll_source(egui::scroll_area::ScrollSource { drag: false, ..Default::default() })
+            .scroll_source(egui::scroll_area::ScrollSource { drag: egui::scroll_area::DragScroll::Never, ..Default::default() })
             .auto_shrink([false, false]);
         if let Some(o) = offset {
             area = area.scroll_offset(o);
@@ -4999,7 +4999,7 @@ impl AlexCodeApp {
                 }
             } else {
                 ctx.show_viewport_immediate(vid, builder, |ui, _class| {
-                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.panel)).show_inside(ui, |ui| {
+                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.panel)).show(ui, |ui| {
                         this.detached_body(ui, idx, c, pal, git);
                     });
                     // 作業系統視窗：外框左上角 + 內容大小（與 with_position / with_inner_size 對應）
@@ -5039,7 +5039,7 @@ impl AlexCodeApp {
         let pos_at = |p: Pos2| {
             rows.iter().rev().find(|(_, at, _)| at.y <= p.y).or(rows.first()).map(|(ln, at, g)| Position {
                 line: *ln,
-                col: g.cursor_from_pos(p - *at).index,
+                col: g.cursor_from_pos(p - *at).index.0,
             })
         };
         let pressed = resp.hovered() && ui.input(|i| i.pointer.primary_pressed());
@@ -5213,8 +5213,8 @@ impl AlexCodeApp {
             let state = egui::text_edit::TextEditState::load(ui.ctx(), editor_id);
             if let (Some(m), Some(mut st)) = (menu, state) {
                 let back = head.col - m.start;
-                if let (Some(item), Some(r)) = (m.items.get(i), st.cursor.char_range().filter(|r| r.primary.index >= back)) {
-                    let ci = r.primary.index;
+                if let (Some(item), Some(r)) = (m.items.get(i), st.cursor.char_range().filter(|r| r.primary.index.0 >= back)) {
+                    let ci = r.primary.index.0;
                     st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(ci - back), CCursor::new(ci))));
                     st.store(ui.ctx(), editor_id);
                     let text = item.insert.clone();
@@ -5293,7 +5293,12 @@ impl AlexCodeApp {
                             true
                         }
                     }
-                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Ime(egui::ImeEvent::Enabled) => {
+                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut => {
+                        cancel = true;
+                        true
+                    }
+                    // 輸入法開始組字（egui 0.35 起不再送 Ime(Enabled)，第一個不是空的組字文字就是開始）
+                    egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) if !text.is_empty() => {
                         cancel = true;
                         true
                     }
@@ -5520,7 +5525,7 @@ impl AlexCodeApp {
                         // 自動補上右括號後游標留在中間；跳過既有的右括號時游標右移
                         if let Some(mut st) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
                             if let Some(r) = st.cursor.char_range() {
-                                let i = (r.primary.index as isize + cursor_shift).max(0) as usize;
+                                let i = (r.primary.index.0 as isize + cursor_shift).max(0) as usize;
                                 st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(i))));
                                 st.store(ui.ctx(), editor_id);
                             }
@@ -5545,7 +5550,7 @@ impl AlexCodeApp {
                     // 目前游標所在的 (行, 欄)。自動換行時畫面上的列不等於行，改用段落座標。
                     let cur_row = output.cursor_range.map(|cr| {
                         if wrap {
-                            para_of(galley, cr.primary.index)
+                            para_of(galley, cr.primary.index.0)
                         } else {
                             rc_of(galley, cr.primary)
                         }
@@ -5632,7 +5637,7 @@ impl AlexCodeApp {
                                     _ => {
                                         let Some(row) = galley.rows.get(b.b_line) else { continue };
                                         let col = rc_of(galley, galley.cursor_from_pos(egui::vec2(b.b_x, row.rect().center().y))).1;
-                                        let len = row.char_count_excluding_newline();
+                                        let len = row.char_count_excluding_newline().0;
                                         let end = row_x(row, len);
                                         b.b_x = if *k == Key::ArrowRight {
                                             if col < len {
@@ -5791,7 +5796,7 @@ impl AlexCodeApp {
                         let cur = galley.cursor_from_pos(rel);
                         let row = galley.rows.get(rc_of(galley, cur).0)?;
                         let inside = rel.y >= row.rect().top() && rel.y < row.rect().bottom() && rel.x <= row.rect().right();
-                        inside.then_some(para_of(galley, cur.index))
+                        inside.then_some(para_of(galley, cur.index.0))
                     });
                     let hover_note = self
                         .hover_text
@@ -6968,7 +6973,7 @@ impl AlexCodeApp {
         egui::Panel::top("md_big_bar")
             .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 4)))
             .show_separator_line(false)
-            .show_inside(root, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(format!(
@@ -7112,12 +7117,12 @@ impl AlexCodeApp {
                     Some(rows) => {
                         let r = row_of(rows, p.col);
                         let g = piece(p.line, rows, r);
-                        let at = CCursor { index: p.col - rows[r].0, prefer_next_row: true };
+                        let at = CCursor { index: (p.col - rows[r].0).into(), prefer_next_row: true };
                         (g.pos_from_cursor(at).left(), r, rows.len())
                     }
                     None => {
                         let g = lay(p.line);
-                        let cur = CCursor { index: p.col, prefer_next_row: true };
+                        let cur = CCursor { index: (p.col).into(), prefer_next_row: true };
                         (g.pos_from_cursor(cur).left(), rc_of(&g, cur).0, g.rows.len())
                     }
                 };
@@ -7137,7 +7142,7 @@ impl AlexCodeApp {
                     Some(rows) => {
                         let r = target.min(rows.len() - 1);
                         let g = piece(line, rows, r);
-                        let mut c = g.cursor_from_pos(egui::vec2(x, row_h * 0.5)).index;
+                        let mut c = g.cursor_from_pos(egui::vec2(x, row_h * 0.5)).index.0;
                         // 落在一列的結尾（不是整行的結尾）：那個位置算下一列的開頭，退一格才會留在這一列
                         if r + 1 < rows.len() && c >= rows[r + 1].0 - rows[r].0 {
                             c = c.saturating_sub(1);
@@ -7202,9 +7207,9 @@ impl AlexCodeApp {
                             edit = Some((sel.start(), sel.end(), text, true));
                         }
                     }
-                    // 輸入法：組字中的文字只顯示在游標處（把後面的文字往後推），選定之後才寫進文件
-                    Event::Ime(egui::ImeEvent::Enabled | egui::ImeEvent::Disabled) => preedit.clear(),
-                    Event::Ime(egui::ImeEvent::Preedit(t)) => {
+                    // 輸入法：組字中的文字只顯示在游標處（把後面的文字往後推），選定之後才寫進文件。
+                    // egui 0.35 起不再送 Ime(Enabled / Disabled)：空的組字文字表示取消組字
+                    Event::Ime(egui::ImeEvent::Preedit { text: t, .. }) => {
                         // 開始組字時先刪掉選取的文字（與一般編輯區相同），組字中的文字就排在那個位置
                         if !t.is_empty() && !sel.is_empty() {
                             edit = Some((sel.start(), sel.end(), String::new(), true));
@@ -7418,7 +7423,7 @@ impl AlexCodeApp {
                 let text_x = rect.left() + gutter_w + 10.0;
                 let y_of = |line: usize| rect.top() + 4.0 + line as f32 * row_h;
                 // 折行處的欄位同時是上一列的結尾與下一列的開頭：游標一律算在下一列的開頭
-                let cc = |col: usize| CCursor { index: col, prefer_next_row: true };
+                let cc = |col: usize| CCursor { index: (col).into(), prefer_next_row: true };
                 let layout = |ui: &egui::Ui, text: &str, hits: &[(usize, usize)]| {
                     let mut job = highlight_ranges(text, Lang::Plain, pal, font.clone(), hits);
                     if let Some(w) = wrap_w {
@@ -7642,7 +7647,7 @@ impl AlexCodeApp {
                         painter.rect_filled(caret, 0.0, c.accent);
                         caret_rect = Some(caret);
                         // 告訴作業系統游標在哪裡：輸入法的候選字視窗會跟著它，沒有這個輸入法也不會啟用
-                        ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: clip, cursor_rect: caret }));
+                        ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: clip, cursor_rect: caret, should_interrupt_composition: false }));
                     }
                     // 組字中的文字加底線，和已經在文件裡的文字區分開來
                     if let Some(p) = compose_at.filter(|p| p.line == line && p.col >= start) {
@@ -9711,7 +9716,7 @@ mod tests {
         assert_eq!(line0(&app), "");
 
         // 輸入法：組字期間文件不變、按鍵歸輸入法；選定後才插入
-        frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Enabled), Event::Ime(egui::ImeEvent::Preedit("zhong".into()))]);
+        frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: "zhong".into(), active_range_chars: None })]);
         frame(&mut app, &ctx, vec![key(Key::Backspace, none), key(Key::ArrowDown, none)]);
         assert_eq!((line0(&app).as_str(), cursor(&app)), ("", (0, 0)));
         let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Commit("中文".into()))]);
@@ -9773,7 +9778,7 @@ mod tests {
         let caret0 = caret_x(&out);
 
         // 組字中：那一行排成「游標前的文字 + 組字中的文字 + 游標後的文字」，不是另外蓋一塊在上面
-        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Enabled), Event::Ime(egui::ImeEvent::Preedit("zhong".into()))]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: "zhong".into(), active_range_chars: None })]);
         assert!(has(&out, "linezhong 00000 some text here"), "painted: {:?}", painted_texts(&out));
         assert!(!has(&out, "zhong"), "the preedit is no longer drawn as an overlay");
         assert!(!has(&out, "line 00000 some text here"));
@@ -9797,13 +9802,13 @@ mod tests {
         assert!(has(&out, "linezhong 00000 some text here"));
 
         // 取消組字：畫面回到原樣
-        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit(String::new()))]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None })]);
         assert!(has(&out, "line 00000 some text here"));
         assert!((caret_x(&out) - caret0).abs() < 0.01);
 
         // 有選取時開始組字：選取的文字先刪掉，組字中的文字排在那個位置
         frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::SHIFT)]);
-        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Enabled), Event::Ime(egui::ImeEvent::Preedit("z".into()))]);
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: "z".into(), active_range_chars: None })]);
         assert_eq!((line0(&app).as_str(), cursor(&app)), (" 00000 some text here", (0, 0)));
         assert!(has(&out, "z 00000 some text here"), "painted: {:?}", painted_texts(&out));
         let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Commit("中".into()))]);
@@ -10508,7 +10513,7 @@ mod tests {
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn nope()")).expect("the editor text").1;
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn nope()")).unwrap();
         // 字元在畫面上的 x（以 egui 實際排出來的位置為準）
-        let x_at = |row: usize, col: usize| text.left() + g.rows[row].x_offset(col);
+        let x_at = |row: usize, col: usize| text.left() + g.rows[row].x_offset((col).into());
         // 行號區：有錯誤的行號是錯誤色、有警告的是警告色、沒有的照舊
         let num_color = |n: &str| {
             painted_galleys(&out).into_iter().find(|g| g.job.text == n).map(|g| g.job.sections[0].format.color)
@@ -10634,7 +10639,7 @@ mod tests {
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn main()")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn main()")).unwrap().1;
         let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
-        let at = Pos2::new(text.left() + g.rows[1].x_offset(6) + 1.0, text.top() + row_h * 1.5);
+        let at = Pos2::new(text.left() + g.rows[1].x_offset((6).into()) + 1.0, text.top() + row_h * 1.5);
         let ctrl = Modifiers::COMMAND;
         let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: ctrl };
         frame_with(&mut app, &ctx, |i| {
@@ -10737,7 +10742,7 @@ mod tests {
         let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let shown = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t.contains(s));
         // 停在 `helper` 上（第 2 行，表情符號後面第 3 個字元）
-        let at = Pos2::new(text.left() + g.rows[1].x_offset(8) + 1.0, text.top() + row_h * 1.5);
+        let at = Pos2::new(text.left() + g.rows[1].x_offset((8).into()) + 1.0, text.top() + row_h * 1.5);
         let moved = Instant::now();
         let out = frame(&mut app, &ctx, vec![Event::PointerMoved(at)]);
         assert!(!shown(&out, "Adds things up."));
@@ -10763,7 +10768,7 @@ mod tests {
         assert_eq!(asked.lock().unwrap().len(), 1);
 
         // 移到沒有說明的地方（第 1 行）：說明消失，問過之後也不顯示任何東西
-        let at0 = Pos2::new(text.left() + g.rows[0].x_offset(4) + 1.0, text.top() + row_h * 0.5);
+        let at0 = Pos2::new(text.left() + g.rows[0].x_offset((4).into()) + 1.0, text.top() + row_h * 0.5);
         let out = frame(&mut app, &ctx, vec![Event::PointerMoved(at0)]);
         assert!(!shown(&out, "Adds things up."), "moving away hides it");
         let t0 = Instant::now();
@@ -10973,7 +10978,7 @@ mod tests {
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
         let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
-        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset((col).into()) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         let sel_fill = ctx.global_style().visuals.selection.bg_fill;
         let sel_rects = |out: &egui::FullOutput| {
             fn walk(shape: &Shape, fill: Color32, found: &mut Vec<Rect>) {
@@ -11004,8 +11009,8 @@ mod tests {
         assert_eq!(app.box_ranges(), vec![(0, 2, 5), (1, 2, 2), (2, 2, 5)]);
         let rects = sel_rects(&out);
         assert_eq!(rects.len(), 3, "one highlight per line: {rects:?}");
-        let x2 = text.left() + g.rows[0].x_offset(2);
-        let x5 = text.left() + g.rows[0].x_offset(5);
+        let x2 = text.left() + g.rows[0].x_offset((2).into());
+        let x5 = text.left() + g.rows[0].x_offset((5).into());
         assert!(rects.iter().all(|r| (r.left() - x2).abs() < 1.0), "{rects:?} start at {x2}");
         assert!((rects[0].right() - x5).abs() < 1.0 && (rects[2].right() - x5).abs() < 1.0);
         assert!(rects[1].width() <= 2.5, "the short line gets a thin caret: {:?}", rects[1]);
@@ -11057,7 +11062,7 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
-        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset((col).into()) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         drag(&mut app, at(0, 2), at(2, 5), alt);
         assert!(app.box_ranges().is_empty());
     }
@@ -11071,7 +11076,7 @@ mod tests {
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
         let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
-        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset((col).into()) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         let alt = Modifiers::ALT;
         let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2| {
             let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: alt };
@@ -11148,7 +11153,7 @@ mod tests {
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
         let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
-        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset((col).into()) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         let alt = Modifiers::ALT;
         let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2| {
             let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: alt };
@@ -11334,7 +11339,7 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         let out = frame(&mut app, &ctx, vec![]);
         let (g, r) = galley(&out, "alpha two").expect("the left pane shows the first tab");
-        let p = Pos2::new(r.left() + g.rows[0].x_offset(3) + 1.0, r.center().y);
+        let p = Pos2::new(r.left() + g.rows[0].x_offset((3).into()) + 1.0, r.center().y);
         click(&mut app, &ctx, p);
         assert_eq!(app.active_tab_idx, 0);
         assert_eq!(cursor(&app), (1, 3), "the cursor goes where the pane was clicked");
@@ -11396,7 +11401,7 @@ mod tests {
         assert!(hits.iter().filter(|h| h.as_str() == "two").count() >= 2, "{hits:?}");
         // 游標：第 2 行第 3 個字之後一條細線
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text == "alpha two").unwrap();
-        let x = two.left() + g.rows[0].x_offset(3);
+        let x = two.left() + g.rows[0].x_offset((3).into());
         let carets = shapes_of(c.fg_dim);
         assert!(carets.iter().any(|r| (r.left() - x).abs() < 1.5 && r.width() < 3.0 && r.center().y > two.top() && r.center().y < two.bottom()), "caret at {x}: {carets:?}");
     }
@@ -11482,7 +11487,7 @@ mod tests {
         let err: Vec<_> = paths.iter().filter(|p| p.0 == DIAG_ERROR).collect();
         assert_eq!(err.len(), 1, "one error squiggle: {paths:?}");
         let r = err[0].1;
-        let (x3, x7) = (text.left() + g.rows[0].x_offset(3), text.left() + g.rows[0].x_offset(7));
+        let (x3, x7) = (text.left() + g.rows[0].x_offset((3).into()), text.left() + g.rows[0].x_offset((7).into()));
         assert!((r.left() - x3).abs() < 1.0 && (r.right() - x7).abs() < 1.0, "{r:?} vs {x3}..{x7}");
         assert!(r.top() > text.top() + text.height() * 0.6 && r.bottom() <= text.bottom() + 1.0, "under the line: {r:?} {text:?}");
         assert_eq!(paths.iter().filter(|p| p.0 == DIAG_WARNING).count(), 1);
@@ -11561,7 +11566,7 @@ mod tests {
                 .find(|(g, l)| g.job.text == text && l.1.right() < 640.0)
                 .map(|(g, l)| (g, l.1))
                 .unwrap();
-            Pos2::new(r.left() + g.rows[0].x_offset(col) + 1.0, r.center().y)
+            Pos2::new(r.left() + g.rows[0].x_offset((col).into()) + 1.0, r.center().y)
         };
         let (from, to) = (at("alpha two", 2), at("alpha four", 3));
         let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
@@ -12005,7 +12010,7 @@ mod tests {
         let editor_id = egui::Id::new(("alexcode-editor", 0usize, String::from("t.rs")));
         let st = egui::text_edit::TextEditState::load(&ctx, editor_id).expect("main editor state");
         let r = st.cursor.char_range().expect("main editor cursor");
-        assert_eq!(r.primary.index, 6, "the main editor's cursor follows the window");
+        assert_eq!(r.primary.index.0, 6, "the main editor's cursor follows the window");
     }
 
     #[test]
@@ -12310,7 +12315,7 @@ mod tests {
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.contains("RED")).expect("the colored line is drawn");
         let section = |word: &str| {
             let at = g.job.text.find(word).unwrap();
-            g.job.sections.iter().find(|s| s.byte_range.contains(&at)).unwrap().format.clone()
+            g.job.sections.iter().find(|s| s.byte_range.contains(&at.into())).unwrap().format.clone()
         };
         assert_eq!(section("RED").color, TERM_COLORS[1]);
         let fg = app.theme_mgr.current_palette().clone();
@@ -12806,7 +12811,7 @@ mod tests {
                 Shape::Text(t) => {
                     let job = &t.galley.job;
                     for s in job.sections.iter().filter(|s| s.format.background == bg) {
-                        found.push(job.text[s.byte_range.clone()].to_string());
+                        found.push(job.text[s.byte_range.start.0..s.byte_range.end.0].to_string());
                     }
                 }
                 _ => {}
@@ -13223,8 +13228,8 @@ mod tests {
         assert_eq!(para_of(&g, 99), (2, 0), "past the end: the last line");
         // 排版的列與列裡的位置：折行處依 prefer_next_row 決定
         assert_eq!(rc_of(&g, CCursor::new(5)), (1, 1));
-        assert_eq!(rc_of(&g, CCursor { index: 4, prefer_next_row: true }), (1, 0));
-        assert_eq!(rc_of(&g, CCursor { index: 4, prefer_next_row: false }), (0, 4));
+        assert_eq!(rc_of(&g, CCursor { index: (4).into(), prefer_next_row: true }), (1, 0));
+        assert_eq!(rc_of(&g, CCursor { index: (4).into(), prefer_next_row: false }), (0, 4));
         assert_eq!(rc_of(&g, CCursor::new(12)), (3, 1));
         // 點在第二列的結尾右邊：游標留在那一列的結尾（不跳到下一列的開頭）
         let row1 = &g.rows[1];
