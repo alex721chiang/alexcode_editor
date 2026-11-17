@@ -195,6 +195,29 @@ pub fn path_from_uri(uri: &str) -> Option<String> {
     None
 }
 
+/// 比對兩個 uri 是不是同一個檔案用的鍵：解開 `%XX`、反斜線改成斜線；Windows 上不分大小寫
+/// （伺服器送回來的 uri 可能把磁碟機代號改小寫、把 `:` 編碼成 `%3A`）
+pub fn uri_key(uri: &str) -> String {
+    let s = percent_decode(uri).replace('\\', "/");
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
+    }
+}
+
+/// LSP 的位置以 UTF-16 單位計（預設的 positionEncoding）：換成 `line` 裡的第幾個字元（超過行尾時是行尾）
+pub fn utf16_to_char_col(line: &str, units: usize) -> usize {
+    let mut n = 0;
+    for (i, ch) in line.chars().enumerate() {
+        if n >= units {
+            return i;
+        }
+        n += ch.len_utf16();
+    }
+    line.chars().count()
+}
+
 pub fn position_json(line: i32, character: i32) -> Value {
     json!({ "line": line, "character": character })
 }

@@ -152,6 +152,97 @@ fn missing_and_exited_servers_are_reported() {
     assert_eq!(*starts.lock().unwrap(), 1);
 }
 
+/// 把 uri 改成另一種合法的寫法（Windows 的磁碟機代號改小寫並把 `:` 編碼成 `%3A`，像 VS Code 那樣）
+fn other_spelling(uri: &str) -> String {
+    let b = uri.as_bytes();
+    if uri.len() > 10 && b[9] == b':' && b[8].is_ascii_alphabetic() {
+        format!("file:///{}%3A{}", (b[8] as char).to_ascii_lowercase(), &uri[10..])
+    } else {
+        uri.to_string()
+    }
+}
+
+#[test]
+fn diagnostics_are_kept_per_file_and_wake_the_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let log: Log = Arc::new(Mutex::new(Vec::new()));
+    let l = log.clone();
+    // 假伺服器：didOpen / didChange 之後送出那份文件的診斷（uri 換一種寫法），內容含 "ok" 時送空的清單
+    let launcher: Launcher = Box::new(move |_kind, _root| {
+        let (client_read, mut server_write) = std::io::pipe()?;
+        let (mut server_read, client_write) = std::io::pipe()?;
+        let log = l.clone();
+        std::thread::spawn(move || {
+            let mut frames = Reader::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = server_read.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                frames.feed(&buf[..n]);
+                for m in frames.take_messages() {
+                    log.lock().unwrap().push(m.clone());
+                    let method = m["method"].as_str().unwrap_or("");
+                    if method == "initialize" {
+                        let reply = json!({ "jsonrpc": "2.0", "id": m["id"], "result": { "capabilities": {} } });
+                        let _ = server_write.write_all(&frame(&reply));
+                    }
+                    if method == "textDocument/didOpen" || method == "textDocument/didChange" {
+                        let uri = m["params"]["textDocument"]["uri"].as_str().unwrap().to_string();
+                        let text = m["params"]["textDocument"]["text"].as_str()
+                            .or(m["params"]["contentChanges"][0]["text"].as_str()).unwrap_or("").to_string();
+                        let diags = if text.contains("ok") { json!([]) } else { json!([
+                            { "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
+                              "severity": 1, "message": "cannot find value `nope`", "source": "rustc" },
+                            { "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 2 } },
+                              "severity": 2, "message": "unused variable" }
+                        ]) };
+                        let note = json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+                            "params": { "uri": other_spelling(&uri), "diagnostics": diags } });
+                        let _ = server_write.write_all(&frame(&note));
+                    }
+                }
+            }
+        });
+        Ok(LspClient::from_io(client_read, client_write))
+    });
+    let mut m = LspManager::new(dir.path().to_path_buf(), launcher);
+    let woken = Arc::new(Mutex::new(0));
+    let w = woken.clone();
+    m.set_waker(Arc::new(move || *w.lock().unwrap() += 1));
+    let rs = dir.path().join("main.rs").to_string_lossy().into_owned();
+    let other = dir.path().join("other.rs").to_string_lossy().into_owned();
+    let docs = vec![OpenDoc { path: rs.clone(), revision: 1 }];
+    let texts = ["fn nope() {}\nlet x = 1;"];
+    assert!(m.diagnostics(&rs).is_empty());
+    assert!(pump(&mut m, &docs, &texts, 10, |m| m.diagnostics(&rs).len() == 2), "diagnostics arrive for the open file");
+    let d = m.diagnostics(&rs);
+    assert_eq!((d[0].start_line, d[0].start_char, d[0].end_line, d[0].end_char, d[0].severity), (0, 3, 0, 7, 1));
+    assert_eq!((d[0].message.as_str(), d[0].source.as_str()), ("cannot find value `nope`", "rustc"));
+    assert_eq!((d[1].severity, d[1].message.as_str()), (2, "unused variable"));
+    assert!(m.diagnostics(&other).is_empty(), "other files have none");
+    assert!(*woken.lock().unwrap() > 0, "the waker runs when messages arrive, so the UI repaints");
+    // 修好之後伺服器送空的清單：診斷清掉
+    let docs2 = vec![OpenDoc { path: rs.clone(), revision: 2 }];
+    let texts2 = ["fn ok() {}"];
+    assert!(pump(&mut m, &docs2, &texts2, 10, |m| m.diagnostics(&rs).is_empty()), "an empty list clears them");
+    // 再改壞，然後關掉分頁：didClose 之後不再留著那份文件的診斷
+    let docs3 = vec![OpenDoc { path: rs.clone(), revision: 3 }];
+    assert!(pump(&mut m, &docs3, &texts, 10, |m| m.diagnostics(&rs).len() == 2));
+    m.sync(&[], |_| String::new());
+    assert!(m.diagnostics(&rs).is_empty(), "closing the tab drops its diagnostics");
+}
+
+#[test]
+fn utf16_positions_become_char_columns() {
+    use alexcode::lsp::utf16_to_char_col;
+    assert_eq!(utf16_to_char_col("abc", 2), 2);
+    assert_eq!(utf16_to_char_col("中文x", 2), 2, "BMP characters are one UTF-16 unit");
+    assert_eq!(utf16_to_char_col("😀x", 2), 1, "an emoji is two UTF-16 units but one char");
+    assert_eq!(utf16_to_char_col("😀x", 3), 2);
+    assert_eq!(utf16_to_char_col("ab", 99), 2, "past the end clamps to the line length");
+}
+
 #[test]
 #[ignore]
 fn real_servers_accept_the_handshake() {
@@ -188,4 +279,29 @@ fn real_servers_accept_the_handshake() {
             assert!(matches!(m.status(k), Some(LspStatus::NotInstalled) | Some(LspStatus::Exited)), "{k:?}: {:?}", m.status(k));
         }
     }
+}
+
+#[test]
+#[ignore]
+fn real_clangd_reports_diagnostics() {
+    // cargo test --test lsp_manager_test real_clangd -- --ignored --nocapture：裝了 clangd 才有意義
+    let dir = tempfile::tempdir().unwrap();
+    let c = dir.path().join("broken.c");
+    let text = "int main(void) {\n    int unused = 1;\n    return missing_value;\n}\n";
+    std::fs::write(&c, text).unwrap();
+    let path = c.to_string_lossy().into_owned();
+    let mut m = LspManager::new(dir.path().to_path_buf(), Box::new(spawn_server));
+    let docs = vec![OpenDoc { path: path.clone(), revision: 1 }];
+    let t0 = Instant::now();
+    let ok = pump(&mut m, &docs, &[text], 60, |m| !m.diagnostics(&path).is_empty());
+    println!("after {:?}: status {:?}", t0.elapsed(), m.status(ServerKind::Clangd));
+    for d in m.diagnostics(&path).iter() {
+        println!("  {}:{}-{}:{} severity {} {:?} ({})", d.start_line, d.start_char, d.end_line, d.end_char, d.severity, d.message, d.source);
+    }
+    assert!(ok, "clangd sent diagnostics for the broken file");
+    assert!(m.diagnostics(&path).iter().any(|d| d.severity == 1 && d.start_line == 2), "the undeclared identifier is an error on line 3");
+    // 修好之後清單清空
+    let fixed = "int main(void) {\n    return 0;\n}\n";
+    let docs2 = vec![OpenDoc { path: path.clone(), revision: 2 }];
+    assert!(pump(&mut m, &docs2, &[fixed], 30, |m| m.diagnostics(&path).is_empty()), "fixing the file clears them");
 }

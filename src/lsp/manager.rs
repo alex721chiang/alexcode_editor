@@ -5,11 +5,12 @@
 //! 分頁關掉就 didClose。伺服器送來的請求（例如 `window/workDoneProgress/create`）一律回覆，
 //! 免得伺服器一直等。介面每一幀呼叫 `sync`。
 
-use super::client::LspClient;
-use super::protocol::{make_notification, make_request, make_response, uri_from_path};
+use super::client::{LspClient, Waker};
+use super::protocol::{make_notification, make_request, make_response, parse_diagnostics, uri_from_path, uri_key, Diagnostic};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// 支援的語言伺服器
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -105,9 +106,15 @@ struct Server {
     init_id: i64,
     /// 已經送 didOpen 的文件：uri → (送給伺服器的版本號, 那時的內容版本)
     docs: HashMap<String, (i64, u64)>,
+    /// 伺服器送來的診斷（`textDocument/publishDiagnostics`）：`uri_key` → 最新的一份清單
+    diags: HashMap<String, Arc<Vec<Diagnostic>>>,
 }
 
 impl Server {
+    fn new(client: Option<LspClient>, status: LspStatus, init_id: i64) -> Self {
+        Self { client, status, init_id, docs: HashMap::new(), diags: HashMap::new() }
+    }
+
     /// 讀進伺服器送來的訊息：initialize 的回覆、伺服器的請求；伺服器結束時改成 `Exited`
     fn poll(&mut self) {
         let Some(c) = &mut self.client else { return };
@@ -123,6 +130,16 @@ impl Server {
                         Value::Null
                     };
                     let _ = c.send_message(&make_response(id.clone(), result));
+                }
+                // 診斷：每次送來的是那份文件完整的清單（空的表示沒有問題了）
+                (Some("textDocument/publishDiagnostics"), None) => {
+                    let Some(uri) = msg["params"]["uri"].as_str() else { continue };
+                    let list = msg["params"]["diagnostics"].as_array().map_or_else(Vec::new, |a| parse_diagnostics(a));
+                    if list.is_empty() {
+                        self.diags.remove(&uri_key(uri));
+                    } else {
+                        self.diags.insert(uri_key(uri), Arc::new(list));
+                    }
                 }
                 (None, Some(id)) if id.as_i64() == Some(self.init_id) && self.status == LspStatus::Starting => {
                     if let Some(err) = msg.get("error") {
@@ -142,6 +159,7 @@ impl Server {
                 self.status = LspStatus::Exited;
             }
             self.client = None;
+            self.diags.clear();
         }
     }
 
@@ -159,12 +177,31 @@ pub struct LspManager {
     root: PathBuf,
     launcher: Launcher,
     servers: HashMap<ServerKind, Server>,
+    waker: Option<Waker>,
 }
 
 impl LspManager {
     /// `root` 是專案資料夾（initialize 的 rootUri；之後才啟動的伺服器用 `set_root` 設的）
     pub fn new(root: PathBuf, launcher: Launcher) -> Self {
-        Self { root, launcher, servers: HashMap::new() }
+        Self { root, launcher, servers: HashMap::new(), waker: None }
+    }
+
+    /// 伺服器送來訊息時（例如之後才算好的診斷）呼叫 `f`：介面用它要求重畫
+    pub fn set_waker(&mut self, f: Waker) {
+        for c in self.servers.values().filter_map(|s| s.client.as_ref()) {
+            c.set_waker(f.clone());
+        }
+        self.waker = Some(f);
+    }
+
+    pub fn has_waker(&self) -> bool {
+        self.waker.is_some()
+    }
+
+    /// 伺服器對這個檔案最新的診斷（沒有時是空的）
+    pub fn diagnostics(&self, path: &str) -> Arc<Vec<Diagnostic>> {
+        let key = uri_key(&uri_from_path(path));
+        self.servers.values().find_map(|s| s.diags.get(&key).cloned()).unwrap_or_default()
     }
 
     pub fn set_root(&mut self, root: PathBuf) {
@@ -201,15 +238,16 @@ impl LspManager {
                     }
                 });
                 // 寫不進去表示伺服器一啟動就結束了（例如 rustup 的 rust-analyzer 沒有裝那個元件）
+                if let Some(w) = &self.waker {
+                    c.set_waker(w.clone());
+                }
                 match c.send_message(&make_request(id, "initialize", params)) {
-                    Ok(()) => Server { client: Some(c), status: LspStatus::Starting, init_id: id, docs: HashMap::new() },
-                    Err(_) => Server { client: None, status: LspStatus::Exited, init_id: id, docs: HashMap::new() },
+                    Ok(()) => Server::new(Some(c), LspStatus::Starting, id),
+                    Err(_) => Server::new(None, LspStatus::Exited, id),
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Server { client: None, status: LspStatus::NotInstalled, init_id: 0, docs: HashMap::new() }
-            }
-            Err(e) => Server { client: None, status: LspStatus::Failed(e.to_string()), init_id: 0, docs: HashMap::new() },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Server::new(None, LspStatus::NotInstalled, 0),
+            Err(e) => Server::new(None, LspStatus::Failed(e.to_string()), 0),
         };
         self.servers.insert(kind, server);
     }
@@ -240,6 +278,7 @@ impl LspManager {
             let gone: Vec<String> = s.docs.keys().filter(|u| !open.contains(u.as_str())).cloned().collect();
             for uri in gone {
                 s.docs.remove(&uri);
+                s.diags.remove(&uri_key(&uri));
                 s.notify("textDocument/didClose", json!({ "textDocument": { "uri": uri } }));
             }
             for (i, uri, d) in mine {

@@ -8,7 +8,11 @@ use serde_json::Value;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
+
+/// 收到伺服器的訊息時呼叫（介面用它要求重畫，才看得到之後才送來的診斷）
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
 pub struct LspClient {
     child: Option<Child>,
@@ -17,6 +21,7 @@ pub struct LspClient {
     next_id: i64,
     /// 伺服器的輸出端已經關閉（伺服器結束了）
     closed: bool,
+    waker: Arc<Mutex<Option<Waker>>>,
 }
 
 impl LspClient {
@@ -39,6 +44,8 @@ impl LspClient {
     /// 接在一對讀寫端上：`reader` 是伺服器送來的資料，`writer` 是要送給伺服器的
     pub fn from_io(mut reader: impl Read + Send + 'static, writer: impl Write + Send + 'static) -> Self {
         let (tx, rx): (Sender<Value>, Receiver<Value>) = channel();
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let w = waker.clone();
 
         // 背景讀取執行緒
         thread::spawn(move || {
@@ -49,13 +56,28 @@ impl LspClient {
                     break;
                 }
                 frames.feed(&buf[..n]);
-                for msg in frames.take_messages() {
+                let msgs = frames.take_messages();
+                let any = !msgs.is_empty();
+                for msg in msgs {
                     let _ = tx.send(msg);
                 }
+                if any {
+                    wake(&w);
+                }
             }
+            // 伺服器結束：也叫醒介面，狀態列才會更新
+            drop(tx);
+            wake(&w);
         });
 
-        Self { child: None, stdin: Box::new(writer), incoming_rx: rx, next_id: 1, closed: false }
+        Self { child: None, stdin: Box::new(writer), incoming_rx: rx, next_id: 1, closed: false, waker }
+    }
+
+    /// 之後每收到伺服器的訊息就呼叫 `f`
+    pub fn set_waker(&self, f: Waker) {
+        if let Ok(mut g) = self.waker.lock() {
+            *g = Some(f);
+        }
     }
 
     pub fn send_message(&mut self, msg: &Value) -> std::io::Result<()> {
@@ -85,6 +107,13 @@ impl LspClient {
     /// 伺服器已經結束（輸出端關閉、訊息都取完了）
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+}
+
+fn wake(w: &Mutex<Option<Waker>>) {
+    let f = w.lock().ok().and_then(|g| g.clone());
+    if let Some(f) = f {
+        f();
     }
 }
 

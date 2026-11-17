@@ -28,7 +28,7 @@ use crate::index::{extract_symbols, Symbol, SymbolLang};
 use crate::git::{blame_contents, blame_status_text, diff_line_states, LineInfo, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::git::{align_trimmed, change_starts, Row as DiffRow, RowType as DiffRowType};
 use crate::filter::{FilterEngine, FilterLogic};
-use crate::lsp::{Launcher, LspManager, LspStatus, OpenDoc, ServerKind};
+use crate::lsp::{utf16_to_char_col, Diagnostic, Launcher, LspManager, LspStatus, OpenDoc, ServerKind};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
 use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, Finder, SearchStats};
@@ -722,6 +722,91 @@ fn lsp_install_hint(kind: ServerKind) -> &'static str {
         ServerKind::Clangd => "安裝 clangd（LLVM），並確認它在 PATH 裡",
         ServerKind::Pylsp => "安裝：pip install python-lsp-server，並確認 pylsp 在 PATH 裡",
     }
+}
+
+/// 語言伺服器診斷的顏色（不隨主題改變，與 VS Code 預設的錯誤 / 警告 / 資訊色相近）
+const DIAG_ERROR: Color32 = Color32::from_rgb(0xF1, 0x4C, 0x4C);
+const DIAG_WARNING: Color32 = Color32::from_rgb(0xCC, 0xA7, 0x00);
+const DIAG_INFO: Color32 = Color32::from_rgb(0x37, 0x94, 0xFF);
+const DIAG_HINT: Color32 = Color32::from_rgb(0x8C, 0x8C, 0x8C);
+
+/// 嚴重程度（1 錯誤、2 警告、3 資訊、4 提示）的顏色與名稱
+fn diag_color(severity: i32) -> Color32 {
+    match severity {
+        1 => DIAG_ERROR,
+        2 => DIAG_WARNING,
+        3 => DIAG_INFO,
+        _ => DIAG_HINT,
+    }
+}
+
+fn diag_label(severity: i32) -> &'static str {
+    match severity {
+        1 => "錯誤",
+        2 => "警告",
+        3 => "資訊",
+        _ => "提示",
+    }
+}
+
+/// 一個診斷在程式碼編輯區的排版 `g`（整份文字）上，每一列佔的區段：(上緣, 下緣, 左, 右)，座標相對於排版左上角。
+/// `row_lines` 是自動換行時每一列所屬的行（不換行時是空的，列就是行）。位置以 UTF-16 單位計，換成字元；
+/// 超過行尾的截到行尾。範圍是空的時標出那一個字元（在行尾時標前一個字元，空行標 `min_w` 寬）
+fn diag_spans(g: &egui::Galley, lines: &[String], row_lines: &[usize], d: &Diagnostic, min_w: f32) -> Vec<(f32, f32, f32, f32)> {
+    let mut out = Vec::new();
+    if lines.is_empty() {
+        return out;
+    }
+    let first = (d.start_line.max(0) as usize).min(lines.len() - 1);
+    let last = (d.end_line.max(0) as usize).clamp(first, lines.len() - 1).min(first + 500);
+    for (l, text) in lines.iter().enumerate().take(last + 1).skip(first) {
+        let len = text.chars().count();
+        let mut a = if l == first { utf16_to_char_col(text, d.start_char.max(0) as usize) } else { 0 };
+        let mut b = if l as i32 == d.end_line { utf16_to_char_col(text, d.end_char.max(0) as usize) } else { len };
+        b = b.max(a);
+        if a == b {
+            if l != first {
+                continue; // 跨行範圍結尾停在行首：這一行沒有被涵蓋到
+            }
+            if b < len {
+                b += 1;
+            } else {
+                a = a.saturating_sub(1);
+            }
+        }
+        let (r0, r1) = if row_lines.is_empty() {
+            (l, (l + 1).min(g.rows.len()))
+        } else {
+            (row_lines.partition_point(|&x| x < l), row_lines.partition_point(|&x| x <= l))
+        };
+        let mut start = 0;
+        for row in g.rows.get(r0..r1.max(r0)).unwrap_or(&[]) {
+            let end = start + row.char_count_excluding_newline();
+            let (lo, hi) = (a.max(start), b.min(end));
+            if lo < hi {
+                out.push((row.rect.top(), row.rect.bottom(), row.x_offset(lo - start), row.x_offset(hi - start)));
+            } else if a == b && a >= start && a <= end {
+                let x = row.x_offset(a - start);
+                out.push((row.rect.top(), row.rect.bottom(), x, x + min_w));
+                break;
+            }
+            start = end;
+        }
+    }
+    out
+}
+
+/// 診斷的波浪底線：從 `x0` 到 `x1`、底端在 `y`
+fn squiggle(x0: f32, x1: f32, y: f32, color: Color32) -> Shape {
+    let mut pts = Vec::new();
+    let (mut x, mut up) = (x0, true);
+    while x < x1 {
+        pts.push(Pos2::new(x, if up { y - 2.0 } else { y }));
+        up = !up;
+        x += 2.0;
+    }
+    pts.push(Pos2::new(x1, if up { y - 2.0 } else { y }));
+    Shape::line(pts, Stroke::new(1.0_f32, color))
 }
 
 /// 終端機的 16 色（ANSI 0–15，數值與 Windows Terminal 的 Campbell 配色相同）。
@@ -1976,6 +2061,11 @@ impl AlexCodeApp {
     /// 伺服器還在啟動時繼續重畫，才看得到它就緒
     fn lsp_tick(&mut self, ctx: &egui::Context) {
         self.lsp.set_root(self.project_root.clone());
+        if !self.lsp.has_waker() {
+            // 診斷是伺服器算好之後才送來的：收到訊息就重畫，不必一直輪詢
+            let ctx = ctx.clone();
+            self.lsp.set_waker(Arc::new(move || ctx.request_repaint()));
+        }
         let mut docs = Vec::new();
         let mut idx = Vec::new();
         for (i, b) in self.tabs.iter().enumerate() {
@@ -3902,6 +3992,14 @@ impl AlexCodeApp {
         let git_marks = std::mem::take(&mut self.git_marks.1);
         let was_focused = self.editor_was_focused;
         let pair_enabled = self.config.auto_pair && !matches!(lang, Lang::Plain | Lang::Markdown);
+        // 語言伺服器的診斷：行號區以最嚴重的那一個上色
+        let diags = self.tabs[idx].file_path.as_deref().map(|p| self.lsp.diagnostics(p)).unwrap_or_default();
+        let mut diag_sev: HashMap<usize, i32> = HashMap::new();
+        for d in diags.iter() {
+            let line = d.start_line.max(0) as usize;
+            let s = diag_sev.entry(line).or_insert(d.severity);
+            *s = (*s).min(d.severity);
+        }
 
         let mut new_cursor: Option<(usize, usize)> = None;
         let mut changed = false;
@@ -4055,7 +4153,11 @@ impl AlexCodeApp {
                             let line = if wrap { row_lines[i] } else { i };
                             let line_start = !wrap || i == 0 || row_lines[i - 1] != line;
                             let active = line == active_line;
-                            let col = if active { c.accent } else { c.faint };
+                            let col = match diag_sev.get(&line) {
+                                Some(&s) => diag_color(s),
+                                None if active => c.accent,
+                                None => c.faint,
+                            };
                             if line_start {
                                 let g = f.layout_no_wrap(format!("{}", line + 1), num_font.clone(), col);
                                 let pos = Pos2::new(
@@ -4100,6 +4202,45 @@ impl AlexCodeApp {
                         }
                     });
                     ui.painter().set(gutter_idx, Shape::Vec(shapes));
+
+                    // 診斷：畫面上的範圍畫波浪底線；滑鼠停在底線上或行號上時列出訊息
+                    if !diags.is_empty() {
+                        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(clip));
+                        let mut tips: Vec<&Diagnostic> = Vec::new();
+                        for d in diags.iter() {
+                            for (top, bottom, l, r) in diag_spans(galley, &self.tabs[idx].lines, &row_lines, d, char_w) {
+                                let (y0, y1) = (gpos.y + top, gpos.y + bottom);
+                                if y0 > clip.bottom() || y1 < clip.top() {
+                                    continue;
+                                }
+                                let (x0, x1) = (gpos.x + l, gpos.x + r);
+                                ui.painter().add(squiggle(x0, x1, y1 - 1.0, diag_color(d.severity)));
+                                let over = hover.is_some_and(|p| p.x >= x0 - 1.0 && p.x <= x1 + 1.0 && p.y >= y0 && p.y <= y1);
+                                if over && !tips.contains(&d) {
+                                    tips.push(d);
+                                }
+                            }
+                        }
+                        if let Some(p) = hover.filter(|p| p.x >= gutter_rect.left() && p.x < gutter_rect.right()) {
+                            let y = p.y - gpos.y;
+                            if let Some(i) = galley.rows.iter().position(|r| y >= r.rect.top() && y < r.rect.bottom()) {
+                                let line = if wrap { row_lines[i] } else { i };
+                                tips = diags.iter().filter(|d| d.start_line.max(0) as usize == line).collect();
+                            }
+                        }
+                        if !tips.is_empty() {
+                            egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new("lsp-diagnostic-tip"), |ui| {
+                                ui.set_max_width(560.0);
+                                for d in &tips {
+                                    ui.horizontal_top(|ui| {
+                                        ui.colored_label(diag_color(d.severity), diag_label(d.severity));
+                                        let src = if d.source.is_empty() { String::new() } else { format!("（{}）", d.source) };
+                                        ui.label(format!("{}{}", d.message, src));
+                                    });
+                                }
+                            });
+                        }
+                    }
 
                     // 點擊 gutter 切換書籤
                     if gutter_resp.clicked() {
@@ -8565,6 +8706,120 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         assert!(!painted_lines(&out).iter().any(|l| l.0.starts_with("rust-analyzer")), "no server status for a .txt tab");
         assert_eq!(sent("initialize").len(), 1);
+    }
+
+    /// 這一幀畫出的折線（診斷的波浪底線）：(顏色, 範圍)
+    fn painted_paths(out: &egui::FullOutput) -> Vec<(Color32, Rect)> {
+        fn walk(shape: &Shape, found: &mut Vec<(Color32, Rect)>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, found)),
+                Shape::Path(p) => found.push((p.stroke.color, Rect::from_points(&p.points))),
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        out.shapes.iter().for_each(|s| walk(&s.shape, &mut found));
+        found
+    }
+
+    #[test]
+    fn diagnostics_mark_the_gutter_underline_the_range_and_show_on_hover() {
+        use serde_json::json;
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rs").to_string_lossy().into_owned();
+        let mut app = app_with(&ctx, "fn nope() {}\nlet 中x = 1;\nfn fine() {}\n");
+        app.tabs[0].file_path = Some(path.clone());
+        // 假的伺服器：收到 didOpen 就送出兩個診斷——第 1 行的 `nope`（錯誤）、第 2 行的 `x`（警告，前面有一個中文字）
+        let launcher: Launcher = Box::new(move |_, _| {
+            let (client_read, mut server_write) = std::io::pipe()?;
+            let (mut server_read, client_write) = std::io::pipe()?;
+            std::thread::spawn(move || {
+                let mut frames = crate::lsp::Reader::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = server_read.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    frames.feed(&buf[..n]);
+                    for m in frames.take_messages() {
+                        if m["method"] == "initialize" {
+                            let reply = json!({ "jsonrpc": "2.0", "id": m["id"], "result": { "capabilities": {} } });
+                            let _ = server_write.write_all(&crate::lsp::frame(&reply));
+                        }
+                        if m["method"] == "textDocument/didOpen" {
+                            let note = json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+                                "uri": m["params"]["textDocument"]["uri"],
+                                "diagnostics": [
+                                    { "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
+                                      "severity": 1, "message": "cannot find function `nope`", "source": "rustc" },
+                                    { "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 6 } },
+                                      "severity": 2, "message": "unused variable: `x`" }
+                                ] } });
+                            let _ = server_write.write_all(&crate::lsp::frame(&note));
+                        }
+                    }
+                }
+            });
+            Ok(crate::lsp::LspClient::from_io(client_read, client_write))
+        });
+        app.lsp = LspManager::new(dir.path().to_path_buf(), launcher);
+        let end = Instant::now() + Duration::from_secs(10);
+        while app.lsp.diagnostics(&path).len() < 2 && Instant::now() < end {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.lsp.diagnostics(&path).len(), 2, "the diagnostics arrived");
+        assert!(app.lsp.has_waker(), "the UI asks to be woken when the server sends something");
+
+        let out = frame(&mut app, &ctx, vec![]);
+        let font = FontId::monospace(app.config.font_size);
+        let row_h = ctx.fonts(|f| f.row_height(&font));
+        let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn nope()")).expect("the editor text").1;
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn nope()")).unwrap();
+        // 字元在畫面上的 x（以 egui 實際排出來的位置為準）
+        let x_at = |row: usize, col: usize| text.left() + g.rows[row].x_offset(col);
+        // 行號區：有錯誤的行號是錯誤色、有警告的是警告色、沒有的照舊
+        let num_color = |n: &str| {
+            painted_galleys(&out).into_iter().find(|g| g.job.text == n).map(|g| g.job.sections[0].format.color)
+        };
+        assert_eq!(num_color("1"), Some(DIAG_ERROR));
+        assert_eq!(num_color("2"), Some(DIAG_WARNING));
+        assert!(!matches!(num_color("3"), Some(c) if c == DIAG_ERROR || c == DIAG_WARNING));
+        // 波浪底線：從範圍的第一個字元到最後一個字元，貼在那一列的底下
+        let paths = painted_paths(&out);
+        let err: Vec<_> = paths.iter().filter(|p| p.0 == DIAG_ERROR).collect();
+        assert_eq!(err.len(), 1, "one error squiggle: {paths:?}");
+        let r = err[0].1;
+        assert!((r.left() - x_at(0, 3)).abs() < 1.0 && (r.right() - x_at(0, 7)).abs() < 1.0, "{r:?} vs {text:?}");
+        assert!(r.top() > text.top() + row_h * 0.6 && r.bottom() <= text.top() + row_h + 1.0, "under the first row: {r:?}");
+        let warn: Vec<_> = paths.iter().filter(|p| p.0 == DIAG_WARNING).collect();
+        assert_eq!(warn.len(), 1);
+        let w = warn[0].1;
+        // 第 5 個 UTF-16 單位是 `x`（`let ` 4 個字元 + 1 個中文字）
+        let x0 = x_at(1, 5);
+        assert!((w.left() - x0).abs() < 1.0 && (w.right() - x_at(1, 6)).abs() < 1.0, "{w:?}, x starts at {x0}");
+        assert!(x0 - x_at(1, 4) > (x_at(1, 1) - x_at(1, 0)) * 1.5, "the column before `x` is the wide character");
+        assert!(w.top() > text.top() + row_h * 1.6, "on the second row");
+
+        // 滑鼠停在底線上：顯示訊息
+        let tip = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t.contains(s));
+        let at = Pos2::new(r.center().x, text.top() + row_h * 0.5);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(at)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(tip(&out, "cannot find function `nope`"), "hovering the range shows the message: {:?}", painted_texts(&out));
+        assert!(!tip(&out, "unused variable"));
+        // 停在行號區的第 2 行：顯示那一行的診斷
+        let num2 = painted_lines(&out).into_iter().find(|l| l.0 == "2").unwrap().1;
+        frame(&mut app, &ctx, vec![Event::PointerMoved(num2.center())]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(tip(&out, "unused variable: `x`"), "hovering the line number shows its diagnostics");
+        // 移到沒有診斷的地方：不顯示
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(x_at(2, 1), text.top() + row_h * 2.5))]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!tip(&out, "cannot find") && !tip(&out, "unused variable"));
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
