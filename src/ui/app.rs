@@ -289,7 +289,7 @@ pub struct AlexCodeApp {
     /// 大檔案裡尋找列的命中數等內容停止變動才重算：(最後一次看到的 (分頁 id, 內容版本), 發現變動的時間)
     find_seen: ((u64, u64), std::time::Instant),
     /// Log 篩選命中的行號快取
-    filter_cache: (Option<(u64, u64, String, bool, bool)>, Vec<usize>),
+    filter_cache: (Option<FilterKey>, Vec<usize>),
     /// 背景執行中的全專案搜尋
     find_job: Option<FindJob>,
     last_title: String,
@@ -309,7 +309,7 @@ pub struct AlexCodeApp {
     show_explorer: bool,
     tree_cache: HashMap<PathBuf, TreeDir>,
     tree_expanded: HashSet<PathBuf>,
-    tree_chan: (Sender<(PathBuf, Result<Vec<DirEntryInfo>, String>)>, Receiver<(PathBuf, Result<Vec<DirEntryInfo>, String>)>),
+    tree_chan: (Sender<TreeMsg>, Receiver<TreeMsg>),
 
     // ---- 尋找 / 取代 ----
     find_opts: FindOptions,
@@ -338,7 +338,7 @@ pub struct AlexCodeApp {
     // ---- Git 行號區標記 ----
     /// 各分頁（依 id）在 HEAD 的內容；None = 不在 Git 儲存庫內或未追蹤
     git_head: HashMap<u64, Option<Arc<Vec<String>>>>,
-    git_chan: (Sender<(u64, Option<Vec<String>>)>, Receiver<(u64, Option<Vec<String>>)>),
+    git_chan: (Sender<GitHeadMsg>, Receiver<GitHeadMsg>),
     /// 目前分頁的行狀態快取：鍵為 (分頁 id, 內容版本)
     git_marks: ((u64, u64), HashMap<usize, u8>),
 
@@ -449,6 +449,13 @@ enum TreeAction {
 /// 排版快取記下的字型狀態：(pixels_per_point, 字型圖集寬度)，變了舊排版就不能用。
 /// egui 0.33 起拿不到圖集本身（之前用 `Arc` 是不是同一個來判斷）；圖集快滿時的重建另由 `check_font_atlas` 處理
 type FontAtlas = (f32, usize);
+
+/// Log 篩選快取的鍵：(分頁 id, 內容版本, 篩選字串, 兩個篩選選項)
+type FilterKey = (u64, u64, String, bool, bool);
+/// 檔案總管背景讀取資料夾的結果：(資料夾, 內容或錯誤訊息)
+type TreeMsg = (PathBuf, Result<Vec<DirEntryInfo>, String>);
+/// 背景讀取 HEAD 版本的結果：(分頁 id, HEAD 的內容；None = 不在 Git 儲存庫裡)
+type GitHeadMsg = (u64, Option<Vec<String>>);
 
 struct PendingClose {
     /// 要關閉的分頁 id
@@ -1691,7 +1698,7 @@ impl AlexCodeApp {
         self.git_head.retain(|id, _| alive.contains(id));
         self.loading.retain(|id, _| alive.contains(id));
         self.blame.retain(|id, _| alive.contains(id));
-        if self.disk_conflict.map_or(false, |id| !alive.contains(&id)) {
+        if self.disk_conflict.is_some_and(|id| !alive.contains(&id)) {
             self.disk_conflict = None;
         }
     }
@@ -1977,7 +1984,7 @@ impl AlexCodeApp {
         if let Some(idx) = self.tabs.iter().position(|b| {
             b.file_path
                 .as_deref()
-                .map_or(false, |fp| crate::markdown::normalize_key(fp) == key)
+                .is_some_and(|fp| crate::markdown::normalize_key(fp) == key)
         }) {
             self.commit_md_edit();
             self.active_tab_idx = idx;
@@ -2236,14 +2243,14 @@ impl AlexCodeApp {
             }
             Cmd::Undo => {
                 self.commit_md_edit();
-                if self.active_buffer_mut().map_or(false, |b| b.undo()) {
+                if self.active_buffer_mut().is_some_and(|b| b.undo()) {
                     self.sync_cursor_to_editor();
                     self.scroll_to_cursor = true;
                 }
             }
             Cmd::Redo => {
                 self.commit_md_edit();
-                if self.active_buffer_mut().map_or(false, |b| b.redo()) {
+                if self.active_buffer_mut().is_some_and(|b| b.redo()) {
                     self.sync_cursor_to_editor();
                     self.scroll_to_cursor = true;
                 }
@@ -3520,7 +3527,7 @@ impl AlexCodeApp {
                             );
                             let pointer_in_close = ui
                                 .input(|inp| inp.pointer.hover_pos())
-                                .map_or(false, |pp| cr.contains(pp));
+                                .is_some_and(|pp| cr.contains(pp));
                             if hovered || is_active {
                                 if pointer_in_close {
                                     p.rect_filled(cr, 3.0, c.hover);
@@ -3547,7 +3554,7 @@ impl AlexCodeApp {
                             if resp.middle_clicked() {
                                 close_idx = Some(i);
                             }
-                            let on_disk = self.tabs[i].file_path.as_deref().map_or(false, |p| Path::new(p).is_absolute());
+                            let on_disk = self.tabs[i].file_path.as_deref().is_some_and(|p| Path::new(p).is_absolute());
                             let tip = self.tabs[i].file_path.clone().unwrap_or_default();
                             let resp = resp.on_hover_text(if is_other { format!("{tip}\n（顯示在分割檢視的另一欄）") } else { tip });
                             // 右鍵選單：檔案總管 / 終端機 / 複製路徑 / 關閉
@@ -3932,7 +3939,7 @@ impl AlexCodeApp {
             let expanded = e.is_dir && self.tree_expanded.contains(&e.path);
             // 只畫看得到的列（大資料夾也不會拖慢每一幀）
             if ui.is_rect_visible(rect) {
-                let is_active = !e.is_dir && active.map_or(false, |a| Path::new(a) == e.path);
+                let is_active = !e.is_dir && active.is_some_and(|a| Path::new(a) == e.path);
                 let p = ui.painter();
                 if is_active {
                     p.rect_filled(rect, 0.0, c.accent_faint);
@@ -4079,7 +4086,7 @@ impl AlexCodeApp {
             }
         });
         let backspace = typed.is_none() && ui.input(|i| i.modifiers.is_none() && i.key_pressed(Key::Backspace));
-        if !backspace && !typed.map_or(false, pair_relevant) {
+        if !backspace && !typed.is_some_and(pair_relevant) {
             return 0;
         }
         let before = if a > 0 { text.chars().nth(a - 1) } else { None };
@@ -4541,7 +4548,7 @@ impl AlexCodeApp {
                 for (i, p) in pos.iter().enumerate() {
                     let deg = edges.iter().filter(|&&(a, b)| a == i || b == i).count();
                     let r = 4.0 + (deg as f32).sqrt() * 2.0;
-                    let hot = hover.map_or(false, |h| h.distance(*p) < r + 4.0);
+                    let hot = hover.is_some_and(|h| h.distance(*p) < r + 4.0);
                     painter.circle_filled(*p, r + 4.0, with_alpha(c.accent, if hot { 70 } else { 30 }));
                     painter.circle_filled(*p, r, if hot { c.accent2 } else { c.accent });
                     painter.text(
@@ -6091,7 +6098,7 @@ impl AlexCodeApp {
                             (s >= 0).then_some((s, n, cmd))
                         })
                         .collect();
-                    cmds.sort_by(|a, b| b.0.cmp(&a.0));
+                    cmds.sort_by_key(|c| std::cmp::Reverse(c.0));
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         if let Some((_, _, cmd)) = cmds.first() {
                             run = Some(cmd.clone());
@@ -6941,7 +6948,7 @@ impl AlexCodeApp {
             Some(1) => {
                 let p = self.pending_close.take().unwrap();
                 for (id, name) in &dirty {
-                    let saved = self.tabs.iter().position(|b| b.id == *id).map_or(false, |i| self.save_tab(i, false));
+                    let saved = self.tabs.iter().position(|b| b.id == *id).is_some_and(|i| self.save_tab(i, false));
                     if !saved {
                         // 任何一個沒存成功（取消另存對話框、寫入失敗、編碼無法表示）就整個取消，不關閉也不結束
                         if !self.status_message.starts_with("未儲存") && !self.status_message.starts_with("儲存失敗") {
@@ -8287,7 +8294,7 @@ mod tests {
         let out = frame_with(&mut app, &ctx, close);
         let cmds = &out.viewport_output[&ViewportId::ROOT].commands;
         assert!(cmds.contains(&ViewportCommand::CancelClose), "close must be cancelled: {cmds:?}");
-        assert!(app.pending_close.as_ref().map_or(false, |p| p.exit));
+        assert!(app.pending_close.as_ref().is_some_and(|p| p.exit));
 
         // 沒有未儲存的變更時不攔截
         app.pending_close = None;
@@ -8647,7 +8654,7 @@ mod tests {
     fn head_lines_reads_committed_version() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").current_dir(dir.path()).args(args).output().map_or(false, |o| o.status.success())
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().is_ok_and(|o| o.status.success())
         };
         if !git(&["init", "-q"]) {
             return; // 測試環境沒有 git

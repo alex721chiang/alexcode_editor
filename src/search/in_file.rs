@@ -79,7 +79,7 @@ pub fn replace_range(
     let piece = if opts.regex {
         let re = build(query, opts)?;
         // 以整份文字比對，前後文相關的樣式（\b、^、$）才會正確
-        match re.captures_at(text, a).filter(|c| c.get(0).map_or(false, |m| m.start() == a && m.end() == b)) {
+        match re.captures_at(text, a).filter(|c| c.get(0).is_some_and(|m| m.start() == a && m.end() == b)) {
             Some(caps) => {
                 let mut s = String::new();
                 caps.expand(replacement, &mut s);

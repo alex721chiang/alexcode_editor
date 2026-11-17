@@ -63,9 +63,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
 
-      # 預設為 deny 的 lint（correctness 類）會讓建置失敗；其餘為警告
+      # 任何 clippy 警告都會讓建置失敗（-D warnings）
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run Unit & Integration Tests
         run: cargo test

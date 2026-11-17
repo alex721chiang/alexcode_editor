@@ -49,7 +49,7 @@ pub fn reverse_lines(text: &str) -> String {
 
 pub fn trim_trailing_whitespace(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
-    let trimmed_lines: Vec<&str> = lines.iter().map(|l| l.trim_end_matches(|c| c == ' ' || c == '\t')).collect();
+    let trimmed_lines: Vec<&str> = lines.iter().map(|l| l.trim_end_matches([' ', '\t'])).collect();
     trimmed_lines.join("\n")
 }
 

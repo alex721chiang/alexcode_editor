@@ -376,10 +376,9 @@ pub fn completion_params(path: &str, line: i32, character: i32, trigger: Option<
 pub fn extract_definition(result: &Value) -> Option<(String, i32, i32)> {
     let loc = if result.is_object() {
         result
-    } else if let Some(arr) = result.as_array() {
-        arr.first()?
     } else {
-        return None;
+        let arr = result.as_array()?;
+        arr.first()?
     };
 
     let mut uri = loc["uri"].as_str().unwrap_or("");
@@ -611,7 +610,7 @@ pub fn apply_text_edits(text: &str, edits: &[TextEdit]) -> String {
         .collect();
 
     // 依起始位置降冪排序
-    spans.sort_by(|a, b| b.start.cmp(&a.start));
+    spans.sort_by_key(|s| std::cmp::Reverse(s.start));
 
     let mut out = text.to_string();
     for s in spans {

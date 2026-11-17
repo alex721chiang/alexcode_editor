@@ -94,7 +94,7 @@ pub fn decide(
 
     // 引號自動配對：避免在英文字詞中（如縮寫 don't）誤配
     if is_quote(typed) {
-        let is_letter_or_num = |c: Option<char>| c.map_or(false, |ch| ch.is_alphanumeric());
+        let is_letter_or_num = |c: Option<char>| c.is_some_and(|ch| ch.is_alphanumeric());
         if is_letter_or_num(before) || is_letter_or_num(after) {
             return Decision {
                 action: Action::Insert,
@@ -111,7 +111,7 @@ pub fn decide(
 
     // 括號自動配對：右側若緊接字詞字元則不自動配（避免吃進後面的字）
     if is_opener(typed) {
-        if after.map_or(false, |ch| ch.is_alphanumeric()) {
+        if after.is_some_and(|ch| ch.is_alphanumeric()) {
             return Decision {
                 action: Action::Insert,
                 open: None,

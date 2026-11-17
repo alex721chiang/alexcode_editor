@@ -20,7 +20,7 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<DirEntryInfo>> {
         .take(MAX_DIR_ENTRIES)
         .map(|e| DirEntryInfo {
             name: e.file_name().to_string_lossy().into_owned(),
-            is_dir: e.file_type().map_or(false, |t| t.is_dir()) || e.path().is_dir(),
+            is_dir: e.file_type().is_ok_and(|t| t.is_dir()) || e.path().is_dir(),
             path: e.path(),
         })
         .collect();

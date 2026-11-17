@@ -598,10 +598,10 @@ fn parse_inline(text: &str) -> Vec<InlineSegment> {
         let rest = &text[byte_pos..];
 
         // 行內程式碼 `...`
-        if rest.starts_with('`') {
-            if let Some(end_off) = rest[1..].find('`') {
+        if let Some(after) = rest.strip_prefix('`') {
+            if let Some(end_off) = after.find('`') {
                 flush(&mut out, &mut cur, &style);
-                let code_str = &rest[1..1 + end_off];
+                let code_str = &after[..end_off];
                 let mut code_style = style.clone();
                 code_style.code = true;
                 out.push(InlineSegment {
@@ -617,10 +617,10 @@ fn parse_inline(text: &str) -> Vec<InlineSegment> {
         }
 
         // WikiLink: [[target|alias]] 或 [[target]]
-        if rest.starts_with("[[") {
-            if let Some(end_off) = rest[2..].find("]]") {
+        if let Some(after) = rest.strip_prefix("[[") {
+            if let Some(end_off) = after.find("]]") {
                 flush(&mut out, &mut cur, &style);
-                let inner = &rest[2..2 + end_off];
+                let inner = &after[..end_off];
                 let (target, display) = if let Some((t, alias)) = inner.split_once('|') {
                     (t.trim(), alias.trim())
                 } else {
@@ -712,6 +712,7 @@ fn parse_inline(text: &str) -> Vec<InlineSegment> {
 //  UI 渲染：行內與區塊繪製
 // =====================================================================
 
+#[allow(clippy::too_many_arguments)] // 呼叫端各自傳入不同的樣式組合，包成結構反而難讀
 fn render_inline_text(
     ui: &mut egui::Ui,
     text: &str,
@@ -988,6 +989,7 @@ pub fn render_outline_panel(
 }
 
 /// 繪製 Typora 富文本文件預覽（支援點擊原位編輯、互動式勾選框、程式碼高亮、表格、提示框與圖片）
+#[allow(clippy::too_many_arguments)] // 對外的進入點，參數都來自 app 的不同欄位
 pub fn render_typora_document(
     ui: &mut egui::Ui,
     state: &mut MarkdownViewState,

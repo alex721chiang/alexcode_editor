@@ -53,7 +53,7 @@ pub fn strip_code(text: &str) -> String {
 /// 目標標準化為比對鍵：取檔名（去路徑）、去 .md 副檔名、轉小寫、去除頭尾空白
 pub fn normalize_key(target: &str) -> String {
     let mut t = target.trim();
-    if let Some(pos) = t.rfind(|c| c == '/' || c == '\\') {
+    if let Some(pos) = t.rfind(['/', '\\']) {
         t = &t[pos + 1..];
     }
     if t.to_lowercase().ends_with(".md") {

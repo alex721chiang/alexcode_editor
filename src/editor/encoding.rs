@@ -106,11 +106,11 @@ impl FileEncoding {
                 let bom: &[u8] = if le { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] };
                 let body = bytes.strip_prefix(bom).unwrap_or(bytes);
                 let units: Vec<u16> = body
-                    .chunks_exact(2)
+                    .as_chunks::<2>().0.iter()
                     .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
                     .collect();
                 match String::from_utf16(&units) {
-                    Ok(s) => (s, body.len() % 2 != 0),
+                    Ok(s) => (s, !body.len().is_multiple_of(2)),
                     Err(_) => (String::from_utf16_lossy(&units), true),
                 }
             }
@@ -145,7 +145,7 @@ pub fn detect_and_decode(bytes: &[u8]) -> (String, FileEncoding) {
     for enc in [FileEncoding::Big5, FileEncoding::Gbk, FileEncoding::ShiftJis] {
         let (text, bad) = enc.decode(bytes);
         // 解碼無誤且能原樣編碼回去才採用
-        if !bad && enc.encode(&text).map_or(false, |b| b == bytes) {
+        if !bad && enc.encode(&text).is_ok_and(|b| b == bytes) {
             return (text, enc);
         }
     }

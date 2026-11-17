@@ -50,9 +50,9 @@ pub fn extract_text(
     let start0 = c0.min(l0.len());
     out.push_str(&l0[start0..]);
 
-    for r in (r0 + 1)..r1 {
+    for line in &lines[(r0 + 1)..r1] {
         out.push('\n');
-        out.push_str(&lines[r]);
+        out.push_str(line);
     }
 
     out.push('\n');

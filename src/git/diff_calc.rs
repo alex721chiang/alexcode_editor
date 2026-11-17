@@ -28,17 +28,17 @@ fn flush_pending(rows: &mut Vec<Row>, dels: &mut Vec<i32>, adds: &mut Vec<i32>) 
             row_type: RowType::Modified,
         });
     }
-    for t in paired..dels.len() {
+    for &d in &dels[paired..] {
         rows.push(Row {
-            left: dels[t],
+            left: d,
             right: -1,
             row_type: RowType::Removed,
         });
     }
-    for t in paired..adds.len() {
+    for &a in &adds[paired..] {
         rows.push(Row {
             left: -1,
-            right: adds[t],
+            right: a,
             row_type: RowType::Added,
         });
     }

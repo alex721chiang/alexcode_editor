@@ -326,9 +326,9 @@ fn tokenize(text: &str, lang: Lang) -> Vec<(usize, usize, Tok)> {
                 Tok::Keyword
             } else if text[j..].trim_start_matches(' ').starts_with('(') {
                 Tok::Func
-            } else if word.chars().next().map_or(false, |ch| ch.is_ascii_uppercase()) {
-                Tok::Type
-            } else if lang == Lang::Json && text[j..].trim_start().starts_with(':') {
+            } else if word.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+                || (lang == Lang::Json && text[j..].trim_start().starts_with(':'))
+            {
                 Tok::Type
             } else {
                 Tok::Normal

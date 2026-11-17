@@ -165,8 +165,8 @@ impl FilterEngine {
                 let mut is_regex = false;
                 let mut regex = None;
 
-                if t.starts_with("re:") {
-                    let pattern = t[3..].trim();
+                if let Some(pattern) = t.strip_prefix("re:") {
+                    let pattern = pattern.trim();
                     if !pattern.is_empty() {
                         if let Ok(re) = RegexBuilder::new(pattern).case_insensitive(true).build() {
                             is_regex = true;
@@ -202,7 +202,7 @@ impl FilterEngine {
             let mut all = true;
             for term in group {
                 let hit = if term.is_regex {
-                    term.regex.as_ref().map_or(false, |re| re.is_match(line))
+                    term.regex.as_ref().is_some_and(|re| re.is_match(line))
                 } else if self.fuzzy {
                     Self::fuzzy_contains(line, &term.text)
                 } else {

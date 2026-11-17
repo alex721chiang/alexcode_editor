@@ -51,16 +51,16 @@ pub fn parse_porcelain(bytes: &[u8]) -> HashMap<usize, LineInfo> {
             continue;
         }
 
-        if line.starts_with("author ") {
-            cur.author = line[7..].trim().to_string();
-        } else if line.starts_with("author-time ") {
-            if let Ok(secs) = line[12..].trim().parse::<i64>() {
+        if let Some(author) = line.strip_prefix("author ") {
+            cur.author = author.trim().to_string();
+        } else if let Some(time) = line.strip_prefix("author-time ") {
+            if let Ok(secs) = time.trim().parse::<i64>() {
                 if let Some(dt) = DateTime::<Utc>::from_timestamp(secs, 0) {
                     cur.date = dt.format("%Y-%m-%d").to_string();
                 }
             }
-        } else if line.starts_with("summary ") {
-            cur.summary = line[8..].trim().to_string();
+        } else if let Some(summary) = line.strip_prefix("summary ") {
+            cur.summary = summary.trim().to_string();
         }
     }
 

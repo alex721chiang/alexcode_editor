@@ -373,7 +373,7 @@ impl EditorBuffer {
             self.undo_bytes -= edit.bytes;
             self.swap_lines(edit.start, &edit.inserted, &edit.removed);
             let keep_going = edit.typing
-                && self.undo_stack.back().map_or(false, |prev| {
+                && self.undo_stack.back().is_some_and(|prev| {
                     prev.typing && edit.at.duration_since(prev.at) < Self::TYPING_GROUP_GAP
                 });
             self.redo_stack.push(edit);
@@ -393,7 +393,7 @@ impl EditorBuffer {
         while let Some(edit) = self.redo_stack.pop() {
             self.swap_lines(edit.start, &edit.removed, &edit.inserted);
             let keep_going = edit.typing
-                && self.redo_stack.last().map_or(false, |next| {
+                && self.redo_stack.last().is_some_and(|next| {
                     next.typing && next.at.duration_since(edit.at) < Self::TYPING_GROUP_GAP
                 });
             self.undo_bytes += edit.bytes;

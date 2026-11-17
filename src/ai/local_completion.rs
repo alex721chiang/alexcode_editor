@@ -42,11 +42,7 @@ pub fn suggest(
     for m in id_re.find_iter(text) {
         let id = m.as_str().to_string();
         let start_pos = m.start();
-        let dist = if start_pos >= cursor_offset {
-            start_pos - cursor_offset
-        } else {
-            cursor_offset - start_pos
-        };
+        let dist = start_pos.abs_diff(cursor_offset);
 
         let entry = ids.entry(id).or_insert(Info {
             count: 0,
@@ -71,9 +67,7 @@ pub fn suggest(
         }
 
         let id_lower = id.to_lowercase();
-        let kind = if prefix.is_empty() {
-            2
-        } else if id_lower.starts_with(&prefix_lower) {
+        let kind = if prefix.is_empty() || id_lower.starts_with(&prefix_lower) {
             2
         } else if fuzzy(id, prefix) {
             1
