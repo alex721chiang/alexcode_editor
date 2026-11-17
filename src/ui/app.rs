@@ -3344,7 +3344,7 @@ impl AlexCodeApp {
                 .desired_width(260.0),
         );
         let mut recompile = resp.changed();
-        egui::ComboBox::from_id_source("filter_logic")
+        egui::ComboBox::from_id_salt("filter_logic")
             .width(56.0)
             .selected_text(if self.filter_logic == FilterLogic::Or { "OR" } else { "AND" })
             .show_ui(ui, |ui| {
@@ -4281,7 +4281,7 @@ impl AlexCodeApp {
                         ui.label(RichText::new("Shell").size(12.0).color(c.fg_dim));
                         let current = self.chosen_shell().name;
                         let names: Vec<String> = self.shells().iter().map(|s| s.name.clone()).collect();
-                        let combo = egui::ComboBox::from_id_source("terminal-shell").selected_text(current.as_str()).show_ui(ui, |ui| {
+                        let combo = egui::ComboBox::from_id_salt("terminal-shell").selected_text(current.as_str()).show_ui(ui, |ui| {
                             for n in &names {
                                 if ui.selectable_label(*n == current, n.as_str()).clicked() && *n != current {
                                     switch_to = Some(n.clone());
@@ -4746,7 +4746,7 @@ impl AlexCodeApp {
         let (active_rect, other_rect) = if right_active { (right, left) } else { (left, right) };
         ui.painter().rect_filled(band(mid, 1.0), 0.0, c.border);
         let clip = ui.clip_rect();
-        let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other", None);
+        let mut pane = ui.new_child(egui::UiBuilder::new().id_salt("split-other").max_rect(other_rect).layout(Layout::top_down(Align::Min)));
         pane.set_clip_rect(other_rect.intersect(clip));
         // 另一欄的 Git 標記：內容或 HEAD 變了才重算
         if let (Some(s), Some(b)) = (self.split.as_mut(), self.tabs.get(other)) {
@@ -4781,7 +4781,7 @@ impl AlexCodeApp {
                 s.offset = offset;
             }
         }
-        let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active", None);
+        let mut active = ui.new_child(egui::UiBuilder::new().id_salt("split-active").max_rect(active_rect).layout(Layout::top_down(Align::Min)));
         active.set_clip_rect(active_rect.intersect(clip));
         Some(active)
     }
@@ -4823,7 +4823,7 @@ impl AlexCodeApp {
         }
         // 不接拖曳捲動：點擊與拖曳要交給上面那個切換欄位的區域（可以捲動時捲動區會蓋掉它）
         let mut area = egui::ScrollArea::both()
-            .id_source(("split-preview", buf.id))
+            .id_salt(("split-preview", buf.id))
             .drag_to_scroll(false)
             .auto_shrink([false, false]);
         if let Some(o) = offset {
@@ -5428,9 +5428,9 @@ impl AlexCodeApp {
         row_lines.clear();
         // 自動換行時不需要水平捲動；兩種模式各自記住捲動位置
         let mut scroll_area = if wrap {
-            egui::ScrollArea::vertical().id_source(("editor-scroll-wrap", idx))
+            egui::ScrollArea::vertical().id_salt(("editor-scroll-wrap", idx))
         } else {
-            egui::ScrollArea::both().id_source(("editor-scroll", idx))
+            egui::ScrollArea::both().id_salt(("editor-scroll", idx))
         };
         // 分割檢視換欄：接著用另一欄的捲動位置（自動換行時排版不同，不接）
         let tab_id = self.tabs[idx].id;
@@ -6524,7 +6524,7 @@ impl AlexCodeApp {
                 let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
                 let num_w = head.len().max(lines.len()).to_string().len().max(3) as f32 * char_w + 16.0;
                 ui.spacing_mut().item_spacing.y = 0.0; // 每一列緊貼：捲動位置才能用「列號 × 列高」計算
-                let mut area = egui::ScrollArea::vertical().id_source("diff-scroll").auto_shrink([false, false]);
+                let mut area = egui::ScrollArea::vertical().id_salt("diff-scroll").auto_shrink([false, false]);
                 if let Some(row) = scroll_to {
                     // 選取的那段變更上方留三列；內容比視窗短時不捲動
                     let max_offset = (rows.len() as f32 * row_h - ui.available_height()).max(0.0);
@@ -7336,7 +7336,7 @@ impl AlexCodeApp {
         let mut toggle_bookmark = None;
         // 組字中的文字排在哪裡（鍵盤事件處理完之後的游標位置）
         let compose_at = (has_focus && !self.large_preedit.is_empty()).then_some(sel.head);
-        let mut area = egui::ScrollArea::both().id_source(("large-scroll", tab_id)).auto_shrink([false, false]);
+        let mut area = egui::ScrollArea::both().id_salt(("large-scroll", tab_id)).auto_shrink([false, false]);
         // 上一幀算好的捲動位置（拖曳選取到邊緣以外、自動換行時讓游標留在畫面上）：照它捲過去
         if let Some((id, offset)) = self.large_scroll_to.take() {
             if id == tab_id {

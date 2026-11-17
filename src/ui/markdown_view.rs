@@ -947,7 +947,7 @@ pub fn render_outline_panel(
             }
 
             egui::ScrollArea::vertical()
-                .id_source("md_outline_scroll")
+                .id_salt("md_outline_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for entry in &toc {
@@ -1013,7 +1013,7 @@ pub fn render_typora_document(
     let mut commit_now = false;
 
     egui::ScrollArea::vertical()
-        .id_source(("typora_doc_scroll", allow_inline_edit))
+        .id_salt(("typora_doc_scroll", allow_inline_edit))
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let avail_w = ui.available_width();
@@ -1406,7 +1406,7 @@ fn render_single_block(
                     );
                     let galley = ui.fonts(|f| f.layout_job(job));
                     egui::ScrollArea::horizontal()
-                        .id_source(("md_code_block", block.start_line))
+                        .id_salt(("md_code_block", block.start_line))
                         .show(ui, |ui| {
                             ui.add(egui::Label::new(galley).extend());
                         });
