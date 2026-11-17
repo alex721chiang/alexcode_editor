@@ -178,6 +178,8 @@ pub struct AlexCodeApp {
     pub filter_active: bool,
     pub terminal: VtParser,
     pub term_input: String,
+    /// 終端機下方輸入列（含上方間距）上一幀的高度：輸出區留給它這麼多，面板才不會每一幀變大或變小
+    term_input_h: f32,
     pub show_terminal: bool,
     pub show_graph: bool,
     pub show_command_palette: bool,
@@ -1218,6 +1220,7 @@ impl AlexCodeApp {
             filter_active: true,
             terminal: VtParser::new(200, 160),
             term_input: String::new(),
+            term_input_h: 28.0,
             show_terminal: false,
             show_graph: false,
             show_command_palette: false,
@@ -2714,7 +2717,7 @@ impl AlexCodeApp {
         let Some(m) = self.comp.as_ref().filter(|m| !m.shown.is_empty()) else { return };
         let first = m.selected.saturating_sub(COMPLETION_ROWS - 1);
         let mut clicked = None;
-        let resp = egui::Area::new(egui::Id::new("lsp-completion"))
+        let resp = egui::Area::new(egui::Id::unique("lsp-completion"))
             .order(egui::Order::Foreground)
             .fixed_pos(caret.left_bottom() + egui::vec2(0.0, 2.0))
             .show(ctx, |ui| {
@@ -3469,7 +3472,7 @@ impl AlexCodeApp {
                             // 拖曳分頁：指標旁邊跟著分頁名稱；在分頁列外面放開就把分頁開成獨立視窗（主視窗也留著）
                             if resp.dragged() {
                                 if let Some(pp) = ui.input(|inp| inp.pointer.hover_pos()) {
-                                    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("alexcode-tab-drag"));
+                                    let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("alexcode-tab-drag"));
                                     let gp = ui.ctx().layer_painter(layer);
                                     let at = pp + egui::vec2(14.0, 10.0);
                                     let g = gp.layout_no_wrap(title.clone(), FontId::proportional(13.0), c.fg);
@@ -4280,7 +4283,7 @@ impl AlexCodeApp {
             c.accent,
         );
         let cr = Rect::from_center_size(Pos2::new(rect.right() - 14.0, rect.center().y), egui::vec2(18.0, 18.0));
-        let resp = ui.interact(cr, ui.id().with(title), Sense::click());
+        let resp = ui.interact(cr, ui.scope_id().with(title), Sense::click());
         let col = if resp.hovered() { c.accent2 } else { c.fg_dim2 };
         if resp.hovered() {
             ui.painter().rect_filled(cr, 3.0, c.hover);
@@ -4324,7 +4327,7 @@ impl AlexCodeApp {
                     // 內容一定佔滿整個高度：可以改大小的面板下一幀會縮成內容用掉的高度，而最後一列（輸入列）
                     // 後面的間距不算在內，不佔滿的話每一幀縮 2 像素（shell 有輸出就一直重畫，終端機越縮越小、大小一直變）
                     ui.set_min_height(ui.available_height());
-                    let input_h = 28.0;
+                    let input_h = self.term_input_h;
                     // 選擇 shell：換了就結束目前的、啟動選的那一個（記在設定裡）
                     let mut switch_to = None;
                     ui.horizontal(|ui| {
@@ -4352,7 +4355,7 @@ impl AlexCodeApp {
                     }
                     // 輸出區有鍵盤焦點時，按鍵與輸入的字直接送進 shell（shell 自己回顯）；
                     // Tab / 方向鍵 / Esc 也留給 shell，不拿來移動 egui 的焦點
-                    let term_id = egui::Id::new("alexcode-terminal-output");
+                    let term_id = egui::Id::unique("alexcode-terminal-output");
                     let focused = ui.memory(|m| m.has_focus(term_id));
                     if focused {
                         ui.memory_mut(|m| {
@@ -4431,7 +4434,7 @@ impl AlexCodeApp {
                         ui.painter().rect_stroke(out.inner_rect.expand(2.0), 2.0, Stroke::new(1.0_f32, c.accent), egui::StrokeKind::Middle);
                     }
                     self.mark_rect("terminal-output", out.inner_rect);
-                    ui.horizontal(|ui| {
+                    let input_row = ui.horizontal(|ui| {
                         ui.label(RichText::new("❯").color(c.accent).strong());
                         // 逐指令執行（虛擬終端無法使用時）要等指令跑完；互動式 shell 隨時可以再送
                         let busy = self.term_rx.is_some();
@@ -4455,6 +4458,8 @@ impl AlexCodeApp {
                             resp.request_focus();
                         }
                     });
+                    self.term_input_h = input_row.response.rect.height() + ui.spacing().item_spacing.y;
+                    // 之前固定留 28 px；egui 0.37 下輸入列量到 26 px、加上間距 4 px 共 30 px，每一幀多出 2 px、面板一直變大：改成量出來的高度
                 });
             });
     }
@@ -4732,7 +4737,7 @@ impl AlexCodeApp {
         };
         let ratio = self.split.as_ref().map_or(0.5, |s| s.ratio);
         let old_mid = (edge + span * ratio).round();
-        let grip_resp = ui.interact(band(old_mid, 4.0), ui.id().with("split-divider"), Sense::drag());
+        let grip_resp = ui.interact(band(old_mid, 4.0), ui.scope_id().with("split-divider"), Sense::drag());
         if grip_resp.hovered() || grip_resp.dragged() {
             ui.ctx().set_cursor_icon(if vertical { egui::CursorIcon::ResizeVertical } else { egui::CursorIcon::ResizeHorizontal });
         }
@@ -4954,7 +4959,7 @@ impl AlexCodeApp {
                     ui.painter().galley(at, g, c.fg);
                 }
             });
-        (drawn, out.state.offset)
+        (drawn, out.state.clamped_offset())
     }
 
     /// 在獨立視窗裡顯示、可編輯的分頁（分頁右鍵「在新視窗開啟」，或把分頁拖到分頁列外面）。每個分頁一個作業系統視窗（egui 的 viewport），
@@ -4996,7 +5001,7 @@ impl AlexCodeApp {
                 {
                     let mut open = true;
                     let mut win = egui::Window::new(title.clone())
-                        .id(egui::Id::new(("alexcode-detached-window", id)))
+                        .id(egui::Id::unique(("alexcode-detached-window", id)))
                         .open(&mut open)
                         // egui 0.28 起視窗打開時會淡入：獨立視窗一開就要完整顯示（與 0.27 相同）
                         .fade_in(false)
@@ -5045,7 +5050,7 @@ impl AlexCodeApp {
         let area = ui.min_rect();
         // 右邊與下面留給捲軸
         let hit = Rect::from_min_max(area.min, (area.max - egui::vec2(14.0, 14.0)).max(area.min));
-        let id = egui::Id::new(("alexcode-detached-edit", tab_id));
+        let id = egui::Id::unique(("alexcode-detached-edit", tab_id));
         let resp = ui.interact(hit, id, Sense::click_and_drag());
         let before = (self.tabs[idx].revision(), self.tabs[idx].selections.first().copied());
         // 指標位置換成 (行, 欄)：在最後一行下面就算最後一行
@@ -5202,7 +5207,7 @@ impl AlexCodeApp {
         let line_count = self.tabs[idx].lines.len();
         let bookmarks = self.tabs[idx].bookmarks.clone();
         let path_key = self.tabs[idx].file_path.clone().unwrap_or_default();
-        let editor_id = egui::Id::new(("alexcode-editor", idx, path_key));
+        let editor_id = egui::Id::unique(("alexcode-editor", idx, path_key));
 
         // 套用待定的游標選取（尋找 / 跳至行 / 行操作）
         if let Some((a, b)) = self.pending_select.take() {
@@ -5842,7 +5847,7 @@ impl AlexCodeApp {
                             }
                         }
                         if !tips.is_empty() || hover_note.is_some() {
-                            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("lsp-diagnostic-tip"), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
+                            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::unique("lsp-diagnostic-tip"), egui::PopupAnchor::Pointer).gap(12.0).show(|ui| {
                                 ui.set_max_width(560.0);
                                 for d in &tips {
                                     ui.horizontal_top(|ui| {
@@ -5899,7 +5904,7 @@ impl AlexCodeApp {
                 });
             });
 
-        self.editor_offsets.insert(tab_id, scroll.state.offset);
+        self.editor_offsets.insert(tab_id, scroll.state.clamped_offset());
         let alive: Vec<u64> = self.tabs.iter().map(|b| b.id).collect();
         if self.editor_offsets.len() > alive.len() {
             self.editor_offsets.retain(|id, _| alive.contains(id));
@@ -5910,7 +5915,7 @@ impl AlexCodeApp {
         self.sticky_below = 0;
         if !sticky_syms.is_empty() {
             let view = scroll.inner_rect;
-            let offset = scroll.state.offset;
+            let offset = scroll.state.clamped_offset();
             // 第一個完整可見的行（文字上方有 4px 邊界）
             let first = ((offset.y - 4.0) / row_h - 0.01).ceil().max(0.0) as usize;
             // 畫面上第 row 列起第一個完整可見的行。自動換行時一行佔好幾列：
@@ -5945,7 +5950,7 @@ impl AlexCodeApp {
                     egui::vec2(view.width(), row_h),
                 );
                 let resp = ui
-                    .interact(row, ui.id().with(("sticky-header", k)), Sense::click())
+                    .interact(row, ui.scope_id().with(("sticky-header", k)), Sense::click())
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
                 if resp.hovered() {
                     painter.rect_filled(row, 0.0, c.hover);
@@ -6881,7 +6886,7 @@ impl AlexCodeApp {
             return;
         }
         // 蓋住主畫面，對話框處理完之前不能操作後面的內容
-        egui::Area::new(egui::Id::new("unsaved-dim"))
+        egui::Area::new(egui::Id::unique("unsaved-dim"))
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::ZERO)
             .show(ctx, |ui| {
@@ -6897,7 +6902,7 @@ impl AlexCodeApp {
                 m.surrender_focus(id);
             }
         });
-        egui::Area::new(egui::Id::new("unsaved-dialog"))
+        egui::Area::new(egui::Id::unique("unsaved-dialog"))
             .order(egui::Order::Tooltip)
             .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
@@ -7052,7 +7057,7 @@ impl AlexCodeApp {
         let idx = self.active_tab_idx;
         let tab_id = self.tabs[idx].id;
         let mut max_cols = self.large_stats.1 .1;
-        let view_id = egui::Id::new(("alexcode-large-view", tab_id));
+        let view_id = egui::Id::unique(("alexcode-large-view", tab_id));
         let font = FontId::monospace(self.config.font_size);
         let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
         let row_h = ui.fonts_mut(|f| f.row_height(&font));
@@ -7084,7 +7089,7 @@ impl AlexCodeApp {
         let fopts = self.find_opts;
         // 文件在一般編輯區裡長到超過門檻（貼上一大段）：鍵盤焦點還在那個已經不顯示的編輯區上，接過來
         let path_key = self.tabs[idx].file_path.clone().unwrap_or_default();
-        let editor_id = egui::Id::new(("alexcode-editor", idx, path_key));
+        let editor_id = egui::Id::unique(("alexcode-editor", idx, path_key));
         if ui.memory(|m| m.focused()) == Some(editor_id) {
             ui.memory_mut(|m| m.request_focus(view_id));
         }
@@ -11533,7 +11538,7 @@ mod tests {
         let mid = 640.0;
 
         // 捲動左欄（唯讀的第一份）
-        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -1500.0), phase: egui::TouchPhase::Move, modifiers: Modifiers::NONE }]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -1500.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: Modifiers::NONE }]);
         for _ in 0..40 {
             frame(&mut app, &ctx, vec![]);
         }
@@ -12032,7 +12037,7 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::Text("!".into())]);
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.tabs[0].lines[0], "hello!");
-        let editor_id = egui::Id::new(("alexcode-editor", 0usize, String::from("t.rs")));
+        let editor_id = egui::Id::unique(("alexcode-editor", 0usize, String::from("t.rs")));
         let st = egui::text_edit::TextEditState::load(&ctx, editor_id).expect("main editor state");
         let r = st.cursor.char_range().expect("main editor cursor");
         assert_eq!(r.primary.index.0, 6, "the main editor's cursor follows the window");
@@ -12513,7 +12518,7 @@ mod tests {
         // 點一下輸出區取得焦點，之後打的字與 Enter 直接送進 shell
         let out = app.probe["terminal-output"].center();
         click(&mut app, &ctx, out);
-        assert!(ctx.memory(|m| m.has_focus(egui::Id::new("alexcode-terminal-output"))), "the output area takes the keyboard");
+        assert!(ctx.memory(|m| m.has_focus(egui::Id::unique("alexcode-terminal-output"))), "the output area takes the keyboard");
         let (sum, again, long, tab) = if cfg!(windows) {
             ("set /a 1000+1", "set /a 5000+555", "ping -n 30 127.0.0.1 >nul", "type zzcompl")
         } else {

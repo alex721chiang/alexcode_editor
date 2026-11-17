@@ -1500,7 +1500,7 @@ fn render_single_block(
 
     // 為整個區塊建立點擊感應與懸停淡淡提示框
     let rect = inner.response.rect.expand2(egui::vec2(6.0, 2.0));
-    let id = ui.id().with(("typora_block", block.start_line, block.end_line));
+    let id = ui.scope_id().with(("typora_block", block.start_line, block.end_line));
     let resp = ui.interact(rect, id, Sense::click());
     if resp.hovered() {
         ui.painter()
