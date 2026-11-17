@@ -28,7 +28,10 @@ use crate::index::{extract_symbols, Symbol, SymbolLang};
 use crate::git::{blame_contents, blame_status_text, diff_line_states, LineInfo, ADDED, DELETED_ABOVE, MODIFIED};
 use crate::git::{align_trimmed, change_starts, Row as DiffRow, RowType as DiffRowType};
 use crate::filter::{FilterEngine, FilterLogic};
-use crate::lsp::{utf16_to_char_col, Diagnostic, Launcher, LspManager, LspStatus, OpenDoc, ServerKind};
+use crate::lsp::{
+    char_col_to_utf16, extract_definition, text_document_position_params, utf16_to_char_col, Diagnostic, Launcher,
+    LspManager, LspStatus, OpenDoc, RequestId, ServerKind,
+};
 use crate::markdown::{compute_graph_layout, MarkdownLinkIndex};
 use crate::plugins::PluginManager;
 use crate::search::{command_match_score, find_all, replace_all, replace_range, search_in_files, FileMatch, FindOptions, Finder, SearchStats};
@@ -139,6 +142,7 @@ pub enum Cmd {
     ToggleBookmark,
     Find,
     GotoLine,
+    GotoDefinition,
     FindInFiles,
     CommandPalette,
     DiffHead,
@@ -214,6 +218,10 @@ pub struct AlexCodeApp {
     lsp: LspManager,
     /// 送給語言伺服器的文件的大小快取：分頁 id → (內容版本, 位元組數)。大檔案（大檔案檢視）不送
     lsp_sizes: HashMap<u64, (u64, usize)>,
+    /// 跳到定義：等著送出的位置（檔案、行、UTF-16 欄；下一次 `lsp_tick` 同步完文件後才送），
+    /// 與已送出、在等回覆的請求（送出的時間：太久沒回就放棄）
+    def_want: Option<(String, usize, usize)>,
+    def_wait: Option<(RequestId, std::time::Instant)>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -1009,6 +1017,8 @@ impl AlexCodeApp {
             term_shells: Vec::new(),
             lsp: LspManager::new(cwd.clone(), default_lsp_launcher()),
             lsp_sizes: HashMap::new(),
+            def_want: None,
+            def_wait: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1827,6 +1837,7 @@ impl AlexCodeApp {
             ("編輯：切換書籤 (Toggle Bookmark)".into(), Cmd::ToggleBookmark),
             ("搜尋：尋找 (Find)".into(), Cmd::Find),
             ("搜尋：跳至行 (Go to Line)".into(), Cmd::GotoLine),
+            ("搜尋：跳到定義 (Go to Definition)".into(), Cmd::GotoDefinition),
             ("搜尋：全專案搜尋 (Find in Files)".into(), Cmd::FindInFiles),
             ("檢視：切換 Typora Markdown 模式 (Typora / 雙欄 / 原始碼)".into(), Cmd::CycleMarkdownMode),
             ("檢視：切換 Markdown 大綱側邊欄 (Outline)".into(), Cmd::ToggleMarkdownOutline),
@@ -1954,6 +1965,7 @@ impl AlexCodeApp {
                 self.show_find_bar = true;
                 self.find_bar_focus = true;
             }
+            Cmd::GotoDefinition => self.goto_definition(),
             Cmd::GotoLine => {
                 self.show_goto = true;
                 self.goto_text.clear();
@@ -2094,6 +2106,87 @@ impl AlexCodeApp {
         if self.lsp.is_starting() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+
+        // 跳到定義：文件同步完才送（伺服器看到的是目前的內容），回覆到了就跳過去
+        if let Some((path, line, ch)) = self.def_want.take() {
+            let params = text_document_position_params(&path, line as i32, ch as i32);
+            match self.lsp.request(&path, "textDocument/definition", params) {
+                Ok(r) => self.def_wait = Some((r, std::time::Instant::now())),
+                Err(e) => self.status_message = format!("跳到定義：{e}"),
+            }
+        }
+        if let Some((r, sent)) = self.def_wait {
+            match self.lsp.take_reply(r) {
+                Some(reply) => {
+                    self.def_wait = None;
+                    match reply.map(|v| extract_definition(&v)) {
+                        Ok(Some((path, line, ch))) => self.jump_to_location(&path, line.max(0) as usize, ch.max(0) as usize),
+                        Ok(None) => self.status_message = "跳到定義：找不到定義".into(),
+                        Err(e) => self.status_message = format!("跳到定義：{e}"),
+                    }
+                }
+                None if sent.elapsed() > std::time::Duration::from_secs(10) => {
+                    self.lsp.forget(r);
+                    self.def_wait = None;
+                    self.status_message = "跳到定義：語言伺服器 10 秒內沒有回應".into();
+                }
+                // 回覆到的時候 waker 會叫醒介面；這裡只是為了逾時檢查
+                None => ctx.request_repaint_after(std::time::Duration::from_secs(1)),
+            }
+        }
+    }
+
+    /// F12 / Ctrl+點擊：以目前分頁的游標位置問語言伺服器定義在哪裡（送出與處理回覆在 `lsp_tick`）
+    fn goto_definition(&mut self) {
+        let Some(buf) = self.tabs.get(self.active_tab_idx) else { return };
+        let Some(path) = buf.file_path.clone() else {
+            self.status_message = "跳到定義：這個分頁還沒有存成檔案".into();
+            return;
+        };
+        if ServerKind::for_path(&path).is_none() {
+            self.status_message = "跳到定義：這種檔案沒有語言伺服器".into();
+            return;
+        }
+        let head = buf.selections[0].head;
+        let ch = buf.lines.get(head.line).map_or(0, |l| char_col_to_utf16(l, head.col));
+        if let Some((r, _)) = self.def_wait.take() {
+            self.lsp.forget(r); // 之前那一次還沒回來：以這一次為準
+        }
+        self.def_want = Some((path, head.line, ch));
+        self.status_message = "跳到定義：尋找中…".into();
+        if let Some(ctx) = &self.repaint {
+            ctx.request_repaint();
+        }
+    }
+
+    /// 開啟（或切換到）`path`，游標移到第 `line` 行、UTF-16 第 `utf16` 個單位
+    fn jump_to_location(&mut self, path: &str, line: usize, utf16: usize) {
+        let find = |tabs: &[EditorBuffer]| tabs.iter().position(|b| b.file_path.as_deref().is_some_and(|p| same_file(p, path)));
+        let idx = match find(&self.tabs) {
+            Some(i) => i,
+            None => {
+                self.open_path(Path::new(path));
+                match find(&self.tabs) {
+                    Some(i) => i,
+                    None => return, // 開不了：狀態列已經說明原因
+                }
+            }
+        };
+        self.commit_md_edit();
+        self.active_tab_idx = idx;
+        let id = self.tabs[idx].id;
+        if let Some(job) = self.loading.get_mut(&id) {
+            job.goto_line = Some(line); // 還在背景載入：載入完成後跳到那一行
+            return;
+        }
+        let buf = &self.tabs[idx];
+        let line = line.min(buf.lines.len().saturating_sub(1));
+        let col = buf.lines.get(line).map_or(0, |l| utf16_to_char_col(l, utf16));
+        let ci = Self::char_index_of(buf, line, col);
+        self.pending_select = Some((ci, ci));
+        self.scroll_to_cursor = true;
+        self.focus_editor = true;
+        self.status_message = format!("定義：{}:{}", path, line + 1);
     }
 
     /// 在虛擬終端裡啟動 shell（目前的終端機資料夾、與 `terminal` 同樣的大小）。
@@ -2246,7 +2339,8 @@ impl AlexCodeApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let ca = Modifiers::COMMAND | Modifiers::ALT;
-        let shortcuts: [(Modifiers, Key, Cmd); 23] = [
+        let shortcuts: [(Modifiers, Key, Cmd); 24] = [
+            (Modifiers::NONE, Key::F12, Cmd::GotoDefinition),
             (Modifiers::COMMAND, Key::Comma, Cmd::Settings),
             (cs, Key::P, Cmd::CommandPalette),
             (cs, Key::F, Cmd::FindInFiles),
@@ -2417,6 +2511,7 @@ impl AlexCodeApp {
                         if mi(ui, "尋找 (Find)", "Ctrl+F") { cmd = Some(Cmd::Find); }
                         if mi(ui, "取代 (Replace)", "Ctrl+H") { cmd = Some(Cmd::Replace); }
                         if mi(ui, "跳至行 (Go to Line)", "Ctrl+G") { cmd = Some(Cmd::GotoLine); }
+                        if mi(ui, "跳到定義 (Go to Definition)", "F12") { cmd = Some(Cmd::GotoDefinition); }
                         ui.separator();
                         if mi(ui, "命令面板 (Command Palette)", "Ctrl+Shift+P") { cmd = Some(Cmd::CommandPalette); }
                         if mi(ui, "全專案搜尋 (Find in Files)", "Ctrl+Shift+F") { cmd = Some(Cmd::FindInFiles); }
@@ -4003,6 +4098,8 @@ impl AlexCodeApp {
 
         let mut new_cursor: Option<(usize, usize)> = None;
         let mut changed = false;
+        // Ctrl+點擊：游標移到點的位置之後跳到定義
+        let mut ctrl_click = false;
         let scroll_to_cursor = std::mem::take(&mut self.scroll_to_cursor);
 
         // Sticky Scroll：上一幀固定標頭佔用的高度，以及游標原本的位置（用來判斷游標是否移動）
@@ -4057,6 +4154,7 @@ impl AlexCodeApp {
                         .show(ui);
 
                     changed = output.response.changed();
+                    ctrl_click = output.response.clicked() && ui.input(|i| i.modifiers.command);
                     self.editor_focused = output.response.has_focus();
                     if cursor_shift != 0 {
                         // 自動補上右括號後游標留在中間；跳過既有的右括號時游標右移
@@ -4364,6 +4462,9 @@ impl AlexCodeApp {
             let buf = &mut self.tabs[idx];
             let p = Position { line: line.min(buf.lines.len().saturating_sub(1)), col };
             buf.selections = vec![Selection::point(p)];
+        }
+        if ctrl_click {
+            self.goto_definition();
         }
     }
 
@@ -8820,6 +8921,136 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(x_at(2, 1), text.top() + row_h * 2.5))]);
         let out = frame(&mut app, &ctx, vec![]);
         assert!(!tip(&out, "cannot find") && !tip(&out, "unused variable"));
+    }
+
+    #[test]
+    fn f12_and_ctrl_click_jump_to_the_definition() {
+        use serde_json::{json, Value};
+        use std::io::{Read, Write};
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let lib = write(&dir, "lib.rs", "// helpers\n\npub fn 😀helper() {}\n");
+        let main = dir.path().join("main.rs").to_string_lossy().into_owned();
+        let mut app = app_with(&ctx, "fn main() {\n    helper();\n}\n");
+        app.tabs[0].file_path = Some(main.clone());
+        // 假的伺服器：第 2 行（index 1）的定義在 lib.rs 第 3 行、UTF-16 第 9 個單位（`pub fn ` 7 個 + 表情符號 2 個）；
+        // 其他位置回 null（沒有定義）
+        let asked = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let a = asked.clone();
+        let lib_uri = crate::lsp::uri_from_path(&lib.to_string_lossy());
+        let launcher: Launcher = Box::new(move |_, _| {
+            let (client_read, mut server_write) = std::io::pipe()?;
+            let (mut server_read, client_write) = std::io::pipe()?;
+            let (a, lib_uri) = (a.clone(), lib_uri.clone());
+            std::thread::spawn(move || {
+                let mut frames = crate::lsp::Reader::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = server_read.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    frames.feed(&buf[..n]);
+                    for m in frames.take_messages() {
+                        let result = match m["method"].as_str() {
+                            Some("initialize") => json!({ "capabilities": {} }),
+                            Some("textDocument/definition") => {
+                                a.lock().unwrap().push(m["params"].clone());
+                                if m["params"]["position"]["line"] == 1 {
+                                    json!([{ "uri": lib_uri, "range": { "start": { "line": 2, "character": 9 }, "end": { "line": 2, "character": 15 } } }])
+                                } else {
+                                    Value::Null
+                                }
+                            }
+                            _ => continue,
+                        };
+                        let _ = server_write.write_all(&crate::lsp::frame(&json!({ "jsonrpc": "2.0", "id": m["id"], "result": result })));
+                    }
+                }
+            });
+            Ok(crate::lsp::LspClient::from_io(client_read, client_write))
+        });
+        app.lsp = LspManager::new(dir.path().to_path_buf(), launcher);
+        let pump = |app: &mut AlexCodeApp, what: &str, done: &dyn Fn(&AlexCodeApp) -> bool| {
+            let end = Instant::now() + Duration::from_secs(10);
+            while !done(app) && Instant::now() < end {
+                frame(app, &ctx, vec![]);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(done(app), "{what}; status: {}", app.status_message);
+        };
+        pump(&mut app, "the server is ready", &|app| app.lsp.status(ServerKind::RustAnalyzer) == Some(&LspStatus::Ready));
+        frame(&mut app, &ctx, vec![]);
+        let active_path = |app: &AlexCodeApp| app.tabs[app.active_tab_idx].file_path.clone().unwrap_or_default();
+        let head = |app: &AlexCodeApp| {
+            let h = app.tabs[app.active_tab_idx].selections[0].head;
+            (h.line, h.col)
+        };
+
+        // F12：游標在 `helper` 裡（第 2 行第 6 個字元）→ 開啟 lib.rs，游標在表情符號後面的 `helper` 開頭（第 8 個字元）
+        app.pending_select = Some((12 + 6, 12 + 6));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(head(&app), (1, 6));
+        frame(&mut app, &ctx, vec![key(Key::F12, Modifiers::NONE)]);
+        pump(&mut app, "F12 opens the file with the definition", &|app| same_file(&active_path(app), &lib.to_string_lossy()));
+        pump(&mut app, "the cursor lands on the definition", &|app| head(app) == (2, 8));
+        let q = asked.lock().unwrap()[0].clone();
+        assert_eq!(q["textDocument"]["uri"], json!(crate::lsp::uri_from_path(&main)));
+        assert_eq!(q["position"], json!({ "line": 1, "character": 6 }));
+        assert_eq!(app.tabs.len(), 2);
+
+        // Ctrl+點擊：回到 main.rs，按住 Ctrl 點 `helper` 的第 3 個字元
+        app.active_tab_idx = 0;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn main()")).unwrap();
+        let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn main()")).unwrap().1;
+        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let at = Pos2::new(text.left() + g.rows[1].x_offset(6) + 1.0, text.top() + row_h * 1.5);
+        let ctrl = Modifiers::COMMAND;
+        let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: ctrl };
+        frame_with(&mut app, &ctx, |i| {
+            i.modifiers = ctrl;
+            i.events = vec![Event::PointerMoved(at)];
+        });
+        frame_with(&mut app, &ctx, |i| {
+            i.modifiers = ctrl;
+            i.events = vec![button(true)];
+        });
+        frame_with(&mut app, &ctx, |i| {
+            i.modifiers = ctrl;
+            i.events = vec![button(false)];
+        });
+        pump(&mut app, "Ctrl+click jumps too", &|app| same_file(&active_path(app), &lib.to_string_lossy()));
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        assert_eq!(asked.lock().unwrap()[1]["position"], json!({ "line": 1, "character": 6 }));
+        assert_eq!(app.tabs.len(), 2, "the already open file is reused");
+        pump(&mut app, "the cursor lands on the definition", &|app| head(app) == (2, 8));
+
+        // 一般點擊（沒按 Ctrl）不會跳
+        app.active_tab_idx = 0;
+        frame(&mut app, &ctx, vec![]);
+        click(&mut app, &ctx, at);
+        std::thread::sleep(Duration::from_millis(100));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        assert!(same_file(&active_path(&app), &main));
+
+        // 沒有定義的位置：留在原地，狀態列說明
+        app.pending_select = Some((3, 3));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(Key::F12, Modifiers::NONE)]);
+        pump(&mut app, "the status bar says nothing was found", &|app| app.status_message.contains("找不到定義"));
+        assert!(same_file(&active_path(&app), &main));
+        assert_eq!(head(&app), (0, 3));
+        // 沒有語言伺服器的檔案
+        let mut b = EditorBuffer::from_text("notes");
+        b.file_path = Some(dir.path().join("notes.txt").to_string_lossy().into_owned());
+        app.tabs.push(b);
+        app.active_tab_idx = app.tabs.len() - 1;
+        frame(&mut app, &ctx, vec![key(Key::F12, Modifiers::NONE)]);
+        assert!(app.status_message.contains("沒有語言伺服器"), "{}", app.status_message);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）

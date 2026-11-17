@@ -234,7 +234,78 @@ fn diagnostics_are_kept_per_file_and_wake_the_ui() {
 }
 
 #[test]
+fn requests_get_their_own_replies() {
+    use alexcode::lsp::RequestId;
+    let dir = tempfile::tempdir().unwrap();
+    // 假伺服器：一般請求回 { "echo": params }，`boom` 回錯誤；先回後收到的那一個（回覆順序與送出順序不同）
+    let launcher: Launcher = Box::new(move |_kind, _root| {
+        let (client_read, mut server_write) = std::io::pipe()?;
+        let (mut server_read, client_write) = std::io::pipe()?;
+        std::thread::spawn(move || {
+            let mut frames = Reader::new();
+            let mut buf = [0u8; 4096];
+            let mut held: Option<Value> = None;
+            while let Ok(n) = server_read.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                frames.feed(&buf[..n]);
+                for m in frames.take_messages() {
+                    let (Some(method), Some(_)) = (m["method"].as_str(), m.get("id")) else { continue };
+                    let reply = match method {
+                        "initialize" => json!({ "jsonrpc": "2.0", "id": m["id"], "result": { "capabilities": {} } }),
+                        "boom" => json!({ "jsonrpc": "2.0", "id": m["id"], "error": { "code": -32603, "message": "it broke" } }),
+                        _ => json!({ "jsonrpc": "2.0", "id": m["id"], "result": { "echo": m["params"] } }),
+                    };
+                    if method == "first" {
+                        held = Some(reply);
+                        continue;
+                    }
+                    let _ = server_write.write_all(&frame(&reply));
+                    if let Some(h) = held.take() {
+                        let _ = server_write.write_all(&frame(&h));
+                    }
+                }
+            }
+        });
+        Ok(LspClient::from_io(client_read, client_write))
+    });
+    let mut m = LspManager::new(dir.path().to_path_buf(), launcher);
+    let rs = dir.path().join("main.rs").to_string_lossy().into_owned();
+    let docs = vec![OpenDoc { path: rs.clone(), revision: 1 }];
+    // 還沒同步（伺服器還沒啟動）：不送，說明原因
+    assert!(m.request(&rs, "first", json!({})).is_err());
+    assert_eq!(m.request("notes.txt", "x", json!({})), Err("這種檔案沒有語言伺服器".to_string()));
+    assert!(pump(&mut m, &docs, &["fn main() {}"], 10, |m| m.status(ServerKind::RustAnalyzer) == Some(&LspStatus::Ready)));
+    m.sync(&docs, |_| "fn main() {}".into());
+    let a: RequestId = m.request(&rs, "first", json!({ "n": 1 })).unwrap();
+    let b = m.request(&rs, "second", json!({ "n": 2 })).unwrap();
+    let c = m.request(&rs, "boom", json!({})).unwrap();
+    assert_ne!(a, b);
+    let mut got = (None, None, None);
+    let end = Instant::now() + Duration::from_secs(10);
+    while (got.0.is_none() || got.1.is_none() || got.2.is_none()) && Instant::now() < end {
+        m.sync(&docs, |_| "fn main() {}".into());
+        got.0 = got.0.or_else(|| m.take_reply(a));
+        got.1 = got.1.or_else(|| m.take_reply(b));
+        got.2 = got.2.or_else(|| m.take_reply(c));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(got.0, Some(Ok(json!({ "echo": { "n": 1 } }))), "each reply goes to its own request");
+    assert_eq!(got.1, Some(Ok(json!({ "echo": { "n": 2 } }))));
+    assert_eq!(got.2, Some(Err("it broke".to_string())));
+    assert_eq!(m.take_reply(a), None, "a reply is taken once");
+    // 不再需要的請求：之後收到的回覆被丟掉
+    let d = m.request(&rs, "second", json!({ "n": 4 })).unwrap();
+    m.forget(d);
+    pump(&mut m, &docs, &["fn main() {}"], 1, |_| false);
+    assert_eq!(m.take_reply(d), None);
+}
+
+#[test]
 fn utf16_positions_become_char_columns() {
+    assert_eq!(alexcode::lsp::char_col_to_utf16("😀x中", 2), 3);
+    assert_eq!(alexcode::lsp::char_col_to_utf16("ab", 9), 2);
     use alexcode::lsp::utf16_to_char_col;
     assert_eq!(utf16_to_char_col("abc", 2), 2);
     assert_eq!(utf16_to_char_col("中文x", 2), 2, "BMP characters are one UTF-16 unit");
@@ -304,4 +375,34 @@ fn real_clangd_reports_diagnostics() {
     let fixed = "int main(void) {\n    return 0;\n}\n";
     let docs2 = vec![OpenDoc { path: path.clone(), revision: 2 }];
     assert!(pump(&mut m, &docs2, &[fixed], 30, |m| m.diagnostics(&path).is_empty()), "fixing the file clears them");
+}
+
+#[test]
+#[ignore]
+fn real_clangd_finds_definitions() {
+    // cargo test --test lsp_manager_test real_clangd -- --ignored --nocapture：裝了 clangd 才有意義
+    let dir = tempfile::tempdir().unwrap();
+    let c = dir.path().join("calls.c");
+    let text = "static int twice(int x) { return x * 2; }\n\nint main(void) {\n    return twice(21);\n}\n";
+    std::fs::write(&c, text).unwrap();
+    let path = c.to_string_lossy().into_owned();
+    let mut m = LspManager::new(dir.path().to_path_buf(), Box::new(spawn_server));
+    let docs = vec![OpenDoc { path: path.clone(), revision: 1 }];
+    assert!(pump(&mut m, &docs, &[text], 60, |m| m.status(ServerKind::Clangd) == Some(&LspStatus::Ready)));
+    m.sync(&docs, |_| text.to_string());
+    // `twice` 的呼叫在第 4 行（index 3）第 12 個字元
+    let params = alexcode::lsp::text_document_position_params(&path, 3, 12);
+    let r = m.request(&path, "textDocument/definition", params).unwrap();
+    let t0 = Instant::now();
+    let mut reply = None;
+    while reply.is_none() && t0.elapsed() < Duration::from_secs(30) {
+        m.sync(&docs, |_| text.to_string());
+        reply = m.take_reply(r);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    println!("after {:?}: {reply:?}", t0.elapsed());
+    let def = alexcode::lsp::extract_definition(&reply.expect("a reply").expect("not an error")).expect("a location");
+    println!("definition: {def:?}");
+    assert!(std::path::Path::new(&def.0) == c.as_path() || def.0.eq_ignore_ascii_case(&path), "{} vs {}", def.0, path);
+    assert_eq!((def.1, def.2), (0, 11), "the function name on line 1");
 }

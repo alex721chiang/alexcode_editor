@@ -93,6 +93,10 @@ pub fn spawn_server(kind: ServerKind, _root: &Path) -> std::io::Result<LspClient
     LspClient::spawn(kind.program(), &[])
 }
 
+/// `LspManager::request` 送出的請求：哪一個伺服器的第幾號
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestId(pub ServerKind, pub i64);
+
 /// `sync` 用的一份開著的文件
 pub struct OpenDoc {
     pub path: String,
@@ -108,11 +112,22 @@ struct Server {
     docs: HashMap<String, (i64, u64)>,
     /// 伺服器送來的診斷（`textDocument/publishDiagnostics`）：`uri_key` → 最新的一份清單
     diags: HashMap<String, Arc<Vec<Diagnostic>>>,
+    /// 送出、還在等回覆的請求，與已經收到的回覆（`Err` 是伺服器回的錯誤訊息）
+    waiting: HashSet<i64>,
+    replies: HashMap<i64, Result<Value, String>>,
 }
 
 impl Server {
     fn new(client: Option<LspClient>, status: LspStatus, init_id: i64) -> Self {
-        Self { client, status, init_id, docs: HashMap::new(), diags: HashMap::new() }
+        Self {
+            client,
+            status,
+            init_id,
+            docs: HashMap::new(),
+            diags: HashMap::new(),
+            waiting: HashSet::new(),
+            replies: HashMap::new(),
+        }
     }
 
     /// 讀進伺服器送來的訊息：initialize 的回覆、伺服器的請求；伺服器結束時改成 `Exited`
@@ -149,6 +164,16 @@ impl Server {
                         self.status = LspStatus::Ready;
                     } else {
                         self.status = LspStatus::Failed("無法送出 initialized".into());
+                    }
+                }
+                // 我們送出的請求的回覆（不在等的就丟掉）
+                (None, Some(id)) => {
+                    if let Some(id) = id.as_i64().filter(|i| self.waiting.remove(i)) {
+                        let reply = match msg.get("error") {
+                            Some(err) => Err(err["message"].as_str().unwrap_or("請求失敗").to_string()),
+                            None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                        };
+                        self.replies.insert(id, reply);
                     }
                 }
                 _ => {}
@@ -202,6 +227,44 @@ impl LspManager {
     pub fn diagnostics(&self, path: &str) -> Arc<Vec<Diagnostic>> {
         let key = uri_key(&uri_from_path(path));
         self.servers.values().find_map(|s| s.diags.get(&key).cloned()).unwrap_or_default()
+    }
+
+    /// 把請求送給負責 `path` 的伺服器。伺服器還沒就緒、或這個檔案還沒同步給它（先 `sync`）時是 `Err`（狀態說明）。
+    /// 回覆用 `take_reply` 取回
+    pub fn request(&mut self, path: &str, method: &str, params: Value) -> Result<RequestId, String> {
+        let kind = ServerKind::for_path(path).ok_or_else(|| "這種檔案沒有語言伺服器".to_string())?;
+        let s = self.servers.get_mut(&kind).ok_or_else(|| format!("{} 還沒啟動", kind.program()))?;
+        if s.status != LspStatus::Ready {
+            return Err(format!("{}：{}", kind.program(), s.status.label()));
+        }
+        if !s.docs.contains_key(&uri_from_path(path)) {
+            return Err(format!("{} 還沒收到這個檔案", kind.program()));
+        }
+        let c = s.client.as_mut().ok_or_else(|| format!("{}：已結束", kind.program()))?;
+        let id = c.next_request_id();
+        c.send_message(&make_request(id, method, params)).map_err(|e| format!("{}：{e}", kind.program()))?;
+        s.waiting.insert(id);
+        Ok(RequestId(kind, id))
+    }
+
+    /// 取回 `request` 的回覆：還沒收到是 None；伺服器回錯誤是 `Some(Err)`。伺服器已經結束時也回 `Some(Err)`
+    pub fn take_reply(&mut self, req: RequestId) -> Option<Result<Value, String>> {
+        let s = self.servers.get_mut(&req.0)?;
+        if let Some(r) = s.replies.remove(&req.1) {
+            return Some(r);
+        }
+        if s.client.is_none() {
+            return Some(Err(format!("{}：{}", req.0.program(), s.status.label())));
+        }
+        None
+    }
+
+    /// 不再需要這個回覆（之後收到就丟掉）
+    pub fn forget(&mut self, req: RequestId) {
+        if let Some(s) = self.servers.get_mut(&req.0) {
+            s.waiting.remove(&req.1);
+            s.replies.remove(&req.1);
+        }
     }
 
     pub fn set_root(&mut self, root: PathBuf) {

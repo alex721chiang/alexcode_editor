@@ -218,6 +218,11 @@ pub fn utf16_to_char_col(line: &str, units: usize) -> usize {
     line.chars().count()
 }
 
+/// `utf16_to_char_col` 的反方向：`line` 的前 `col` 個字元佔幾個 UTF-16 單位（超過行尾時算到行尾）
+pub fn char_col_to_utf16(line: &str, col: usize) -> usize {
+    line.chars().take(col).map(char::len_utf16).sum()
+}
+
 pub fn position_json(line: i32, character: i32) -> Value {
     json!({ "line": line, "character": character })
 }
