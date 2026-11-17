@@ -8730,9 +8730,9 @@ mod tests {
         let ctx = ctx();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.rs").to_string_lossy().into_owned();
-        let mut app = app_with(&ctx, "fn nope() {}\nlet 中x = 1;\nfn fine() {}\n");
+        let mut app = app_with(&ctx, "fn nope() {}\nlet 😀x = 1;\nfn fine() {}\n");
         app.tabs[0].file_path = Some(path.clone());
-        // 假的伺服器：收到 didOpen 就送出兩個診斷——第 1 行的 `nope`（錯誤）、第 2 行的 `x`（警告，前面有一個中文字）
+        // 假的伺服器：收到 didOpen 就送出兩個診斷——第 1 行的 `nope`（錯誤）、第 2 行的 `x`（警告，前面有一個佔兩個 UTF-16 單位的表情符號）
         let launcher: Launcher = Box::new(move |_, _| {
             let (client_read, mut server_write) = std::io::pipe()?;
             let (mut server_read, client_write) = std::io::pipe()?;
@@ -8755,7 +8755,7 @@ mod tests {
                                 "diagnostics": [
                                     { "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
                                       "severity": 1, "message": "cannot find function `nope`", "source": "rustc" },
-                                    { "range": { "start": { "line": 1, "character": 5 }, "end": { "line": 1, "character": 6 } },
+                                    { "range": { "start": { "line": 1, "character": 6 }, "end": { "line": 1, "character": 7 } },
                                       "severity": 2, "message": "unused variable: `x`" }
                                 ] } });
                             let _ = server_write.write_all(&crate::lsp::frame(&note));
@@ -8798,10 +8798,10 @@ mod tests {
         let warn: Vec<_> = paths.iter().filter(|p| p.0 == DIAG_WARNING).collect();
         assert_eq!(warn.len(), 1);
         let w = warn[0].1;
-        // 第 5 個 UTF-16 單位是 `x`（`let ` 4 個字元 + 1 個中文字）
+        // UTF-16 第 6 個單位是 `x`（`let ` 4 個 + 表情符號 2 個），也就是第 5 個字元；
+        // 沒有換算的話底線會落在 `x` 後面的空白上（不論字型裡有沒有這個表情符號都分得出來）
         let x0 = x_at(1, 5);
         assert!((w.left() - x0).abs() < 1.0 && (w.right() - x_at(1, 6)).abs() < 1.0, "{w:?}, x starts at {x0}");
-        assert!(x0 - x_at(1, 4) > (x_at(1, 1) - x_at(1, 0)) * 1.5, "the column before `x` is the wide character");
         assert!(w.top() > text.top() + row_h * 1.6, "on the second row");
 
         // 滑鼠停在底線上：顯示訊息
