@@ -13,7 +13,7 @@ use crate::editor::EditorBuffer;
 use crate::search::Finder;
 use crate::theme::Palette;
 use eframe::egui::{
-    self, Align, Color32, CursorIcon, FontFamily, FontId, Key, Layout, Margin, Rect, RichText, Rounding,
+    self, Align, Color32, CursorIcon, FontFamily, FontId, Key, Layout, Margin, Rect, RichText, CornerRadius,
     Sense, Stroke, Vec2,
 };
 use std::collections::HashMap;
@@ -803,9 +803,9 @@ pub fn render_markdown_toolbar(
     buf: &mut EditorBuffer,
     c: &Colors,
 ) {
-    let frame = egui::Frame::none()
+    let frame = egui::Frame::NONE
         .fill(with_alpha(c.panel, 225))
-        .inner_margin(Margin::symmetric(12.0, 5.0));
+        .inner_margin(Margin::symmetric(12, 5));
 
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -921,9 +921,9 @@ pub fn render_outline_panel(
     let mut clicked_line = None;
     let toc = extract_toc(lines);
 
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(c.panel)
-        .inner_margin(Margin::symmetric(10.0, 8.0))
+        .inner_margin(Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -1021,13 +1021,14 @@ pub fn render_typora_document(
             let max_doc_w = 820.0_f32;
             let side_pad = ((avail_w - max_doc_w) * 0.5).max(24.0);
 
-            egui::Frame::none()
-                .inner_margin(Margin {
-                    left: side_pad,
-                    right: side_pad,
-                    top: 22.0,
-                    bottom: 60.0,
-                })
+            // 左右留白常常超過 127 px（egui 0.31 起 Margin 是 i8）：改在往內縮的子區域裡排版來置中，上下留白照舊用 Margin
+            let outer = ui.available_rect_before_wrap();
+            let column = Rect::from_min_max(
+                egui::pos2(outer.left() + side_pad, outer.top()),
+                egui::pos2((outer.right() - side_pad).max(outer.left() + side_pad + 240.0), outer.bottom()),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(column), |ui| egui::Frame::NONE
+                .inner_margin(Margin { left: 0, right: 0, top: 22, bottom: 60 })
                 .show(ui, |ui| {
                     ui.set_width((avail_w - side_pad * 2.0).max(240.0));
 
@@ -1052,11 +1053,11 @@ pub fn render_typora_document(
 
                         // 若此區塊正在原位編輯：顯示帶語法高亮的 Markdown 編輯框
                         if is_editing_this {
-                            let edit_frame = egui::Frame::none()
+                            let edit_frame = egui::Frame::NONE
                                 .fill(c.current_line)
                                 .stroke(Stroke::new(1.5_f32, c.accent))
-                                .rounding(Rounding::same(6.0))
-                                .inner_margin(Margin::symmetric(12.0, 8.0));
+                                .corner_radius(CornerRadius::same(6))
+                                .inner_margin(Margin::symmetric(12, 8));
 
                             edit_frame.show(ui, |ui| {
                                 ui.horizontal(|ui| {
@@ -1136,7 +1137,7 @@ pub fn render_typora_document(
                             start_edit_range = Some((block.start_line, block.end_line));
                         }
                     }
-                });
+                }));
         });
 
     if commit_now {
@@ -1318,14 +1319,14 @@ fn render_single_block(
             }
 
             MdBlockKind::BlockQuote { lines } => {
-                let frame = egui::Frame::none()
+                let frame = egui::Frame::NONE
                     .fill(with_alpha(c.panel, 180))
-                    .rounding(Rounding::same(5.0))
+                    .corner_radius(CornerRadius::same(5))
                     .inner_margin(Margin {
-                        left: 14.0,
-                        right: 12.0,
-                        top: 8.0,
-                        bottom: 8.0,
+                        left: 14,
+                        right: 12,
+                        top: 8,
+                        bottom: 8,
                     });
                 let resp = frame.show(ui, |ui| {
                     for l in lines {
@@ -1343,15 +1344,15 @@ fn render_single_block(
 
             MdBlockKind::Alert { kind, title, lines } => {
                 let (badge, col) = kind.badge_and_color(c, pal);
-                let frame = egui::Frame::none()
+                let frame = egui::Frame::NONE
                     .fill(with_alpha(col, if c.light { 24 } else { 20 }))
                     .stroke(Stroke::new(1.0_f32, with_alpha(col, 80)))
-                    .rounding(Rounding::same(6.0))
+                    .corner_radius(CornerRadius::same(6))
                     .inner_margin(Margin {
-                        left: 16.0,
-                        right: 12.0,
-                        top: 10.0,
-                        bottom: 10.0,
+                        left: 16,
+                        right: 12,
+                        top: 10,
+                        bottom: 10,
                     });
                 let resp = frame.show(ui, |ui| {
                     let heading = if title.is_empty() {
@@ -1375,11 +1376,11 @@ fn render_single_block(
             }
 
             MdBlockKind::CodeBlock { lang, code } => {
-                let frame = egui::Frame::none()
+                let frame = egui::Frame::NONE
                     .fill(c.panel)
                     .stroke(Stroke::new(1.0_f32, c.border))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::symmetric(12.0, 8.0));
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(12, 8));
 
                 frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -1391,7 +1392,7 @@ fn render_single_block(
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.small_button("📋 複製").on_hover_text("複製程式碼到剪貼簿").clicked() {
-                                ui.output_mut(|o| o.copied_text = code.clone());
+                                ui.ctx().copy_text(code.clone());
                             }
                         });
                     });
@@ -1418,11 +1419,11 @@ fn render_single_block(
                 let cols = headers.len().max(1);
                 let col_w = ((ui.available_width() - 24.0) / cols as f32).max(80.0);
 
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(c.panel)
                     .stroke(Stroke::new(1.0_f32, c.border))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::same(6.0))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::same(6))
                     .show(ui, |ui| {
                         egui::Grid::new(("md_table", block.start_line))
                             .striped(true)
@@ -1471,11 +1472,11 @@ fn render_single_block(
                     })
                     .clone();
 
-                egui::Frame::none()
+                egui::Frame::NONE
                     .fill(c.panel)
                     .stroke(Stroke::new(1.0_f32, c.border))
-                    .rounding(Rounding::same(6.0))
-                    .inner_margin(Margin::same(8.0))
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::same(8))
                     .show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             if let Some(t) = tex {
@@ -1503,7 +1504,7 @@ fn render_single_block(
     let resp = ui.interact(rect, id, Sense::click());
     if resp.hovered() {
         ui.painter()
-            .rect_stroke(rect, Rounding::same(4.0), Stroke::new(1.0_f32, with_alpha(c.accent, 65)));
+            .rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0_f32, with_alpha(c.accent, 65)), egui::StrokeKind::Middle);
     }
     resp
 }

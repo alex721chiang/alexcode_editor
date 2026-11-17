@@ -3063,7 +3063,7 @@ impl AlexCodeApp {
 
     /// 帶漸層底與光暈邊線的面板 Frame
     fn bar_frame(c: &Colors) -> egui::Frame {
-        egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(6.0, 3.0))
+        egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(6, 3))
     }
 
     fn paint_bar_bg(ui: &egui::Ui, top: Color32, bottom: Color32, line: Option<(bool, Color32)>) {
@@ -3284,7 +3284,7 @@ impl AlexCodeApp {
 
     fn tool_bar(&mut self, ctx: &egui::Context, c: &Colors) {
         egui::TopBottomPanel::top("tool_bar")
-            .frame(Self::bar_frame(c).inner_margin(egui::Margin::symmetric(6.0, 4.0)))
+            .frame(Self::bar_frame(c).inner_margin(egui::Margin::symmetric(6, 4)))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 let line = if c.hud { c.glow } else { c.border };
@@ -3390,7 +3390,7 @@ impl AlexCodeApp {
 
     fn tab_bar(&mut self, ctx: &egui::Context, c: &Colors) {
         egui::TopBottomPanel::top("tab_bar")
-            .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin { left: 4.0, right: 4.0, top: 2.0, bottom: 0.0 }))
+            .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin { left: 4, right: 4, top: 2, bottom: 0 }))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 1.0));
@@ -3426,7 +3426,7 @@ impl AlexCodeApp {
                                     let gp = ui.ctx().layer_painter(layer);
                                     let at = pp + egui::vec2(14.0, 10.0);
                                     let g = gp.layout_no_wrap(title.clone(), FontId::proportional(13.0), c.fg);
-                                    gp.rect(Rect::from_min_size(at, g.size()).expand2(egui::vec2(8.0, 4.0)), 3.0, c.panel, Stroke::new(1.0_f32, c.accent));
+                                    gp.rect(Rect::from_min_size(at, g.size()).expand2(egui::vec2(8.0, 4.0)), 3.0, c.panel, Stroke::new(1.0_f32, c.accent), egui::StrokeKind::Middle);
                                     gp.galley(at, g, c.fg);
                                 }
                             }
@@ -3674,7 +3674,7 @@ impl AlexCodeApp {
         let mut go: Option<bool> = None;
         let (mut do_replace, mut do_replace_all) = (false, false);
         egui::TopBottomPanel::top("find_bar")
-            .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
+            .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 5)))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 ui.painter().hline(
@@ -3787,7 +3787,7 @@ impl AlexCodeApp {
             .resizable(true)
             .default_width(240.0)
             .width_range(160.0..=520.0)
-            .frame(egui::Frame::none().fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
+            .frame(egui::Frame::NONE.fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
             .show(ctx, |ui| {
                 if Self::dock_title(ui, c, "EXPLORER  檔案總管") {
                     close = true;
@@ -3942,7 +3942,7 @@ impl AlexCodeApp {
         let name = Self::tab_title(buf);
         let mut choice: Option<bool> = None; // true = 重新載入
         egui::TopBottomPanel::top("disk_conflict_bar")
-            .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 5.0)))
+            .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 5)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("「{}」已被其他程式修改，而你有尚未儲存的變更。", name)).color(c.warn));
@@ -4084,7 +4084,7 @@ impl AlexCodeApp {
 
     fn status_bar(&mut self, ctx: &egui::Context, c: &Colors) {
         egui::TopBottomPanel::bottom("status_bar")
-            .frame(egui::Frame::none().fill(c.bg).inner_margin(egui::Margin::symmetric(4.0, 3.0)))
+            .frame(egui::Frame::NONE.fill(c.bg).inner_margin(egui::Margin::symmetric(4, 3)))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 let full = ui.max_rect().expand2(egui::vec2(4.0, 3.0));
@@ -4264,13 +4264,13 @@ impl AlexCodeApp {
         egui::TopBottomPanel::bottom("terminal_dock")
             .resizable(true)
             .default_height(200.0)
-            .frame(egui::Frame::none().fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
+            .frame(egui::Frame::NONE.fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
             .show(ctx, |ui| {
                 self.mark_rect("terminal-panel", ui.max_rect());
                 if Self::dock_title(ui, c, "TERMINAL  整合終端機") {
                     self.show_terminal = false;
                 }
-                egui::Frame::none().inner_margin(egui::Margin::symmetric(10.0, 6.0)).show(ui, |ui| {
+                egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                     // 內容一定佔滿整個高度：可以改大小的面板下一幀會縮成內容用掉的高度，而最後一列（輸入列）
                     // 後面的間距不算在內，不佔滿的話每一幀縮 2 像素（shell 有輸出就一直重畫，終端機越縮越小、大小一直變）
                     ui.set_min_height(ui.available_height());
@@ -4366,7 +4366,7 @@ impl AlexCodeApp {
                                 if focused {
                                     ui.painter().rect_filled(r, 0.0, c.accent.gamma_multiply(0.7));
                                 } else {
-                                    ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0_f32, c.accent));
+                                    ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0_f32, c.accent), egui::StrokeKind::Middle);
                                 }
                             }
                         });
@@ -4379,7 +4379,7 @@ impl AlexCodeApp {
                         resp.request_focus();
                     }
                     if focused {
-                        ui.painter().rect_stroke(out.inner_rect.expand(2.0), 2.0, Stroke::new(1.0_f32, c.accent));
+                        ui.painter().rect_stroke(out.inner_rect.expand(2.0), 2.0, Stroke::new(1.0_f32, c.accent), egui::StrokeKind::Middle);
                     }
                     self.mark_rect("terminal-output", out.inner_rect);
                     ui.horizontal(|ui| {
@@ -4417,7 +4417,7 @@ impl AlexCodeApp {
         egui::TopBottomPanel::bottom("graph_dock")
             .resizable(true)
             .default_height(240.0)
-            .frame(egui::Frame::none().fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
+            .frame(egui::Frame::NONE.fill(c.bg).stroke(Stroke::new(1.0_f32, c.border)))
             .show(ctx, |ui| {
                 if Self::dock_title(ui, c, "GRAPH  Markdown 筆記關聯圖") {
                     self.show_graph = false;
@@ -4507,7 +4507,7 @@ impl AlexCodeApp {
             self.editor_was_focused = false;
             self.editor_focused = false;
             let path = self.tabs[self.active_tab_idx].file_path.clone().unwrap_or_default();
-            egui::CentralPanel::default().frame(egui::Frame::none().fill(c.bg)).show(ctx, |ui| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.bg)).show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space((ui.available_height() * 0.4).max(0.0));
                     ui.spinner();
@@ -4531,7 +4531,7 @@ impl AlexCodeApp {
         if !filtering && is_md {
             // Markdown 專屬頂部工具列（Typora 閱讀 / 雙欄 / 原始碼 切換 + 快速格式插入）
             egui::TopBottomPanel::top("md_typora_toolbar")
-                .frame(egui::Frame::none().fill(c.panel))
+                .frame(egui::Frame::NONE.fill(c.panel))
                 .show_separator_line(false)
                 .show(ctx, |ui| {
                     if let Some(buf) = self.tabs.get_mut(self.active_tab_idx) {
@@ -4546,7 +4546,7 @@ impl AlexCodeApp {
                     .default_width(220.0)
                     .min_width(150.0)
                     .max_width(380.0)
-                    .frame(egui::Frame::none().fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
+                    .frame(egui::Frame::NONE.fill(c.panel).stroke(Stroke::new(1.0_f32, c.border)))
                     .show(ctx, |ui| {
                         if let Some(buf) = self.tabs.get(self.active_tab_idx) {
                             if let Some(line) = render_outline_panel(ui, &buf.lines, c) {
@@ -4565,7 +4565,7 @@ impl AlexCodeApp {
         self.editor_focused = false; // 由 code_editor 在本幀重新設定
         let mut md_action = MdAction::None;
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(c.bg))
+            .frame(egui::Frame::NONE.fill(c.bg))
             .show(ctx, |ui| {
                 let full_rect = ui.max_rect();
                 // 分割檢視：另一欄畫成唯讀，下面照常把目前分頁畫在有焦點的那一欄
@@ -4958,7 +4958,7 @@ impl AlexCodeApp {
                     // 內嵌的浮動視窗：記整個視窗的左上角（大小固定用預設的）
                     (!open, shown.map(|s| Rect::from_min_size(s.response.rect.min, egui::vec2(600.0, 400.0))))
                 } else {
-                    egui::CentralPanel::default().frame(egui::Frame::none().fill(c.panel)).show(ctx, |ui| {
+                    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.panel)).show(ctx, |ui| {
                         this.detached_body(ui, idx, c, pal, git);
                     });
                     // 作業系統視窗：外框左上角 + 內容大小（與 with_position / with_inner_size 對應）
@@ -5819,7 +5819,7 @@ impl AlexCodeApp {
                         let rb = galley.pos_from_cursor(&galley.from_ccursor(CCursor::new(b)));
                         if (ra.top() - rb.top()).abs() < 0.5 {
                             let r = Rect::from_min_max(ra.left_top(), rb.right_bottom()).translate(gpos.to_vec2());
-                            ui.painter().rect_stroke(r.expand(1.0), 2.0, Stroke::new(1.5_f32, c.accent));
+                            ui.painter().rect_stroke(r.expand(1.0), 2.0, Stroke::new(1.5_f32, c.accent), egui::StrokeKind::Middle);
                         }
                     }
 
@@ -6573,7 +6573,7 @@ impl AlexCodeApp {
                         }
                         p.vline(mid, rect.y_range(), Stroke::new(1.0_f32, c.border));
                         if Some(i) == focus_row {
-                            p.rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, c.accent));
+                            p.rect_stroke(rect.shrink(0.5), 0.0, Stroke::new(1.0_f32, c.accent), egui::StrokeKind::Middle);
                             marks.push(("diff.focus_row", rect));
                         }
                         if resp.clicked() {
@@ -6922,7 +6922,7 @@ impl AlexCodeApp {
         let size = self.large_stats.1 .0 as f64 / (1024.0 * 1024.0);
         let mut preview = false;
         egui::TopBottomPanel::top("md_big_bar")
-            .frame(egui::Frame::none().fill(c.panel).inner_margin(egui::Margin::symmetric(10.0, 4.0)))
+            .frame(egui::Frame::NONE.fill(c.panel).inner_margin(egui::Margin::symmetric(10, 4)))
             .show_separator_line(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -8083,6 +8083,19 @@ mod tests {
         };
         edit(&mut input);
         ctx.run(input, |ctx| app.ui_frame(ctx))
+    }
+
+    /// 這一幀複製到剪貼簿的文字（egui 0.31 起放在 `platform_output.commands` 的 CopyText；沒有複製時是空字串）
+    fn copied_text(out: &egui::FullOutput) -> String {
+        out.platform_output
+            .commands
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     fn frame(app: &mut AlexCodeApp, ctx: &egui::Context, events: Vec<Event>) -> egui::FullOutput {
@@ -9549,10 +9562,10 @@ mod tests {
         assert_eq!(cursor(&app), (3, 25));
         frame(&mut app, &ctx, vec![key(Key::ArrowLeft, Modifiers::SHIFT), key(Key::ArrowLeft, Modifiers::SHIFT)]);
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, "re");
+        assert_eq!(copied_text(&out), "re");
         frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::NONE), key(Key::ArrowDown, Modifiers::SHIFT)]);
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, "line 00003 some text here\n");
+        assert_eq!(copied_text(&out), "line 00003 some text here\n");
 
         // Ctrl+End 到檔尾，畫面跟著捲過去
         frame(&mut app, &ctx, vec![key(Key::End, Modifiers::COMMAND)]);
@@ -9565,7 +9578,7 @@ mod tests {
         // 全選後複製得到整份文字
         frame(&mut app, &ctx, vec![key(Key::A, Modifiers::COMMAND)]);
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, app.tabs[0].edit_text());
+        assert_eq!(copied_text(&out), app.tabs[0].edit_text());
     }
 
     #[test]
@@ -9623,7 +9636,7 @@ mod tests {
         // 剪下
         frame(&mut app, &ctx, vec![key(Key::Home, Modifiers::SHIFT)]);
         let out = frame(&mut app, &ctx, vec![Event::Cut]);
-        assert_eq!(out.platform_output.copied_text, "中文");
+        assert_eq!(copied_text(&out), "中文");
         assert_eq!(line0(&app), "");
 
         // Ctrl+左右鍵一次移動一個字
@@ -10907,7 +10920,7 @@ mod tests {
 
         // Ctrl+C 複製區塊：每一行選到的部分以換行連接
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, "cde\n\nCDE");
+        assert_eq!(copied_text(&out), "cde\n\nCDE");
         assert_eq!(app.box_ranges().len(), 3, "copying keeps the selection");
 
         // 一般點擊（沒按 Alt）取消矩形選取
@@ -10921,7 +10934,7 @@ mod tests {
         drag(&mut app, at(0, 2), at(2, 5), Modifiers::NONE);
         assert!(app.box_ranges().is_empty());
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, "cdefgh\nab\nABCDE");
+        assert_eq!(copied_text(&out), "cdefgh\nab\nABCDE");
 
         // 方向鍵取消矩形選取，照一般按鍵移動游標（打字改成每一行同時輸入，另一個測試）
         drag(&mut app, at(0, 2), at(2, 5), alt);
@@ -11072,7 +11085,7 @@ mod tests {
         assert_eq!(app.box_ranges(), vec![(0, 1, 3), (1, 1, 2)]);
         assert_eq!(cursor(&app), (1, 2));
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, "bc\nb");
+        assert_eq!(copied_text(&out), "bc\nb");
         // 從短的行的行尾往右拉：超過行尾以字寬延伸，往上一行時那一行選到更多欄
         click(&mut app, &ctx, at(1, 2));
         frame(&mut app, &ctx, vec![]);
@@ -11092,7 +11105,7 @@ mod tests {
         // Ctrl+X：複製區塊並刪掉選到的部分，一次復原
         drag(&mut app, at(0, 2), at(2, 5));
         let out = frame(&mut app, &ctx, vec![Event::Cut]);
-        assert_eq!(out.platform_output.copied_text, "cde\n\nCDE");
+        assert_eq!(copied_text(&out), "cde\n\nCDE");
         frame(&mut app, &ctx, vec![]);
         assert_eq!(lines(&app), "abfgh\nab\nABFGH\nzzzz\n");
         assert_eq!(app.box_ranges(), vec![(0, 2, 2), (1, 2, 2), (2, 2, 2)]);
@@ -11465,7 +11478,7 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.active_tab_idx, 0, "pressing in the other pane switches to it");
         let out = frame(&mut app, &ctx, vec![Event::Copy]);
-        assert_eq!(out.platform_output.copied_text, "pha two\nalpha three\nalp");
+        assert_eq!(copied_text(&out), "pha two\nalpha three\nalp");
         assert_eq!(cursor(&app), (3, 3), "the cursor is where the drag ended");
         // 之後在同一欄照常點擊（一般編輯區；點在別的位置，免得被當成連點）：選取取消，打的字插在點的位置
         let elsewhere = at("alpha three", 4);
@@ -11474,6 +11487,28 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::Text("Q".into())]);
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.tabs[0].edit_text(), "alpha one\nalpha two\nalphQa three\nalpha four\n");
+    }
+
+    #[test]
+    fn markdown_reading_mode_centres_the_text_column() {
+        // 視窗很寬時版心（最寬 820 px）置中，左右各留下超過 127 px 的空白（egui 0.31 起 Margin 只到 127）
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        let mut md = EditorBuffer::from_text("# Big Title\n\nplain paragraph words\n");
+        md.file_path = Some("notes.md".into());
+        app.tabs = vec![md];
+        app.active_tab_idx = 0;
+        app.md_view.mode = MdViewMode::Typora;
+        // 2000 px 寬的視窗：文件區扣掉大綱側邊欄後仍遠比 820 px 寬，置中的留白一定超過 127 px
+        let wide = |input: &mut RawInput| input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(2000.0, 800.0)));
+        frame_with(&mut app, &ctx, wide);
+        let out = frame_with(&mut app, &ctx, wide);
+        let para = painted_lines(&out).into_iter().find(|l| l.0 == "plain paragraph words").expect("the paragraph is drawn").1;
+        let title = painted_lines(&out).into_iter().find(|l| l.0 == "Big Title").expect("the title is drawn").1;
+        assert!((para.left() - title.left()).abs() < 1.0, "title and paragraph share the left edge: {title:?} {para:?}");
+        // 文件區從 x = 220 開始、寬 1780：置中時左右各留 480 px，版心從 700 開始
+        // （留白若被限制在 127 px，會從 347 開始）
+        assert!((para.left() - 700.0).abs() < 2.0, "the 820 px column is centred: {para:?}");
     }
 
     #[test]
@@ -11621,7 +11656,7 @@ mod tests {
             fn walk(shape: &Shape, col: Color32, found: &mut Vec<(f32, f32, f32)>) {
                 match shape {
                     Shape::Vec(v) => v.iter().for_each(|s| walk(s, col, found)),
-                    Shape::LineSegment { points, stroke } if stroke.color == egui::epaint::ColorMode::Solid(col) && (stroke.width - 1.0).abs() < 0.01 => {
+                    Shape::LineSegment { points, stroke } if stroke.color == col && (stroke.width - 1.0).abs() < 0.01 => {
                         found.push((points[0].x.min(points[1].x), points[0].x.max(points[1].x), points[0].y))
                     }
                     _ => {}
@@ -11821,10 +11856,10 @@ mod tests {
         // Shift+End / Shift+方向鍵擴充選取；Ctrl+C 複製選到的文字
         let shift = |k| key(k, Modifiers::SHIFT);
         frame(&mut app, &ctx, vec![shift(Key::End)]);
-        assert_eq!(frame(&mut app, &ctx, vec![Event::Copy]).platform_output.copied_text, "alpha one");
+        assert_eq!(copied_text(&frame(&mut app, &ctx, vec![Event::Copy])), "alpha one");
         frame(&mut app, &ctx, vec![shift(Key::ArrowDown)]);
         assert_eq!(app.tabs[0].selections[0].anchor, Position { line: 0, col: 0 }, "the anchor stays put");
-        assert_eq!(frame(&mut app, &ctx, vec![Event::Copy]).platform_output.copied_text, "alpha one\nalpha two");
+        assert_eq!(copied_text(&frame(&mut app, &ctx, vec![Event::Copy])), "alpha one\nalpha two");
         // 選取的範圍畫出底色
         let out = frame(&mut app, &ctx, vec![]);
         let pal = app.theme_mgr.current_palette().clone();
@@ -11841,7 +11876,7 @@ mod tests {
         assert!(sel.iter().any(|r| r.center().y > one.top() && r.center().y < one.bottom()), "selection is shaded: {sel:?}");
         // 剪下、貼上
         let out = frame(&mut app, &ctx, vec![Event::Cut]);
-        assert_eq!(out.platform_output.copied_text, "alpha one\nalpha two");
+        assert_eq!(copied_text(&out), "alpha one\nalpha two");
         assert_eq!(app.tabs[0].lines, ["", ""]);
         frame(&mut app, &ctx, vec![Event::Paste("hello".into())]);
         assert_eq!(app.tabs[0].lines[0], "hello");
@@ -11856,7 +11891,7 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(p0.x + 20.0, p0.y))]);
         frame(&mut app, &ctx, vec![Event::PointerMoved(p1)]);
         frame(&mut app, &ctx, vec![button(p1, false)]);
-        assert_eq!(frame(&mut app, &ctx, vec![Event::Copy]).platform_output.copied_text, "hello", "dragging selects");
+        assert_eq!(copied_text(&frame(&mut app, &ctx, vec![Event::Copy])), "hello", "dragging selects");
         // 同一個分頁也在主視窗時，主視窗編輯區的游標跟著獨立視窗走
         app.active_tab_idx = 0;
         frame(&mut app, &ctx, vec![]);
@@ -12558,7 +12593,7 @@ mod tests {
             let x = x_of(n) + (x_of(n + 1) - x_of(n)).max(1.0) * col.fract();
             Pos2::new(area.left() + x, area.top() + row_h * 0.5)
         };
-        let copy = |app: &mut AlexCodeApp| frame(app, &ctx, vec![Event::Copy]).platform_output.copied_text;
+        let copy = |app: &mut AlexCodeApp| copied_text(&frame(app, &ctx, vec![Event::Copy]));
 
         // 雙擊選取一個字（英數字與底線算同一個字）
         multi_click(&mut app, &ctx, at(6.5), 2);

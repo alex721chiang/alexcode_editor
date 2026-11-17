@@ -166,7 +166,7 @@ pub fn tool_button(
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let (fg_c, acc_c) = if resp.hovered() {
-            painter.rect(rect, 4.0, faint, Stroke::new(1.0_f32, glow));
+            painter.rect(rect, 4.0, faint, Stroke::new(1.0_f32, glow), egui::StrokeKind::Middle);
             (accent, accent)
         } else {
             (fg, accent)

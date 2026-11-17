@@ -1,7 +1,7 @@
 //! 霓虹主題樣式（對應原版 C++ `Theme::stylesheet()` 的 QSS）與字型設定
 
 use crate::theme::Palette;
-use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, Mesh, Pos2, Rect, Rounding, Shape, Stroke};
+use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, Mesh, Pos2, Rect, CornerRadius, Shape, Stroke};
 
 /// 內嵌原版 Orbitron 科技字型（OFL 授權，用於 Logo / 面板標題）
 const ORBITRON_TTF: &[u8] = include_bytes!("../../assets/fonts/Orbitron.ttf");
@@ -94,7 +94,7 @@ pub fn setup_fonts(ctx: &egui::Context) {
 
     fonts
         .font_data
-        .insert(ORBITRON.to_owned(), FontData::from_static(ORBITRON_TTF));
+        .insert(ORBITRON.to_owned(), std::sync::Arc::new(FontData::from_static(ORBITRON_TTF)));
     fonts.families.insert(
         FontFamily::Name(ORBITRON.into()),
         vec![ORBITRON.to_owned(), "Ubuntu-Light".to_owned()],
@@ -106,7 +106,7 @@ pub fn setup_fonts(ctx: &egui::Context) {
         "/System/Library/Fonts/SFNS.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]) {
-        fonts.font_data.insert("ui".to_owned(), FontData::from_owned(bytes));
+        fonts.font_data.insert("ui".to_owned(), std::sync::Arc::new(FontData::from_owned(bytes)));
         fonts
             .families
             .entry(FontFamily::Proportional)
@@ -121,7 +121,7 @@ pub fn setup_fonts(ctx: &egui::Context) {
         "/System/Library/Fonts/Menlo.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     ]) {
-        fonts.font_data.insert("code".to_owned(), FontData::from_owned(bytes));
+        fonts.font_data.insert("code".to_owned(), std::sync::Arc::new(FontData::from_owned(bytes)));
         fonts
             .families
             .entry(FontFamily::Monospace)
@@ -140,7 +140,7 @@ pub fn setup_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ]) {
-        fonts.font_data.insert("cjk".to_owned(), FontData::from_owned(bytes));
+        fonts.font_data.insert("cjk".to_owned(), std::sync::Arc::new(FontData::from_owned(bytes)));
         for fam in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name(ORBITRON.into())] {
             fonts.families.entry(fam).or_default().push("cjk".to_owned());
         }
@@ -158,8 +158,8 @@ pub fn apply_style(ctx: &egui::Context, c: &Colors) {
     v.panel_fill = c.bg;
     v.window_fill = c.panel;
     v.window_stroke = Stroke::new(1.0_f32, c.glow);
-    v.window_rounding = Rounding::same(8.0);
-    v.menu_rounding = Rounding::same(6.0);
+    v.window_corner_radius = CornerRadius::same(8);
+    v.menu_corner_radius = CornerRadius::same(6);
     v.extreme_bg_color = c.panel; // TextEdit 底色
     v.faint_bg_color = c.current_line;
     v.code_bg_color = c.panel;
@@ -170,55 +170,55 @@ pub fn apply_style(ctx: &egui::Context, c: &Colors) {
     v.selection.stroke = Stroke::new(1.0_f32, c.fg);
     v.text_cursor.stroke = Stroke::new(2.0_f32, c.accent);
     v.window_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 6.0),
-        blur: 18.0,
-        spread: 0.0,
+        offset: [0, 6],
+        blur: 18,
+        spread: 0,
         color: with_alpha(if c.light { Color32::BLACK } else { c.accent }, if c.light { 40 } else { 28 }),
     };
     v.popup_shadow = egui::epaint::Shadow {
-        offset: egui::vec2(0.0, 4.0),
-        blur: 12.0,
-        spread: 0.0,
+        offset: [0, 4],
+        blur: 12,
+        spread: 0,
         color: with_alpha(Color32::BLACK, 90),
     };
 
-    let r = Rounding::same(5.0);
+    let r = CornerRadius::same(5);
     // 不可互動（label、分隔線）
     v.widgets.noninteractive.bg_fill = c.panel;
     v.widgets.noninteractive.weak_bg_fill = c.panel;
     v.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, c.border);
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, c.fg);
-    v.widgets.noninteractive.rounding = r;
+    v.widgets.noninteractive.corner_radius = r;
     // 一般（按鈕 / 輸入框）
     v.widgets.inactive.bg_fill = c.panel;
     v.widgets.inactive.weak_bg_fill = c.hover;
     v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, c.border);
     v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, c.fg_dim);
-    v.widgets.inactive.rounding = r;
+    v.widgets.inactive.corner_radius = r;
     // hover：強調色光暈
     v.widgets.hovered.bg_fill = c.hover;
     v.widgets.hovered.weak_bg_fill = c.accent_faint;
     v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, c.glow);
     v.widgets.hovered.fg_stroke = Stroke::new(1.5_f32, c.accent);
-    v.widgets.hovered.rounding = r;
+    v.widgets.hovered.corner_radius = r;
     v.widgets.hovered.expansion = 0.0;
     // 按下
     v.widgets.active.bg_fill = c.pressed;
     v.widgets.active.weak_bg_fill = c.pressed;
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, c.accent);
     v.widgets.active.fg_stroke = Stroke::new(1.5_f32, c.accent);
-    v.widgets.active.rounding = r;
+    v.widgets.active.corner_radius = r;
     // 開啟中的選單 / 下拉
     v.widgets.open.bg_fill = c.hover;
     v.widgets.open.weak_bg_fill = c.accent_faint;
     v.widgets.open.bg_stroke = Stroke::new(1.0_f32, c.accent);
     v.widgets.open.fg_stroke = Stroke::new(1.0_f32, c.accent);
-    v.widgets.open.rounding = r;
+    v.widgets.open.corner_radius = r;
 
     style.visuals = v;
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(10.0, 4.0);
-    style.spacing.menu_margin = egui::Margin::same(6.0);
+    style.spacing.menu_margin = egui::Margin::same(6);
     style.spacing.interact_size.y = 22.0;
     style.spacing.scroll = egui::style::ScrollStyle::thin();
     style
