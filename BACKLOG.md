@@ -7,7 +7,8 @@
 
 ## 待辦（依優先順序）
 
-- [ ] 升級 egui / eframe 4/7：0.31 → 0.33
+- [ ] 升級 egui / eframe 4a/7（原本的 4/7「0.31 → 0.33」拆成 4a、4b）：0.31 → 0.32。這一版改寫了文字游標：2026-11-17 試著升級時有 78 個編譯錯誤，幾乎都在 `src/ui/app.rs` 依賴舊游標的地方——`Cursor` 的 `rcursor`（列, 欄）/ `pcursor`（段落, 位移）/ `ccursor` 都沒了，`cursor_from_pos` 與 `TextEdit` 的 `cursor_range` 改成只有 `CCursor`，`Galley::from_ccursor` 拿掉了（`pos_from_cursor` 直接吃 `CCursor`）；`PlacedRow::rect` 改成方法 `rect()`；`TextEdit::layouter` 的閉包參數型別變了；另有 `SelectableLabel`、`menu::bar`、`close_menu`、`show_tooltip_at_pointer`、`ScrollArea::drag_to_scroll` 被標成過時。要自己從 `CCursor`（字元索引）與 `galley.rows` 算出「第幾列 / 第幾欄」與「第幾段（行）」——編輯區的點擊、拖曳、矩形選取、自動換行時的上下鍵、行號區與大檔案檢視都用到，改完要跑完整的 `cargo test`（這些都有測試）
+- [ ] 升級 egui / eframe 4b/7：0.32 → 0.33（2026-11-17 試過：0.33 的錯誤與 0.32 相同，另外 `Fonts::texture_atlas` 不見了，`ui.fonts` 拿到的是 `FontsView`）
 - [ ] 升級 egui / eframe 5/7：0.33 → 0.35
 - [ ] 升級 egui / eframe 6/7：0.35 → 0.37（寫這一項時 crates.io 上最新的穩定版）
 - [ ] 升級 egui / eframe 7/7：升級後在真的視窗裡實測中文輸入法（注音 / 拼音組字、候選字視窗的位置、選字後插入；一般編輯區、大檔案檢視、終端機、獨立視窗）
