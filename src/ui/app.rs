@@ -246,6 +246,10 @@ pub struct AlexCodeApp {
     box_keys: Vec<Key>,
     /// 分割檢視：另一欄顯示的分頁與哪一欄有焦點（有焦點的那一欄顯示目前分頁）
     split: Option<SplitView>,
+    /// 每個分頁上一次在一般編輯區的捲動位置（分割檢視換欄時讓另一欄接著用）
+    editor_offsets: HashMap<u64, Vec2>,
+    /// 下一次畫這個分頁的一般編輯區時要用的捲動位置
+    pending_offset: Option<(u64, Vec2)>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -886,7 +890,13 @@ struct SplitView {
     rows: Vec<(usize, Pos2, Arc<egui::Galley>)>,
     /// 另一欄的 Git 行狀態：鍵為（分頁 id, 內容版本, HEAD 內容的位址），變了才重算
     git: ((u64, u64, usize), HashMap<usize, u8>),
+    /// 另一欄上一幀的捲動位置，與換欄後下一幀要用的捲動位置
+    offset: Vec2,
+    pending: Option<Vec2>,
 }
+
+/// 一般編輯區的文字在捲動區裡比另一欄多一段上邊界（TextEdit 的 margin）：換欄時捲動位置要差這麼多，同一行才會在同一個高度
+const SPLIT_TEXT_MARGIN_Y: f32 = 4.0;
 
 /// 矩形選取裡的一次編輯（每一行同時套用）
 enum BoxEdit {
@@ -1153,6 +1163,8 @@ impl AlexCodeApp {
             box_cols: Vec::new(),
             box_keys: Vec::new(),
             split: None,
+            editor_offsets: HashMap::new(),
+            pending_offset: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -2131,6 +2143,8 @@ impl AlexCodeApp {
                             right_active: true,
                             rows: Vec::new(),
                             git: ((0, 0, 0), HashMap::new()),
+                            offset: Vec2::ZERO,
+                            pending: None,
                         }),
                 };
                 self.focus_editor = true;
@@ -4398,7 +4412,12 @@ impl AlexCodeApp {
                         .map(|(line, _, g)| (*line, g.cursor_from_pos(egui::vec2(f32::INFINITY, 0.0)).ccursor.index)),
                 }
             });
+            // 換欄：兩邊的捲動位置互換，所以畫面上的內容不動（編輯區的文字多一段上邊界）
+            let other_id = self.tabs[other].id;
             if let (Some(s), Some(cur)) = (self.split.as_mut(), self.tabs.get(self.active_tab_idx).map(|b| b.id)) {
+                let was = self.editor_offsets.get(&cur).copied().unwrap_or_default();
+                self.pending_offset = Some((other_id, s.offset + egui::vec2(0.0, SPLIT_TEXT_MARGIN_Y)));
+                s.pending = Some(egui::vec2(was.x, (was.y - SPLIT_TEXT_MARGIN_Y).max(0.0)));
                 s.other = cur;
                 s.right_active = !s.right_active;
             }
@@ -4410,7 +4429,6 @@ impl AlexCodeApp {
                 buf.selections = vec![Selection::point(Position { line, col })];
                 let i = buf.lines.iter().take(line).map(|s| s.chars().count() + 1).sum::<usize>() + col;
                 self.pending_select = Some((i, i));
-                self.scroll_to_cursor = true;
             }
             other = self.tabs.iter().position(|b| Some(b.id) == self.split.as_ref().map(|s| s.other)).unwrap_or(other);
             self.focus_editor = true;
@@ -4429,9 +4447,11 @@ impl AlexCodeApp {
                 s.git = (key, head.map(|h| diff_line_states(h, &b.lines, 800)).unwrap_or_default());
             }
         }
-        let rows = self.split_preview(&mut pane, other, c, pal);
+        let pending = self.split.as_mut().and_then(|s| s.pending.take());
+        let (rows, offset) = self.split_preview(&mut pane, other, c, pal, pending);
         if let Some(s) = self.split.as_mut() {
             s.rows = rows;
+            s.offset = offset;
         }
         let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active");
         active.set_clip_rect(active_rect.intersect(clip));
@@ -4446,12 +4466,17 @@ impl AlexCodeApp {
         idx: usize,
         c: &Colors,
         pal: &crate::theme::Palette,
-    ) -> Vec<(usize, Pos2, Arc<egui::Galley>)> {
+        offset: Option<Vec2>,
+    ) -> (Vec<(usize, Pos2, Arc<egui::Galley>)>, Vec2) {
         let mut drawn = Vec::new();
-        let Some(buf) = self.tabs.get(idx) else { return drawn };
+        let Some(buf) = self.tabs.get(idx) else { return (drawn, Vec2::ZERO) };
         let lang = self.tab_lang(idx);
         let font = FontId::monospace(self.config.font_size);
-        let row_h = ui.fonts(|f| f.row_height(&font));
+        // 行高取編輯區排版實際的行距（排版會把每一列對齊到像素，和 row_height 差一點點，幾百行後就差很多）
+        let row_h = ui.fonts(|f| {
+            let g = f.layout_no_wrap("0\n0".into(), font.clone(), Color32::WHITE);
+            g.rows.get(1).map_or_else(|| f.row_height(&font), |r| r.rect.top())
+        });
         let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
         let digits = buf.lines.len().to_string().len().max(3);
         let gutter_w = digits as f32 * char_w + 30.0;
@@ -4468,10 +4493,17 @@ impl AlexCodeApp {
             let s = diag_sev.entry(d.start_line.max(0) as usize).or_insert(d.severity);
             *s = (*s).min(d.severity);
         }
-        egui::ScrollArea::both()
+        // 不接拖曳捲動：點擊與拖曳要交給上面那個切換欄位的區域（可以捲動時捲動區會蓋掉它）
+        let mut area = egui::ScrollArea::both()
             .id_source(("split-preview", buf.id))
-            .auto_shrink([false, false])
-            .show_rows(ui, row_h, buf.lines.len(), |ui, range| {
+            .drag_to_scroll(false)
+            .auto_shrink([false, false]);
+        if let Some(o) = offset {
+            area = area.scroll_offset(o);
+        }
+        // show_rows 以「行高 + 外層的列距」換算捲動位置：列距要先設成 0，第 n 行才會在 n × 行高的位置（與編輯區相同）
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        let out = area.show_rows(ui, row_h, buf.lines.len(), |ui, range| {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 for ln in range {
                     let line = &buf.lines[ln];
@@ -4531,7 +4563,7 @@ impl AlexCodeApp {
                     ui.painter().galley(at, g, c.fg);
                 }
             });
-        drawn
+        (drawn, out.state.offset)
     }
 
     /// 上一幀算出的矩形選取：每一行的（行, 起欄, 迄欄）
@@ -4865,11 +4897,18 @@ impl AlexCodeApp {
         let mut row_lines = std::mem::take(&mut self.row_lines);
         row_lines.clear();
         // 自動換行時不需要水平捲動；兩種模式各自記住捲動位置
-        let scroll_area = if wrap {
+        let mut scroll_area = if wrap {
             egui::ScrollArea::vertical().id_source(("editor-scroll-wrap", idx))
         } else {
             egui::ScrollArea::both().id_source(("editor-scroll", idx))
         };
+        // 分割檢視換欄：接著用另一欄的捲動位置（自動換行時排版不同，不接）
+        let tab_id = self.tabs[idx].id;
+        if self.pending_offset.is_some_and(|(id, _)| id == tab_id) {
+            if let Some((_, off)) = self.pending_offset.take().filter(|_| !wrap) {
+                scroll_area = scroll_area.scroll_offset(off);
+            }
+        }
         let scroll = scroll_area
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -5252,6 +5291,12 @@ impl AlexCodeApp {
                     }
                 });
             });
+
+        self.editor_offsets.insert(tab_id, scroll.state.offset);
+        let alive: Vec<u64> = self.tabs.iter().map(|b| b.id).collect();
+        if self.editor_offsets.len() > alive.len() {
+            self.editor_offsets.retain(|id, _| alive.contains(id));
+        }
 
         // Sticky Scroll：把游標上方已捲出畫面的函式 / 類別標題固定在編輯區頂端
         self.sticky_rows.clear();
@@ -10746,6 +10791,60 @@ mod tests {
         assert!((r.left() - x3).abs() < 1.0 && (r.right() - x7).abs() < 1.0, "{r:?} vs {x3}..{x7}");
         assert!(r.top() > text.top() + text.height() * 0.6 && r.bottom() <= text.bottom() + 1.0, "under the line: {r:?} {text:?}");
         assert_eq!(paths.iter().filter(|p| p.0 == DIAG_WARNING).count(), 1);
+    }
+
+    #[test]
+    fn split_view_switching_panes_keeps_the_scroll_position() {
+        let ctx = ctx();
+        let text: String = (0..300).map(|i| format!("line {i:03}\n")).collect();
+        let mut app = app_with(&ctx, &text);
+        let mut b = EditorBuffer::from_text(&(0..300).map(|i| format!("other {i:03}\n")).collect::<String>());
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        frame(&mut app, &ctx, vec![]);
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let mid = 640.0;
+
+        // 捲動左欄（唯讀的第一份）
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(300.0, 400.0)), Event::Scroll(egui::vec2(0.0, -1500.0))]);
+        for _ in 0..40 {
+            frame(&mut app, &ctx, vec![]);
+        }
+        let out = frame(&mut app, &ctx, vec![]);
+        // 左欄畫面中間附近的一行
+        let (name, at) = painted_lines(&out)
+            .into_iter()
+            .filter(|l| l.0.starts_with("line ") && l.0.len() == 8 && l.1.right() < mid && l.1.top() > 300.0)
+            .min_by(|a, b| a.1.top().total_cmp(&b.1.top()))
+            .map(|l| (l.0, l.1))
+            .expect("a line in the middle of the left pane");
+        let ln: usize = name[5..].parse().unwrap();
+        assert!(ln > 20, "the left pane scrolled: {name}");
+
+        // 點那一行：換成編輯第一份，那一行留在畫面上同一個位置，游標在那一行
+        click(&mut app, &ctx, Pos2::new(at.left() + 20.0, at.center().y));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.active_tab_idx, 0);
+        assert_eq!(cursor(&app).0, ln);
+        let (g, r) = painted_galleys(&out)
+            .into_iter()
+            .zip(painted_lines(&out))
+            .find(|(g, _)| g.job.text.starts_with("line 000\n"))
+            .map(|(g, l)| (g, l.1))
+            .expect("the editor of the first tab");
+        assert!(r.left() < mid);
+        let y = r.top() + g.rows[ln].rect.top();
+        assert!((y - at.top()).abs() < 1.5, "line {ln} stays at {} (now {y})", at.top());
+        // 第二份移到右欄唯讀顯示，捲動位置也和它剛才在編輯區時相同（在最上面）
+        let first_right = painted_lines(&out)
+            .into_iter()
+            .filter(|l| l.0.starts_with("other ") && l.1.left() > mid)
+            .min_by(|a, b| a.1.top().total_cmp(&b.1.top()))
+            .map(|l| l.0)
+            .unwrap();
+        assert_eq!(first_right, "other 000");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
