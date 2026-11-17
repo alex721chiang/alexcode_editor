@@ -146,6 +146,7 @@ pub enum Cmd {
     FindInFiles,
     CommandPalette,
     DiffHead,
+    SplitEditor,
     ToggleTerminal,
     ToggleGraph,
     ToggleFilterBar,
@@ -243,6 +244,8 @@ pub struct AlexCodeApp {
     box_cols: Vec<(usize, usize, usize)>,
     /// Shift+Alt+方向鍵：要擴充（或從游標開始）矩形選取的方向，排版後在編輯區套用
     box_keys: Vec<Key>,
+    /// 分割檢視：另一欄顯示的分頁與哪一欄有焦點（有焦點的那一欄顯示目前分頁）
+    split: Option<SplitView>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -874,6 +877,13 @@ struct BoxSel {
     col: Option<(usize, usize)>,
 }
 
+/// 分割檢視（左右兩欄）：有焦點的那一欄是完整的編輯區、顯示目前分頁；另一欄唯讀顯示 `other` 分頁
+struct SplitView {
+    other: u64,
+    /// 有焦點的是右欄
+    right_active: bool,
+}
+
 /// 矩形選取裡的一次編輯（每一行同時套用）
 enum BoxEdit {
     Text(String),
@@ -1138,6 +1148,7 @@ impl AlexCodeApp {
             box_dragging: false,
             box_cols: Vec::new(),
             box_keys: Vec::new(),
+            split: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1963,6 +1974,7 @@ impl AlexCodeApp {
             ("檢視：終端機 (Terminal)".into(), Cmd::ToggleTerminal),
             ("檢視：Markdown 關聯圖 (Graph)".into(), Cmd::ToggleGraph),
             ("檢視：與 Git HEAD 比較 (Diff)".into(), Cmd::DiffHead),
+            ("檢視：分割編輯器 (Split Editor)".into(), Cmd::SplitEditor),
             ("檢視：Log 篩選工具列 (Filter Bar)".into(), Cmd::ToggleFilterBar),
             ("檢視：放大字型 (Zoom In)".into(), Cmd::ZoomIn),
             ("檢視：縮小字型 (Zoom Out)".into(), Cmd::ZoomOut),
@@ -2102,6 +2114,14 @@ impl AlexCodeApp {
                 self.diff_scroll_focus = true;
                 // HEAD 可能在開檔之後變了（在終端機提交）：重新讀取
                 self.request_git_head(self.active_tab_idx);
+            }
+            Cmd::SplitEditor => {
+                // 分割時新的右欄有焦點、先顯示同一份文件（左欄唯讀顯示它）；再按一次回到單欄
+                self.split = match self.split.take() {
+                    Some(_) => None,
+                    None => self.tabs.get(self.active_tab_idx).map(|b| SplitView { other: b.id, right_active: true }),
+                };
+                self.focus_editor = true;
             }
             Cmd::ToggleTerminal => self.show_terminal = !self.show_terminal,
             Cmd::ToggleGraph => {
@@ -2655,7 +2675,8 @@ impl AlexCodeApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         let cs = Modifiers::COMMAND | Modifiers::SHIFT;
         let ca = Modifiers::COMMAND | Modifiers::ALT;
-        let shortcuts: [(Modifiers, Key, Cmd); 24] = [
+        let shortcuts: [(Modifiers, Key, Cmd); 25] = [
+            (Modifiers::COMMAND, Key::Backslash, Cmd::SplitEditor),
             (Modifiers::NONE, Key::F12, Cmd::GotoDefinition),
             (Modifiers::COMMAND, Key::Comma, Cmd::Settings),
             (cs, Key::P, Cmd::CommandPalette),
@@ -2890,6 +2911,10 @@ impl AlexCodeApp {
                         }
                         if mi(ui, "與 Git HEAD 比較 (Diff)", "") {
                             cmd = Some(Cmd::DiffHead);
+                        }
+                        let split_label = if self.split.is_some() { "取消分割編輯器" } else { "分割編輯器 (Split Editor)" };
+                        if mi(ui, split_label, "Ctrl+\\") {
+                            cmd = Some(Cmd::SplitEditor);
                         }
                         let mut ex = self.show_explorer;
                         if ui.checkbox(&mut ex, "檔案總管側邊欄 (Explorer)  Ctrl+B").clicked() {
@@ -4244,6 +4269,12 @@ impl AlexCodeApp {
             .frame(egui::Frame::none().fill(c.bg))
             .show(ctx, |ui| {
                 let full_rect = ui.max_rect();
+                // 分割檢視：另一欄畫成唯讀，下面照常把目前分頁畫在有焦點的那一欄
+                let mut pane = self.split_panes(ui, c, &pal);
+                let ui: &mut egui::Ui = match pane.as_mut() {
+                    Some(p) => p,
+                    None => ui,
+                };
                 if filtering {
                     self.filtered_view(ui, c, &pal);
                 } else if is_md {
@@ -4325,6 +4356,76 @@ impl AlexCodeApp {
         if let MdAction::OpenLink { target, wiki } = md_action {
             self.open_md_link(ctx, &target, wiki);
         }
+    }
+
+    /// 分割檢視：把編輯區分成左右兩欄，在另一欄唯讀畫出另一個分頁，回傳有焦點那一欄的 Ui（沒有分割時 None）。
+    /// 點另一欄就換成編輯它：目前分頁改成那一個，原本的分頁改到另一欄唯讀顯示（兩欄的位置不變）。
+    /// 另一欄的分頁被關掉時結束分割
+    fn split_panes(&mut self, ui: &mut egui::Ui, c: &Colors, pal: &crate::theme::Palette) -> Option<egui::Ui> {
+        let other = self.split.as_ref().and_then(|s| self.tabs.iter().position(|b| b.id == s.other));
+        let Some(mut other) = other else {
+            self.split = None;
+            return None;
+        };
+        let full = ui.max_rect();
+        let mid = full.center().x.round();
+        let left = Rect::from_min_max(full.min, Pos2::new(mid - 1.0, full.max.y));
+        let right = Rect::from_min_max(Pos2::new(mid + 1.0, full.min.y), full.max);
+        let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
+        let other_rect = if right_active { left } else { right };
+        // 先看這一幀有沒有點另一欄（在畫之前，這樣換過去的那一幀就畫在對的位置）
+        if ui.interact(other_rect, ui.id().with("split-other-pane"), Sense::click()).clicked() {
+            if let (Some(s), Some(cur)) = (self.split.as_mut(), self.tabs.get(self.active_tab_idx).map(|b| b.id)) {
+                s.other = cur;
+                s.right_active = !s.right_active;
+            }
+            self.active_tab_idx = other;
+            other = self.tabs.iter().position(|b| Some(b.id) == self.split.as_ref().map(|s| s.other)).unwrap_or(other);
+            self.focus_editor = true;
+        }
+        let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
+        let (active_rect, other_rect) = if right_active { (right, left) } else { (left, right) };
+        ui.painter().rect_filled(Rect::from_min_max(Pos2::new(mid - 1.0, full.min.y), Pos2::new(mid + 1.0, full.max.y)), 0.0, c.border);
+        let clip = ui.clip_rect();
+        let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other");
+        pane.set_clip_rect(other_rect.intersect(clip));
+        self.split_preview(&mut pane, other, c, pal);
+        let mut active = ui.child_ui_with_id_source(active_rect, Layout::top_down(Align::Min), "split-active");
+        active.set_clip_rect(active_rect.intersect(clip));
+        Some(active)
+    }
+
+    /// 分割檢視裡沒有焦點的那一欄：唯讀顯示分頁 `idx`（行號、語法高亮，可捲動；每一行最多畫 4000 個字元）
+    fn split_preview(&self, ui: &mut egui::Ui, idx: usize, c: &Colors, pal: &crate::theme::Palette) {
+        let Some(buf) = self.tabs.get(idx) else { return };
+        let lang = self.tab_lang(idx);
+        let font = FontId::monospace(self.config.font_size);
+        let row_h = ui.fonts(|f| f.row_height(&font));
+        let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
+        let digits = buf.lines.len().to_string().len().max(3);
+        let gutter_w = digits as f32 * char_w + 30.0;
+        ui.painter().rect_filled(ui.max_rect(), 0.0, c.panel);
+        egui::ScrollArea::both()
+            .id_source(("split-preview", buf.id))
+            .auto_shrink([false, false])
+            .show_rows(ui, row_h, buf.lines.len(), |ui, range| {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                for ln in range {
+                    let line = &buf.lines[ln];
+                    let shown = line.char_indices().nth(4000).map_or(line.as_str(), |(i, _)| &line[..i]);
+                    let g = ui.fonts(|f| f.layout_job(highlight(shown, lang, pal, font.clone(), "")));
+                    let w = (gutter_w + 10.0 + g.size().x + 20.0).max(ui.available_width());
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, row_h), Sense::hover());
+                    ui.painter().text(
+                        Pos2::new(rect.left() + gutter_w - 10.0, rect.center().y),
+                        Align2::RIGHT_CENTER,
+                        format!("{}", ln + 1),
+                        FontId::monospace(self.config.font_size - 1.0),
+                        c.fg_dim2,
+                    );
+                    ui.painter().galley(Pos2::new(rect.left() + gutter_w + 10.0, rect.top()), g, c.fg);
+                }
+            });
     }
 
     /// 上一幀算出的矩形選取：每一行的（行, 起欄, 迄欄）
@@ -10290,6 +10391,70 @@ mod tests {
         assert!(app.box_ranges().is_empty());
         assert_eq!(app.tabs[0].lines[2], "ABCDEx");
         assert_eq!(app.tabs[0].lines[3], "yFGH");
+    }
+
+    #[test]
+    fn split_view_shows_two_documents_side_by_side() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        frame(&mut app, &ctx, vec![]);
+        let mid = 640.0;
+        let find = |out: &egui::FullOutput, start: &str| painted_lines(out).into_iter().find(|l| l.0.starts_with(start)).map(|l| l.1);
+
+        // Ctrl+\ 分割：右欄是編輯區（同一份文件），左欄唯讀顯示同一份
+        frame(&mut app, &ctx, vec![key(Key::Backslash, Modifiers::COMMAND)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let shown: Vec<Rect> = painted_lines(&out).into_iter().filter(|l| l.0.starts_with("alpha one")).map(|l| l.1).collect();
+        assert_eq!(shown.len(), 2, "the same document in both panes: {shown:?}");
+        assert!(shown.iter().any(|r| r.right() < mid) && shown.iter().any(|r| r.left() > mid));
+
+        // 分頁列選另一個分頁：顯示在有焦點的右欄，左欄留著原本的文件
+        app.active_tab_idx = 1;
+        app.focus_editor = true;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let alpha = find(&out, "alpha one").expect("the left pane still shows the first tab");
+        let beta = find(&out, "beta one").expect("the right pane shows the selected tab");
+        assert!(alpha.right() < mid && beta.left() > mid, "{alpha:?} {beta:?}");
+        // 打字進右欄的文件
+        frame(&mut app, &ctx, vec![Event::Text("X".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[1].edit_text(), "beta one\nbeta two\nX", "typed at the cursor of the right pane");
+        assert_eq!(app.tabs[0].edit_text(), "alpha one\nalpha two\n");
+
+        // 點左欄：切換成編輯左欄的文件，右欄改成唯讀顯示剛才的文件
+        let at = find(&out, "alpha two").unwrap();
+        click(&mut app, &ctx, Pos2::new(at.left() + 20.0, at.center().y));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.active_tab_idx, 0);
+        let alpha = find(&out, "alpha one").unwrap();
+        let beta = find(&out, "beta one").expect("the right pane keeps the other document");
+        assert!(alpha.right() < mid && beta.left() > mid, "the panes stay where they were: {alpha:?} {beta:?}");
+        frame(&mut app, &ctx, vec![Event::Text("Y".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.tabs[0].lines.iter().any(|l| l.contains('Y')), "{:?}", app.tabs[0].lines);
+        assert_eq!(app.tabs[1].edit_text(), "beta one\nbeta two\nX");
+
+        // 關掉另一欄的分頁：分割結束
+        let other = app.tabs[1].id;
+        app.tabs[1].mark_saved();
+        app.finish_close(&[other], false);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(app.split.is_none());
+        assert!(find(&out, "beta one").is_none());
+
+        // 再分割一次後 Ctrl+\ 關閉：只剩一個編輯區
+        frame(&mut app, &ctx, vec![key(Key::Backslash, Modifiers::COMMAND)]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.split.is_some());
+        frame(&mut app, &ctx, vec![key(Key::Backslash, Modifiers::COMMAND)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(app.split.is_none());
+        let n = painted_lines(&out).into_iter().filter(|l| l.0.contains("alpha two")).count();
+        assert_eq!(n, 1);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
