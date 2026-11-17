@@ -250,6 +250,8 @@ pub struct AlexCodeApp {
     editor_offsets: HashMap<u64, Vec2>,
     /// 下一次畫這個分頁的一般編輯區時要用的捲動位置
     pending_offset: Option<(u64, Vec2)>,
+    /// 在分割檢視的另一欄按下滑鼠換過去之後、放開之前：選取的起點（字元位置），由編輯區跟著指標延伸選取
+    split_drag: Option<usize>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -1165,6 +1167,7 @@ impl AlexCodeApp {
             split: None,
             editor_offsets: HashMap::new(),
             pending_offset: None,
+            split_drag: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -4399,11 +4402,13 @@ impl AlexCodeApp {
         let right = Rect::from_min_max(Pos2::new(mid + 1.0, full.min.y), full.max);
         let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
         let other_rect = if right_active { left } else { right };
-        // 先看這一幀有沒有點另一欄（在畫之前，這樣換過去的那一幀就畫在對的位置）
+        // 先看這一幀有沒有在另一欄按下滑鼠（在畫之前，這樣換過去的那一幀就畫在對的位置）。
+        // 按下時就換：接著拖曳由編輯區延伸選取，放開時沒移動就只是把游標放在那裡
         let resp = ui.interact(other_rect, ui.id().with("split-other-pane"), Sense::click());
-        if resp.clicked() {
-            // 點的位置換成（行, 欄）：用上一幀畫出的那幾行；點在最後一行下面就放在文件結尾
-            let at = resp.interact_pointer_pos().and_then(|p| {
+        let press = ui.input(|i| i.pointer.press_origin().filter(|_| i.pointer.primary_pressed()));
+        if let Some(press) = press.filter(|p| resp.hovered() && other_rect.contains(*p)) {
+            // 按下的位置換成（行, 欄）：用上一幀畫出的那幾行；按在最後一行下面就放在那一行的行尾
+            let at = Some(press).and_then(|p| {
                 let rows = &self.split.as_ref()?.rows;
                 match rows.iter().find(|(_, o, g)| p.y < o.y + g.size().y.max(1.0)) {
                     Some((line, o, g)) => Some((*line, g.cursor_from_pos(p - *o).ccursor.index)),
@@ -4429,6 +4434,7 @@ impl AlexCodeApp {
                 buf.selections = vec![Selection::point(Position { line, col })];
                 let i = buf.lines.iter().take(line).map(|s| s.chars().count() + 1).sum::<usize>() + col;
                 self.pending_select = Some((i, i));
+                self.split_drag = Some(i);
             }
             other = self.tabs.iter().position(|b| Some(b.id) == self.split.as_ref().map(|s| s.other)).unwrap_or(other);
             self.focus_editor = true;
@@ -5011,6 +5017,22 @@ impl AlexCodeApp {
                             if !ui.input(|i| i.pointer.primary_down()) {
                                 self.box_dragging = false;
                             }
+                        }
+                    }
+                    // 在分割檢視的另一欄按下滑鼠換過來的：那一下按鍵不是按在 TextEdit 上，拖曳選取由這裡接手
+                    if let Some(anchor) = self.split_drag {
+                        if ui.input(|i| i.pointer.primary_down()) {
+                            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                                let cur = galley.cursor_from_pos(p - gpos);
+                                let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+                                st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(anchor), cur.ccursor)));
+                                st.store(ui.ctx(), editor_id);
+                                new_cursor = Some((cur.rcursor.row, cur.rcursor.column));
+                            }
+                        } else {
+                            // 放開的那一下 egui 算是點在別的元件上，TextEdit 會交出焦點：下一幀要回來
+                            self.split_drag = None;
+                            self.focus_editor = true;
                         }
                     }
                     // 每一行選取的欄：那一行落在兩個 x 之間的字元（短的行收在行尾）；底色畫在文字下面
@@ -10845,6 +10867,53 @@ mod tests {
             .map(|l| l.0)
             .unwrap();
         assert_eq!(first_right, "other 000");
+    }
+
+    #[test]
+    fn split_view_drag_in_the_other_pane_selects_text() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\nalpha three\nalpha four\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        frame(&mut app, &ctx, vec![]);
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let at = |text: &str, col: usize| {
+            let (g, r) = painted_galleys(&out)
+                .into_iter()
+                .zip(painted_lines(&out))
+                .find(|(g, l)| g.job.text == text && l.1.right() < 640.0)
+                .map(|(g, l)| (g, l.1))
+                .unwrap();
+            Pos2::new(r.left() + g.rows[0].x_offset(col) + 1.0, r.center().y)
+        };
+        let (from, to) = (at("alpha two", 2), at("alpha four", 3));
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        // 在左欄（唯讀的第一份）按下、拖到兩行以下再放開：一次就換過去並選起來
+        for events in [
+            vec![Event::PointerMoved(from)],
+            vec![button(from, true)],
+            vec![Event::PointerMoved(Pos2::new(from.x + 30.0, from.y + 10.0))],
+            vec![Event::PointerMoved(to)],
+            vec![button(to, false)],
+        ] {
+            frame(&mut app, &ctx, events);
+        }
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.active_tab_idx, 0, "pressing in the other pane switches to it");
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, "pha two\nalpha three\nalp");
+        assert_eq!(cursor(&app), (3, 3), "the cursor is where the drag ended");
+        // 之後在同一欄照常點擊（一般編輯區；點在別的位置，免得被當成連點）：選取取消，打的字插在點的位置
+        let elsewhere = at("alpha three", 4);
+        click(&mut app, &ctx, elsewhere);
+        assert_eq!(cursor(&app), (2, 4));
+        frame(&mut app, &ctx, vec![Event::Text("Q".into())]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].edit_text(), "alpha one\nalpha two\nalphQa three\nalpha four\n");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
