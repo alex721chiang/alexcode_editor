@@ -222,6 +222,12 @@ pub struct AlexCodeApp {
     /// 與已送出、在等回覆的請求（送出的時間：太久沒回就放棄）
     def_want: Option<(String, usize, usize)>,
     def_wait: Option<(RequestId, std::time::Instant)>,
+    /// 滑鼠停留說明（hover）：指標停在哪個字元上、從什麼時候開始；停夠久之後等著送出的請求、
+    /// 已送出在等回覆的請求，與收到的說明（空字串表示那裡沒有說明）
+    hover_at: Option<(HoverKey, std::time::Instant)>,
+    hover_want: Option<(String, usize, usize, HoverKey)>,
+    hover_wait: Option<(RequestId, HoverKey)>,
+    hover_text: Option<(HoverKey, String)>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -804,6 +810,25 @@ fn diag_spans(g: &egui::Galley, lines: &[String], row_lines: &[usize], d: &Diagn
     out
 }
 
+/// 滑鼠停留說明的位置：(分頁 id, 內容版本, 行, 字元欄)。內容一變就是另一個位置，舊的說明不再顯示
+type HoverKey = (u64, u64, usize, usize);
+
+/// 指標在同一個字元上停這麼久才問語言伺服器（移動中不送請求）
+const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// 語言伺服器的說明（通常是 Markdown）轉成要顯示的文字：拿掉程式碼區塊的 ``` 與分隔線
+fn hover_display_text(result: &serde_json::Value) -> String {
+    let text = crate::lsp::extract_hover_text(result, 4000);
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.starts_with("```") && t != "---" && t != "***"
+        })
+        .collect();
+    lines.join("\n").trim().to_string()
+}
+
 /// 診斷的波浪底線：從 `x0` 到 `x1`、底端在 `y`
 fn squiggle(x0: f32, x1: f32, y: f32, color: Color32) -> Shape {
     let mut pts = Vec::new();
@@ -1019,6 +1044,10 @@ impl AlexCodeApp {
             lsp_sizes: HashMap::new(),
             def_want: None,
             def_wait: None,
+            hover_at: None,
+            hover_want: None,
+            hover_wait: None,
+            hover_text: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -2134,6 +2163,53 @@ impl AlexCodeApp {
                 None => ctx.request_repaint_after(std::time::Duration::from_secs(1)),
             }
         }
+
+        // 滑鼠停留說明：問不了（伺服器沒就緒等）就當作那裡沒有說明，不在狀態列說明
+        if let Some((path, line, ch, key)) = self.hover_want.take() {
+            let params = text_document_position_params(&path, line as i32, ch as i32);
+            match self.lsp.request(&path, "textDocument/hover", params) {
+                Ok(r) => self.hover_wait = Some((r, key)),
+                Err(_) => self.hover_text = Some((key, String::new())),
+            }
+        }
+        if let Some((r, key)) = self.hover_wait {
+            if let Some(reply) = self.lsp.take_reply(r) {
+                self.hover_wait = None;
+                self.hover_text = Some((key, reply.map(|v| hover_display_text(&v)).unwrap_or_default()));
+            }
+        }
+    }
+
+    /// 程式碼編輯區每一幀呼叫：指標停在 `at`（行, 字元欄；不在文字上是 None）。
+    /// 換了位置就丟掉舊的說明；在同一個位置停滿 `HOVER_DELAY` 才排一個請求（由 `lsp_tick` 送出）
+    fn track_hover(&mut self, ctx: &egui::Context, idx: usize, at: Option<(usize, usize)>) {
+        let buf = &self.tabs[idx];
+        let key = at.map(|(l, c)| (buf.id, buf.revision(), l, c));
+        if key != self.hover_at.map(|h| h.0) {
+            if let Some((r, _)) = self.hover_wait.take() {
+                self.lsp.forget(r);
+            }
+            self.hover_want = None;
+            self.hover_text = None;
+            self.hover_at = key.map(|k| (k, std::time::Instant::now()));
+            if key.is_some() {
+                ctx.request_repaint_after(HOVER_DELAY);
+            }
+            return;
+        }
+        let Some((key, since)) = self.hover_at else { return };
+        if self.hover_want.is_some() || self.hover_wait.is_some() || self.hover_text.is_some() {
+            return;
+        }
+        let Some(path) = buf.file_path.clone().filter(|p| ServerKind::for_path(p).is_some()) else { return };
+        let wait = HOVER_DELAY.saturating_sub(since.elapsed());
+        if !wait.is_zero() {
+            ctx.request_repaint_after(wait);
+            return;
+        }
+        let ch = buf.lines.get(key.2).map_or(0, |l| char_col_to_utf16(l, key.3));
+        self.hover_want = Some((path, key.2, ch, key));
+        ctx.request_repaint();
     }
 
     /// F12 / Ctrl+點擊：以目前分頁的游標位置問語言伺服器定義在哪裡（送出與處理回覆在 `lsp_tick`）
@@ -4100,6 +4176,8 @@ impl AlexCodeApp {
         let mut changed = false;
         // Ctrl+點擊：游標移到點的位置之後跳到定義
         let mut ctrl_click = false;
+        // 指標停在哪個字元上（行, 字元欄）
+        let mut hover_char: Option<(usize, usize)> = None;
         let scroll_to_cursor = std::mem::take(&mut self.scroll_to_cursor);
 
         // Sticky Scroll：上一幀固定標頭佔用的高度，以及游標原本的位置（用來判斷游標是否移動）
@@ -4301,9 +4379,23 @@ impl AlexCodeApp {
                     });
                     ui.painter().set(gutter_idx, Shape::Vec(shapes));
 
-                    // 診斷：畫面上的範圍畫波浪底線；滑鼠停在底線上或行號上時列出訊息
-                    if !diags.is_empty() {
-                        let hover = ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(clip));
+                    // 指標停在哪個字元上（滑鼠停留說明用）：要在文字範圍內，不算行尾右邊的空白
+                    let hover = ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(clip));
+                    hover_char = hover.filter(|p| p.x >= gutter_rect.right()).and_then(|p| {
+                        let rel = p - gpos;
+                        let cur = galley.cursor_from_pos(rel);
+                        let row = galley.rows.get(cur.rcursor.row)?;
+                        let inside = rel.y >= row.rect.top() && rel.y < row.rect.bottom() && rel.x <= row.rect.right();
+                        inside.then_some((cur.pcursor.paragraph, cur.pcursor.offset))
+                    });
+                    let hover_note = self
+                        .hover_text
+                        .as_ref()
+                        .filter(|(k, t)| !t.is_empty() && hover_char == Some((k.2, k.3)) && k.0 == self.tabs[idx].id)
+                        .map(|(_, t)| t.clone());
+
+                    // 診斷：畫面上的範圍畫波浪底線；滑鼠停在底線上或行號上時列出訊息（與滑鼠停留說明一起顯示）
+                    if !diags.is_empty() || hover_note.is_some() {
                         let mut tips: Vec<&Diagnostic> = Vec::new();
                         for d in diags.iter() {
                             for (top, bottom, l, r) in diag_spans(galley, &self.tabs[idx].lines, &row_lines, d, char_w) {
@@ -4326,7 +4418,7 @@ impl AlexCodeApp {
                                 tips = diags.iter().filter(|d| d.start_line.max(0) as usize == line).collect();
                             }
                         }
-                        if !tips.is_empty() {
+                        if !tips.is_empty() || hover_note.is_some() {
                             egui::show_tooltip_at_pointer(ui.ctx(), egui::Id::new("lsp-diagnostic-tip"), |ui| {
                                 ui.set_max_width(560.0);
                                 for d in &tips {
@@ -4334,6 +4426,14 @@ impl AlexCodeApp {
                                         ui.colored_label(diag_color(d.severity), diag_label(d.severity));
                                         let src = if d.source.is_empty() { String::new() } else { format!("（{}）", d.source) };
                                         ui.label(format!("{}{}", d.message, src));
+                                    });
+                                }
+                                if let Some(note) = &hover_note {
+                                    if !tips.is_empty() {
+                                        ui.separator();
+                                    }
+                                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                                        ui.label(RichText::new(note).monospace());
                                     });
                                 }
                             });
@@ -4466,6 +4566,7 @@ impl AlexCodeApp {
         if ctrl_click {
             self.goto_definition();
         }
+        self.track_hover(ui.ctx(), idx, hover_char);
     }
 
     /// Log 篩選結果檢視（僅顯示符合的行，保留原始行號）
@@ -9051,6 +9152,109 @@ mod tests {
         app.active_tab_idx = app.tabs.len() - 1;
         frame(&mut app, &ctx, vec![key(Key::F12, Modifiers::NONE)]);
         assert!(app.status_message.contains("沒有語言伺服器"), "{}", app.status_message);
+    }
+
+    #[test]
+    fn resting_the_pointer_on_code_shows_the_hover_text() {
+        use serde_json::{json, Value};
+        use std::io::{Read, Write};
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&ctx, "fn main() {\n    😀helper();\n}\n");
+        app.tabs[0].file_path = Some(dir.path().join("main.rs").to_string_lossy().into_owned());
+        // 假的伺服器：第 2 行有說明（Markdown，含程式碼區塊），其他位置回 null
+        let asked = Arc::new(Mutex::new(Vec::<(Instant, Value)>::new()));
+        let a = asked.clone();
+        let launcher: Launcher = Box::new(move |_, _| {
+            let (client_read, mut server_write) = std::io::pipe()?;
+            let (mut server_read, client_write) = std::io::pipe()?;
+            let a = a.clone();
+            std::thread::spawn(move || {
+                let mut frames = crate::lsp::Reader::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = server_read.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    frames.feed(&buf[..n]);
+                    for m in frames.take_messages() {
+                        let result = match m["method"].as_str() {
+                            Some("initialize") => json!({ "capabilities": {} }),
+                            Some("textDocument/hover") => {
+                                a.lock().unwrap().push((Instant::now(), m["params"].clone()));
+                                if m["params"]["position"]["line"] == 1 {
+                                    json!({ "contents": { "kind": "markdown", "value": "```rust\nfn helper() -> u32\n```\n---\nAdds things up." } })
+                                } else {
+                                    Value::Null
+                                }
+                            }
+                            _ => continue,
+                        };
+                        let _ = server_write.write_all(&crate::lsp::frame(&json!({ "jsonrpc": "2.0", "id": m["id"], "result": result })));
+                    }
+                }
+            });
+            Ok(crate::lsp::LspClient::from_io(client_read, client_write))
+        });
+        app.lsp = LspManager::new(dir.path().to_path_buf(), launcher);
+        let end = Instant::now() + Duration::from_secs(10);
+        while app.lsp.status(ServerKind::RustAnalyzer) != Some(&LspStatus::Ready) && Instant::now() < end {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn main()")).unwrap();
+        let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn main()")).unwrap().1;
+        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let shown = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t.contains(s));
+        // 停在 `helper` 上（第 2 行，表情符號後面第 3 個字元）
+        let at = Pos2::new(text.left() + g.rows[1].x_offset(8) + 1.0, text.top() + row_h * 1.5);
+        let moved = Instant::now();
+        let out = frame(&mut app, &ctx, vec![Event::PointerMoved(at)]);
+        assert!(!shown(&out, "Adds things up."));
+        let mut out = out;
+        while !shown(&out, "Adds things up.") && moved.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+            out = frame(&mut app, &ctx, vec![]);
+        }
+        assert!(shown(&out, "Adds things up."), "the hover text appears: {:?}", painted_texts(&out));
+        assert!(shown(&out, "fn helper() -> u32"));
+        assert!(!painted_texts(&out).iter().any(|t| t.contains("```")), "code fences are not shown");
+        let q = asked.lock().unwrap().clone();
+        assert_eq!(q.len(), 1, "asked once while the pointer rests");
+        assert!(q[0].0 - moved >= Duration::from_millis(300), "asked only after the pointer rested a moment");
+        // UTF-16：表情符號佔 2 個單位，第 8 個字元是第 9 個單位
+        assert_eq!(q[0].1["position"], json!({ "line": 1, "character": 9 }));
+        // 一直停著：不再重問，說明一直顯示
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            out = frame(&mut app, &ctx, vec![]);
+        }
+        assert!(shown(&out, "Adds things up."));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+
+        // 移到沒有說明的地方（第 1 行）：說明消失，問過之後也不顯示任何東西
+        let at0 = Pos2::new(text.left() + g.rows[0].x_offset(4) + 1.0, text.top() + row_h * 0.5);
+        let out = frame(&mut app, &ctx, vec![Event::PointerMoved(at0)]);
+        assert!(!shown(&out, "Adds things up."), "moving away hides it");
+        let t0 = Instant::now();
+        while asked.lock().unwrap().len() < 2 && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+            frame(&mut app, &ctx, vec![]);
+        }
+        assert_eq!(asked.lock().unwrap()[1].1["position"], json!({ "line": 0, "character": 4 }));
+        std::thread::sleep(Duration::from_millis(100));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!shown(&out, "Adds things up.") && !shown(&out, "fn helper"));
+        // 移出編輯區（到行號區之外的工具列附近）：不問
+        frame(&mut app, &ctx, vec![Event::PointerMoved(Pos2::new(640.0, 5.0))]);
+        std::thread::sleep(Duration::from_millis(700));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(asked.lock().unwrap().len(), 2);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）

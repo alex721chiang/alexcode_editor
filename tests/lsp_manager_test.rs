@@ -406,3 +406,31 @@ fn real_clangd_finds_definitions() {
     assert!(std::path::Path::new(&def.0) == c.as_path() || def.0.eq_ignore_ascii_case(&path), "{} vs {}", def.0, path);
     assert_eq!((def.1, def.2), (0, 11), "the function name on line 1");
 }
+
+#[test]
+#[ignore]
+fn real_clangd_describes_symbols_on_hover() {
+    // cargo test --test lsp_manager_test real_clangd -- --ignored --nocapture：裝了 clangd 才有意義
+    let dir = tempfile::tempdir().unwrap();
+    let c = dir.path().join("hover.c");
+    let text = "/// Doubles the value.\nstatic int twice(int x) { return x * 2; }\n\nint main(void) {\n    return twice(21);\n}\n";
+    std::fs::write(&c, text).unwrap();
+    let path = c.to_string_lossy().into_owned();
+    let mut m = LspManager::new(dir.path().to_path_buf(), Box::new(spawn_server));
+    let docs = vec![OpenDoc { path: path.clone(), revision: 1 }];
+    assert!(pump(&mut m, &docs, &[text], 60, |m| m.status(ServerKind::Clangd) == Some(&LspStatus::Ready)));
+    m.sync(&docs, |_| text.to_string());
+    let params = alexcode::lsp::text_document_position_params(&path, 4, 12);
+    let r = m.request(&path, "textDocument/hover", params).unwrap();
+    let t0 = Instant::now();
+    let mut reply = None;
+    while reply.is_none() && t0.elapsed() < Duration::from_secs(30) {
+        m.sync(&docs, |_| text.to_string());
+        reply = m.take_reply(r);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let v = reply.expect("a reply").expect("not an error");
+    let shown = alexcode::lsp::extract_hover_text(&v, 4000);
+    println!("after {:?}:\n{shown}", t0.elapsed());
+    assert!(shown.contains("twice"), "the hover names the function");
+}
