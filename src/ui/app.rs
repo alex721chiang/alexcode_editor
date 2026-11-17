@@ -252,6 +252,8 @@ pub struct AlexCodeApp {
     pending_offset: Option<(u64, Vec2)>,
     /// 在分割檢視的另一欄按下滑鼠換過去之後、放開之前：選取的起點（字元位置），由編輯區跟著指標延伸選取
     split_drag: Option<usize>,
+    /// 上一幀分割檢視中間分隔線的 x（沒有分割時 None）
+    split_mid: Option<f32>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -897,6 +899,8 @@ struct SplitView {
     pending: Option<Vec2>,
     /// 另一欄是 Markdown 時閱讀模式自己的狀態（圖片快取等；不與有焦點的那一欄共用）
     md: MarkdownViewState,
+    /// 左欄佔編輯區寬度的比例（拖曳分隔線改變）
+    ratio: f32,
 }
 
 /// 一般編輯區的文字在捲動區裡比另一欄多一段上邊界（TextEdit 的 margin）：換欄時捲動位置要差這麼多，同一行才會在同一個高度
@@ -1170,6 +1174,7 @@ impl AlexCodeApp {
             editor_offsets: HashMap::new(),
             pending_offset: None,
             split_drag: None,
+            split_mid: None,
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -2151,6 +2156,7 @@ impl AlexCodeApp {
                             offset: Vec2::ZERO,
                             pending: None,
                             md: MarkdownViewState::default(),
+                            ratio: 0.5,
                         }),
                 };
                 self.focus_editor = true;
@@ -4397,10 +4403,26 @@ impl AlexCodeApp {
         let other = self.split.as_ref().and_then(|s| self.tabs.iter().position(|b| b.id == s.other));
         let Some(mut other) = other else {
             self.split = None;
+            self.split_mid = None;
             return None;
         };
         let full = ui.max_rect();
-        let mid = full.center().x.round();
+        // 中間的分隔線可以左右拖曳改兩欄的寬度（存成比例，視窗改大小時照比例；兩欄都至少留 120 像素）
+        let ratio = self.split.as_ref().map_or(0.5, |s| s.ratio);
+        let old_mid = (full.left() + full.width() * ratio).round();
+        let grip = Rect::from_min_max(Pos2::new(old_mid - 4.0, full.top()), Pos2::new(old_mid + 4.0, full.bottom()));
+        let grip_resp = ui.interact(grip, ui.id().with("split-divider"), Sense::drag());
+        if grip_resp.hovered() || grip_resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if let (true, Some(p), Some(s)) = (grip_resp.dragged(), ui.input(|i| i.pointer.interact_pos()), self.split.as_mut()) {
+            let lo = (120.0 / full.width()).min(0.5);
+            s.ratio = ((p.x - full.left()) / full.width()).clamp(lo, 1.0 - lo);
+        }
+        let ratio = self.split.as_ref().map_or(0.5, |s| s.ratio);
+        let mid = (full.left() + full.width() * ratio).round();
+        self.split_mid = Some(mid);
+        let on_grip = |p: &Pos2| (p.x - old_mid).abs() <= 4.0 || grip_resp.dragged();
         let left = Rect::from_min_max(full.min, Pos2::new(mid - 1.0, full.max.y));
         let right = Rect::from_min_max(Pos2::new(mid + 1.0, full.min.y), full.max);
         let right_active = self.split.as_ref().is_none_or(|s| s.right_active);
@@ -4413,7 +4435,7 @@ impl AlexCodeApp {
         // 右邊與下面留給捲軸（拖捲軸不換欄）
         let bar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_outer_margin + ui.spacing().scroll.bar_inner_margin + 2.0;
         let hit = Rect::from_min_max(other_rect.min, other_rect.max - egui::vec2(bar, bar));
-        if let Some(press) = press.filter(|p| hit.contains(*p) && ui.ctx().layer_id_at(*p) == Some(layer)) {
+        if let Some(press) = press.filter(|p| hit.contains(*p) && !on_grip(p) && ui.ctx().layer_id_at(*p) == Some(layer)) {
             // 按下的位置換成（行, 欄）：用上一幀畫出的那幾行；按在最後一行下面就放在那一行的行尾
             let at = Some(press).and_then(|p| {
                 let rows = &self.split.as_ref()?.rows;
@@ -4594,6 +4616,12 @@ impl AlexCodeApp {
                 }
             });
         (drawn, out.state.offset)
+    }
+
+    /// 上一幀分割檢視中間分隔線的 x
+    #[cfg(test)]
+    fn split_divider_x(&self) -> Option<f32> {
+        self.split_mid.filter(|_| self.split.is_some())
     }
 
     /// 上一幀算出的矩形選取：每一行的（行, 起欄, 迄欄）
@@ -10972,6 +11000,52 @@ mod tests {
         let words = painted_lines(&out).into_iter().find(|l| l.0.contains("words") && l.1.right() < 640.0).expect("the paragraph").1;
         click(&mut app, &ctx, words.center());
         assert_eq!(app.active_tab_idx, 0);
+    }
+
+    #[test]
+    fn split_view_divider_can_be_dragged() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        frame(&mut app, &ctx, vec![]);
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let pane_left = |out: &egui::FullOutput, start: &str| {
+            painted_lines(out).into_iter().find(|l| l.0.starts_with(start)).map(|l| l.1.left()).unwrap()
+        };
+        let right0 = pane_left(&out, "beta one");
+        // 分隔線在兩欄之間：右欄文字左邊再往左一點（行號區與邊界）
+        let divider_x = app.split_divider_x().expect("the divider");
+        assert!(divider_x < right0 && right0 - divider_x < 80.0, "{divider_x} vs {right0}");
+        let y = 400.0;
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let (from, to) = (Pos2::new(divider_x, y), Pos2::new(400.0, y));
+        for events in [
+            vec![Event::PointerMoved(from)],
+            vec![button(from, true)],
+            vec![Event::PointerMoved(Pos2::new(500.0, y))],
+            vec![Event::PointerMoved(to)],
+            vec![button(to, false)],
+        ] {
+            frame(&mut app, &ctx, events);
+        }
+        let out = frame(&mut app, &ctx, vec![]);
+        let x = app.split_divider_x().unwrap();
+        assert!((x - 400.0).abs() < 2.0, "the divider follows the drag: {x}");
+        assert_eq!(app.active_tab_idx, 1, "dragging the divider does not switch panes");
+        assert!(pane_left(&out, "beta one") < right0 - 200.0, "the right pane got wider");
+        assert!(painted_lines(&out).into_iter().filter(|l| l.0 == "alpha one").all(|l| l.1.right() <= 401.0));
+        // 拖到很邊邊時兩欄都留一點寬度
+        let far = Pos2::new(5.0, y);
+        for events in [vec![Event::PointerMoved(Pos2::new(x, y))], vec![button(Pos2::new(x, y), true)], vec![Event::PointerMoved(far)], vec![button(far, false)]] {
+            frame(&mut app, &ctx, events);
+        }
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.split_divider_x().unwrap() > 100.0);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
