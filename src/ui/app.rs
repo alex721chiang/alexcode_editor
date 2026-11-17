@@ -884,6 +884,8 @@ struct SplitView {
     right_active: bool,
     /// 上一幀另一欄畫出的每一行：（行號, 文字左上角, 排版），點下去時換算成游標位置
     rows: Vec<(usize, Pos2, Arc<egui::Galley>)>,
+    /// 另一欄的 Git 行狀態：鍵為（分頁 id, 內容版本, HEAD 內容的位址），變了才重算
+    git: ((u64, u64, usize), HashMap<usize, u8>),
 }
 
 /// 矩形選取裡的一次編輯（每一行同時套用）
@@ -2124,7 +2126,12 @@ impl AlexCodeApp {
                     None => self
                         .tabs
                         .get(self.active_tab_idx)
-                        .map(|b| SplitView { other: b.id, right_active: true, rows: Vec::new() }),
+                        .map(|b| SplitView {
+                            other: b.id,
+                            right_active: true,
+                            rows: Vec::new(),
+                            git: ((0, 0, 0), HashMap::new()),
+                        }),
                 };
                 self.focus_editor = true;
             }
@@ -4414,6 +4421,14 @@ impl AlexCodeApp {
         let clip = ui.clip_rect();
         let mut pane = ui.child_ui_with_id_source(other_rect, Layout::top_down(Align::Min), "split-other");
         pane.set_clip_rect(other_rect.intersect(clip));
+        // 另一欄的 Git 標記：內容或 HEAD 變了才重算
+        if let (Some(s), Some(b)) = (self.split.as_mut(), self.tabs.get(other)) {
+            let head = self.git_head.get(&b.id).and_then(|h| h.as_ref());
+            let key = (b.id, b.revision(), head.map_or(0, |h| Arc::as_ptr(h) as usize));
+            if s.git.0 != key {
+                s.git = (key, head.map(|h| diff_line_states(h, &b.lines, 800)).unwrap_or_default());
+            }
+        }
         let rows = self.split_preview(&mut pane, other, c, pal);
         if let Some(s) = self.split.as_mut() {
             s.rows = rows;
@@ -4441,6 +4456,11 @@ impl AlexCodeApp {
         let digits = buf.lines.len().to_string().len().max(3);
         let gutter_w = digits as f32 * char_w + 30.0;
         ui.painter().rect_filled(ui.max_rect(), 0.0, c.panel);
+        // 尋找列開著時與編輯區用同樣的條件標示命中
+        let finder = (self.show_find_bar && !self.find_bar_text.is_empty()).then(|| Finder::new(&self.find_bar_text, &self.find_opts));
+        let head = buf.selections.first().map(|s| s.head);
+        let empty = HashMap::new();
+        let git = self.split.as_ref().map_or(&empty, |s| &s.git.1);
         egui::ScrollArea::both()
             .id_source(("split-preview", buf.id))
             .auto_shrink([false, false])
@@ -4449,7 +4469,8 @@ impl AlexCodeApp {
                 for ln in range {
                     let line = &buf.lines[ln];
                     let shown = line.char_indices().nth(4000).map_or(line.as_str(), |(i, _)| &line[..i]);
-                    let g = ui.fonts(|f| f.layout_job(highlight(shown, lang, pal, font.clone(), "")));
+                    let hits = finder.as_ref().map(|f| f.find_all(shown)).unwrap_or_default();
+                    let g = ui.fonts(|f| f.layout_job(highlight_ranges(shown, lang, pal, font.clone(), &hits)));
                     let w = (gutter_w + 10.0 + g.size().x + 20.0).max(ui.available_width());
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, row_h), Sense::hover());
                     ui.painter().text(
@@ -4459,7 +4480,32 @@ impl AlexCodeApp {
                         FontId::monospace(self.config.font_size - 1.0),
                         c.fg_dim2,
                     );
+                    // 書籤與 Git 標記（與編輯區的行號區相同）
+                    let y = rect.top();
+                    if buf.bookmarks.contains(&ln) {
+                        ui.painter().circle_filled(Pos2::new(rect.left() + 9.0, rect.center().y), 3.5, c.accent2);
+                    }
+                    if let Some(&st) = git.get(&ln) {
+                        let x = rect.left() + gutter_w - 4.0;
+                        if st & (ADDED | MODIFIED) != 0 {
+                            let col = if st & MODIFIED != 0 { c.warn } else { c.accent };
+                            ui.painter().rect_filled(Rect::from_min_size(Pos2::new(x, y), egui::vec2(3.0, row_h)), 0.0, col);
+                        }
+                        if st & DELETED_ABOVE != 0 {
+                            ui.painter().add(Shape::convex_polygon(
+                                vec![Pos2::new(x - 3.0, y - 3.0), Pos2::new(x + 3.0, y), Pos2::new(x - 3.0, y + 3.0)],
+                                c.accent2,
+                                Stroke::NONE,
+                            ));
+                        }
+                    }
                     let at = Pos2::new(rect.left() + gutter_w + 10.0, rect.top());
+                    // 那個分頁的游標位置：一條細線（沒有焦點，不閃爍）
+                    if let Some(h) = head.filter(|h| h.line == ln) {
+                        let ci = h.col.min(shown.chars().count());
+                        let r = g.pos_from_cursor(&g.from_ccursor(CCursor::new(ci)));
+                        ui.painter().rect_filled(Rect::from_min_size(at + egui::vec2(r.left(), 0.0), egui::vec2(1.5, row_h)), 0.0, c.fg_dim);
+                    }
                     drawn.push((ln, at, g.clone()));
                     ui.painter().galley(at, g, c.fg);
                 }
@@ -10535,6 +10581,63 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         assert_eq!(app.tabs[0].lines[1], "alpZha two");
         assert_eq!(app.tabs[1].edit_text(), "beta one\nbeta two\n");
+    }
+
+    #[test]
+    fn split_view_other_pane_shows_marks_hits_and_cursor() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\nalpha three\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        // 第一份：第 1 行與 HEAD 不同、第 2 行有書籤、游標在第 2 行第 3 個字之後；尋找列找 "two"
+        let id = app.tabs[0].id;
+        app.git_head.insert(id, Some(Arc::new(vec!["alpha ONE".into(), "alpha two".into(), "alpha three".into(), String::new()])));
+        app.tabs[0].toggle_bookmark(1);
+        app.show_find_bar = true;
+        app.find_bar_text = "two".into();
+        frame(&mut app, &ctx, vec![]);
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        // 第一份已經在另一欄（不再由編輯區改寫游標）
+        app.tabs[0].selections = vec![Selection::point(Position { line: 1, col: 3 })];
+        let out = frame(&mut app, &ctx, vec![]);
+        let mid = 640.0;
+        let pal = app.theme_mgr.current_palette().clone();
+        let c = Colors::from_palette(&pal, app.theme_mgr.is_neon_hud());
+        let shapes_of = |fill: Color32| {
+            fn walk(shape: &Shape, fill: Color32, found: &mut Vec<Rect>) {
+                match shape {
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, found)),
+                    Shape::Rect(r) if r.fill == fill => found.push(r.rect),
+                    Shape::Circle(ci) if ci.fill == fill => found.push(Rect::from_center_size(ci.center, egui::vec2(ci.radius * 2.0, ci.radius * 2.0))),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| walk(&s.shape, fill, &mut found));
+            found.into_iter().filter(|r| r.right() < mid).collect::<Vec<_>>()
+        };
+        let line = |text: &str| painted_lines(&out).into_iter().find(|l| l.0 == text).map(|l| l.1).unwrap();
+        let (one, two) = (line("alpha one"), line("alpha two"));
+        assert!(one.right() < mid && two.right() < mid);
+
+        // Git：第 1 行是「修改」的黃色條
+        let warn = shapes_of(c.warn);
+        assert!(warn.iter().any(|r| r.center().y > one.top() && r.center().y < one.bottom()), "modified bar on line 1: {warn:?}");
+        assert!(!warn.iter().any(|r| r.center().y > two.top() && r.center().y < two.bottom()));
+        // 書籤：第 2 行的行號區有一個點
+        let marks = shapes_of(c.accent2);
+        assert!(marks.iter().any(|r| r.center().y > two.top() && r.center().y < two.bottom() && r.right() < two.left()), "{marks:?}");
+        // 尋找命中：左欄的 "two" 有底色（右欄的文件也有一個）
+        let hits = hit_texts(&out, c.search_bg);
+        assert!(hits.iter().filter(|h| h.as_str() == "two").count() >= 2, "{hits:?}");
+        // 游標：第 2 行第 3 個字之後一條細線
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text == "alpha two").unwrap();
+        let x = two.left() + g.rows[0].x_offset(3);
+        let carets = shapes_of(c.fg_dim);
+        assert!(carets.iter().any(|r| (r.left() - x).abs() < 1.5 && r.width() < 3.0 && r.center().y > two.top() && r.center().y < two.bottom()), "caret at {x}: {carets:?}");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
