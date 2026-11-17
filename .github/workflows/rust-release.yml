@@ -41,7 +41,8 @@ jobs:
         include:
           - { name: Windows x64, os: windows-latest, toolchain: stable }
           - { name: Linux x86_64, os: ubuntu-latest, toolchain: stable }
-          - { name: macOS arm64, os: macos-latest, toolchain: stable }
+          # macOS 另外建 x86_64，與 arm64 合成 universal 的 AlexCode.app（scripts/macos-bundle.sh）
+          - { name: macOS arm64, os: macos-latest, toolchain: stable, targets: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -51,6 +52,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: clippy
+          targets: ${{ matrix.targets }}
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -91,6 +93,13 @@ jobs:
           cp target/release/alexcode README.md LICENSE "dist/$NAME/"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           rm -r "dist/$NAME"
+
+      # universal（arm64 + x86_64）的 AlexCode.app，含圖示與可開啟的檔案類型；壓成 dist/AlexCode-Rust-macos-universal.zip
+      - name: Package (macOS .app, universal)
+        if: runner.os == 'macOS'
+        run: |
+          bash scripts/macos-bundle.sh dist
+          rm -rf dist/AlexCode.app
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v7

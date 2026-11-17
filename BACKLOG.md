@@ -9,7 +9,8 @@
 
 - [ ] 升級 egui / eframe 7/7：升級後在真的視窗裡實測中文輸入法（注音 / 拼音組字、候選字視窗的位置、選字後插入；一般編輯區、大檔案檢視、終端機、獨立視窗）
   卡住：2026-11-17 需要使用者在 Windows 上用實體鍵盤與輸入法實際操作，排程沒辦法代為驗證（自動測試只能送出組字事件）
-- [ ] macOS：包成 `.app`（含圖示與檔案關聯）並產生 universal（arm64 + x86_64）版本
+- [ ] macOS 1/2（原本的「macOS：包成 `.app`（含圖示與檔案關聯）並產生 universal（arm64 + x86_64）版本」太大，拆成 1/2、2/2）：CI 的 macOS 工作另外產生 `AlexCode-Rust-macos-universal.zip`，裡面是 `AlexCode.app`（arm64 + x86_64 合併的執行檔、由 `assets/icon.png` 做的圖示、Info.plist 宣告可開啟文字 / 原始碼 / Markdown / JSON / YAML / log 等檔案）。打包腳本：`scripts/macos-bundle.sh`
+- [ ] macOS 2/2：在 Finder 雙擊或「打開方式」開啟檔案時把檔案開進編輯器（macOS 是用 Apple 事件送檔案，不是命令列參數；目前程式只讀命令列參數，所以 1/2 之後 Finder 只會把程式打開、不會開檔）
 - [ ] 清理 clippy 警告（目前約 40 個），之後 CI 改為 `-D warnings`
 - [ ] 查出 macOS CI 上偶爾失敗的 `terminal_follows_the_dock_size_and_draws_its_cursor` 並讓它穩定：2026-11-17 `87c43e4` 在 main 的 run 44045657603 第一次失敗（「the cursor moved -79.75797 px for 3 characters」，打了 3 個字後游標反而往左），重跑一次就通過；同一個 commit 在 rust-edition 的 run 也通過。和這次的修改無關（矩形選取沒有動到終端機），原因還沒查（可能是 zsh 在提示字元重畫時移動了游標）。2026-11-17 `25c3d53`（分割檢視 1/3，沒有動到終端機）在 rust-edition 的 run 44054834547 又失敗一次，訊息完全相同（-79.75797 px），同一個 commit 在 main 的 run 通過，重跑失敗的 macOS 工作後通過
 
