@@ -239,6 +239,9 @@ pub struct AlexCodeApp {
     comp_invoke: bool,
     comp_rect: Option<Rect>,
     comp_caret: Option<Rect>,
+    /// 遠端 AI 補全（設定裡啟用時，Ctrl+Space 另外在背景問一次）：送出請求的背景執行緒，與在等的那一個
+    ai: crate::ai::RemoteAi,
+    ai_wait: Option<(u64, AiReq)>,
     /// 矩形選取、是否正在拖曳，與上一幀算出的每一行選取範圍（行, 起欄, 迄欄）
     box_sel: Option<BoxSel>,
     box_dragging: bool,
@@ -887,6 +890,37 @@ struct CompletionMenu {
     selected: usize,
 }
 
+/// 送出遠端 AI 補全時游標所在的位置：回覆到的時候分頁、內容版本、游標都沒變才用（否則丟掉）。
+/// `start` 是游標前那個字的開頭，`prefix` 是那個字已經打的部分（接受時以 `prefix + 回覆` 取代它）
+struct AiReq {
+    tab: u64,
+    rev: u64,
+    line: usize,
+    col: usize,
+    start: usize,
+    prefix: String,
+    line_before: String,
+}
+
+/// 遠端 AI 的建議在補全選單裡的樣子：顯示接受後那一行會變成的字（只取第一行，多行時加「 …」）
+fn ai_completion_item(prefix: &str, text: &str) -> crate::lsp::CompletionItem {
+    let mut lines = text.lines();
+    let first: String = lines.next().unwrap_or("").chars().take(80).collect();
+    let more = lines.count();
+    let label = if more > 0 || first.chars().count() < text.lines().next().unwrap_or("").chars().count() {
+        format!("{prefix}{first} …")
+    } else {
+        format!("{prefix}{first}")
+    };
+    crate::lsp::CompletionItem {
+        label,
+        insert: format!("{prefix}{text}"),
+        filter: prefix.to_string(),
+        sort: String::new(),
+        detail: if more > 0 { format!("AI（{} 行）", more + 1) } else { "AI".into() },
+    }
+}
+
 /// 矩形選取（Alt+拖曳）：起點與終點所在的行，以及畫面上的 x（相對於文字排版的左緣）。
 /// 每一行選取的欄是那一行在這兩個 x 之間的字元，所以 Tab、全形字也對得齊；內容一變就取消
 struct BoxSel {
@@ -1186,6 +1220,8 @@ impl AlexCodeApp {
             comp_invoke: false,
             comp_rect: None,
             comp_caret: None,
+            ai: crate::ai::RemoteAi::default(),
+            ai_wait: None,
             box_sel: None,
             box_dragging: false,
             box_cols: Vec::new(),
@@ -2533,6 +2569,71 @@ impl AlexCodeApp {
                 });
             }
         }
+        // 遠端 AI（設定裡啟用、有端點時）：Ctrl+Space 另外在背景問一次，本機 / 語言伺服器的選單照常馬上出現
+        if invoke && self.config.ai.enabled && !self.config.ai.endpoint.trim().is_empty() {
+            let buf = &self.tabs[idx];
+            let (before, after) = crate::ai::remote::context_around(&buf.lines, head.line, col);
+            let language = buf
+                .file_path
+                .as_deref()
+                .and_then(|p| Path::new(p).extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or("text")
+                .to_string();
+            let body = crate::ai::remote::build_request(&self.config.ai, &language, &before, &after);
+            let req = AiReq {
+                tab: buf.id,
+                rev: buf.revision(),
+                line: head.line,
+                col,
+                start: word_start,
+                prefix: line[word_start..col].iter().collect(),
+                line_before: line[..col].iter().collect(),
+            };
+            let wake = ctx.clone();
+            let id = self.ai.send(&self.config.ai, body, move || wake.request_repaint());
+            self.ai_wait = Some((id, req)); // 之前那一次還沒回來：以這一次為準
+            self.status_message = "AI 補全：等待回覆…".into();
+        }
+        // 回覆到了：分頁、內容與游標都沒變才加進選單（排在第一項）；錯誤在狀態列說明，本機的選單不受影響
+        while let Some((id, result)) = self.ai.poll() {
+            if self.ai_wait.as_ref().map(|w| w.0) != Some(id) {
+                continue; // 已經被取代或取消
+            }
+            let Some((_, req)) = self.ai_wait.take() else { continue };
+            let buf = &self.tabs[idx];
+            let s = buf.selections[0];
+            let fresh = buf.id == req.tab && buf.revision() == req.rev && s.anchor == s.head && s.head.line == req.line && s.head.col == req.col;
+            match result {
+                Err(e) => self.status_message = format!("AI 補全：{e}"),
+                Ok(_) if !fresh => self.status_message = "AI 補全：回覆到的時候游標已經移動，略過這個建議".into(),
+                Ok(reply) => match crate::ai::remote::clean_completion(&reply, &req.line_before) {
+                    None => self.status_message = "AI 補全：沒有建議".into(),
+                    Some(text) => {
+                        let item = ai_completion_item(&req.prefix, &text);
+                        match &mut self.comp {
+                            Some(m) if m.tab == req.tab && m.line == req.line && m.start == req.start => {
+                                m.items.insert(0, item);
+                                m.selected = 0;
+                            }
+                            _ => {
+                                self.comp = Some(CompletionMenu {
+                                    tab: req.tab,
+                                    line: req.line,
+                                    start: req.start,
+                                    items: vec![item],
+                                    incomplete: false,
+                                    shown: Vec::new(),
+                                    prefix: String::new(),
+                                    selected: 0,
+                                })
+                            }
+                        }
+                        self.status_message = "AI 補全：建議列在選單第一項".into();
+                    }
+                },
+            }
+        }
         // 篩選（不分大小寫）：開頭相同的在前，其次是第一個字相同、其餘字元依序出現的（例如 gtv → get_value）；
         // 各自維持伺服器的順序
         if let Some(m) = &mut self.comp {
@@ -2932,6 +3033,7 @@ impl AlexCodeApp {
                     self.comp_accept = Some(m.shown[m.selected]);
                 } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                     self.comp = None;
+                    self.ai_wait = None; // 還在等的 AI 建議也不要了
                     self.focus_editor = true; // egui 收到 Esc 時會拿掉鍵盤焦點：留在編輯區
                 }
             }
@@ -6272,6 +6374,36 @@ impl AlexCodeApp {
                 self.mark("settings.auto_pair", &r);
                 let r = ui.checkbox(&mut self.config.sticky_scroll, "固定目前的函式標題 (Sticky Scroll)");
                 self.mark("settings.sticky_scroll", &r);
+
+                ui.separator();
+                let r = ui.checkbox(&mut self.config.ai.enabled, "遠端 AI 補全（OpenAI 相容端點，按 Ctrl+Space 時詢問）");
+                self.mark("settings.ai_enabled", &r);
+                ui.add_enabled_ui(self.config.ai.enabled, |ui| {
+                    egui::Grid::new("settings-ai").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                        ui.label("端點");
+                        let r = ui.add(egui::TextEdit::singleline(&mut self.config.ai.endpoint).desired_width(280.0));
+                        self.mark("settings.ai_endpoint", &r);
+                        ui.end_row();
+                        ui.label("模型");
+                        let r = ui.add(egui::TextEdit::singleline(&mut self.config.ai.model).desired_width(280.0));
+                        self.mark("settings.ai_model", &r);
+                        ui.end_row();
+                        ui.label("API 金鑰");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.config.ai.api_key)
+                                .password(true)
+                                .hint_text("本機伺服器通常不需要")
+                                .desired_width(280.0),
+                        );
+                        self.mark("settings.ai_key", &r);
+                        ui.end_row();
+                    });
+                });
+                note(
+                    ui,
+                    "例如 LM Studio：http://127.0.0.1:1234/v1/chat/completions。游標前後的程式碼會送到這個端點；\
+                     金鑰以純文字存在設定資料夾的 state.json。沒有啟用或連不上時只用本機補全。",
+                );
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -11864,6 +11996,150 @@ mod tests {
         frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
         let out = frame(&mut app, &ctx, vec![]);
         assert!(shown(&out, "helper_one") && shown(&out, "helper_two"), "Ctrl+Space lists the words");
+    }
+
+    /// 127.0.0.1 上的假 OpenAI 相容端點：每個請求都回 `content`；回傳端點與收到的每個請求（標頭 + 內容）
+    fn fake_ai_server(content: &'static str) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { return };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = s.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let len = text[..end]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&buf).to_string());
+                // 回覆前等一下（像真的模型一樣要花時間），測試才來得及在回覆前移動游標
+                std::thread::sleep(Duration::from_millis(300));
+                let body = serde_json::json!({ "choices": [ { "message": { "role": "assistant", "content": content } } ] }).to_string();
+                let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (format!("http://127.0.0.1:{port}/v1/chat/completions"), rx)
+    }
+
+    #[test]
+    fn remote_ai_suggestions_join_the_completion_menu() {
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "let helper_one = 1;\nlet total = hel\n");
+        app.tabs[0].file_path = Some("t.js".into());
+        let shown = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t == s);
+        let y = |out: &egui::FullOutput, s: &str| painted_lines(out).into_iter().find(|l| l.0 == s).unwrap().1.top();
+        let pump = |app: &mut AlexCodeApp, what: &str, done: &dyn Fn(&AlexCodeApp, &egui::FullOutput) -> bool| {
+            let end = Instant::now() + Duration::from_secs(10);
+            loop {
+                let out = frame(app, &ctx, vec![]);
+                if done(app, &out) {
+                    return out;
+                }
+                assert!(Instant::now() < end, "{what}; status {:?}; painted: {:?}", app.status_message, painted_texts(&out));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let (endpoint, rx) = fake_ai_server("per_one + 41;\nconsole.log(total);");
+        // 游標放在第 2 行行尾
+        app.pending_select = Some((35, 35));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (1, 15));
+
+        // 預設不啟用：Ctrl+Space 只列本機補全，不送任何請求
+        assert!(!app.config.ai.enabled);
+        app.config.ai.endpoint = endpoint.clone();
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "helper_one"), "local completion still works");
+        assert!(rx.recv_timeout(Duration::from_millis(400)).is_err(), "nothing is sent while the remote provider is disabled");
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+
+        // 啟用後：本機的選單馬上出現（不等回覆），回覆到了以後 AI 的建議排在第一項
+        app.config.ai.enabled = true;
+        app.config.ai.model = "test-model".into();
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "helper_one"), "the local items are listed right away");
+        let out = pump(&mut app, "the AI suggestion appears", &|_, o| shown(o, "helper_one + 41; …"));
+        assert!(y(&out, "helper_one + 41; …") < y(&out, "helper_one"), "the AI suggestion is the first item");
+        let req = rx.recv_timeout(Duration::from_secs(5)).expect("a request was sent");
+        assert!(req.contains("\"test-model\""), "{req}");
+        assert!(req.contains("let total = hel<CURSOR>"), "the text around the cursor is sent: {req}");
+        // Enter 接受：接在打過的字後面，多行的建議照樣插入
+        frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[1], "let total = helper_one + 41;");
+        assert_eq!(app.tabs[0].lines[2], "console.log(total);");
+        assert_eq!(cursor(&app), (2, 19));
+
+        // 回覆到之前游標移走了：丟掉這個建議
+        frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+        for ch in ["h", "e", "l"] {
+            frame(&mut app, &ctx, vec![Event::Text(ch.into())]);
+        }
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        frame(&mut app, &ctx, vec![Event::Text("x".into())]);
+        rx.recv_timeout(Duration::from_secs(5)).expect("the second request was sent");
+        let end = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < end {
+            let out = frame(&mut app, &ctx, vec![]);
+            assert!(!shown(&out, "helper_one + 41; …"), "a stale suggestion is not shown");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.tabs[0].lines[3], "helx");
+
+        // 連不上：照舊只有本機補全，狀態列說明原因
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        app.config.ai.endpoint = format!("http://127.0.0.1:{port}/v1/chat/completions");
+        frame(&mut app, &ctx, vec![key(Key::Backspace, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "helper_one"));
+        let out = pump(&mut app, "the error is reported", &|a, _| a.status_message.contains("連不上"));
+        assert!(app.status_message.starts_with("AI 補全"), "{}", app.status_message);
+        assert!(shown(&out, "helper_one"), "the local menu stays open");
+        frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[3], "helper_one");
+    }
+
+    #[test]
+    fn the_settings_dialog_configures_the_remote_ai() {
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        app.show_settings = true;
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        for name in ["settings.ai_enabled", "settings.ai_endpoint", "settings.ai_model", "settings.ai_key"] {
+            assert!(app.probe.contains_key(name), "{name} is in the dialog");
+        }
+        let at = app.probe["settings.ai_enabled"].center();
+        let click = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&mut app, &ctx, vec![Event::PointerMoved(at), click(true)]);
+        frame(&mut app, &ctx, vec![click(false)]);
+        assert!(app.config.ai.enabled, "the checkbox turns the remote provider on");
+        // 金鑰欄位不顯示金鑰本身
+        app.config.ai.api_key = "sk-secret-123".into();
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!painted_texts(&out).iter().any(|t| t.contains("sk-secret")), "the key is masked");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）

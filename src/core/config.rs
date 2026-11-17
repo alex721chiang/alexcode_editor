@@ -35,6 +35,8 @@ pub struct EditorConfig {
     pub long_line_chars: usize,
     /// 終端機使用的 shell 名稱（`terminal::available_shells` 的 `name`）；空的或找不到時用第一個（預設的）
     pub terminal_shell: String,
+    /// 遠端 AI 補全（OpenAI 相容端點）；預設不啟用
+    pub ai: crate::ai::AIConfig,
 }
 
 impl Default for EditorConfig {
@@ -56,6 +58,7 @@ impl Default for EditorConfig {
             assist_max_mb: 2,
             long_line_chars: 10000,
             terminal_shell: String::new(),
+            ai: crate::ai::AIConfig::default(),
         }
     }
 }
@@ -69,6 +72,8 @@ impl EditorConfig {
             Self::default().font_size
         };
         self.tab_size = self.tab_size.clamp(MIN_TAB_SIZE, MAX_TAB_SIZE);
+        self.ai.max_tokens = self.ai.max_tokens.clamp(1, 8192);
+        self.ai.temperature = if self.ai.temperature.is_finite() { self.ai.temperature.clamp(0.0, 2.0) } else { 0.2 };
         self
     }
 }

@@ -9,8 +9,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 遠端 AI 補全的設定（隨 `EditorConfig::ai` 存進 `state.json`；缺少的欄位用預設值）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AIConfig {
+    /// 預設關閉：使用者自己填好端點（與金鑰）後才會送出任何請求
+    pub enabled: bool,
     pub endpoint: String,
     pub api_key: String,
     pub model: String,
@@ -23,6 +27,7 @@ pub struct AIConfig {
 impl Default for AIConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             endpoint: "http://127.0.0.1:1234/v1/chat/completions".to_string(),
             api_key: String::new(),
             model: "google/gemma-4-e4b".to_string(),
