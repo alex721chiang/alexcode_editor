@@ -856,6 +856,10 @@ const HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 /// 補全選單最多留幾項、一次顯示幾列
 const COMPLETION_MAX: usize = 200;
 const COMPLETION_ROWS: usize = 10;
+/// 沒有語言伺服器時（本機補全）打到幾個字才自動列出
+const LOCAL_COMPLETION_MIN: usize = 3;
+/// 本機補全收集字的範圍：游標前後各幾行
+const LOCAL_COMPLETION_LINES: usize = 2000;
 
 /// 名稱（識別字）裡的字元：補全以游標前連續的這些字元當作「打到一半的字」
 fn is_ident_char(c: char) -> bool {
@@ -2444,11 +2448,11 @@ impl AlexCodeApp {
     /// 依打的字決定要不要問（Ctrl+Space、打名稱的字元而還沒有選單、伺服器的觸發字元），再依打過的字篩選
     fn update_completion(&mut self, ctx: &egui::Context, idx: usize, changed: bool, typed: Option<char>) {
         let invoke = std::mem::take(&mut self.comp_invoke);
+        // 沒有語言伺服器的檔案（含還沒存檔的新檔）：用文件裡出現過的字補全（`crate::ai` 的本機補全）。
+        // 程式碼檔案打到 LOCAL_COMPLETION_MIN 個字自動列出；純文字與 Markdown 只在 Ctrl+Space 時列出
+        let auto_local = !matches!(self.tab_lang(idx), Lang::Plain | Lang::Markdown);
         let buf = &self.tabs[idx];
-        let Some(path) = buf.file_path.clone().filter(|p| ServerKind::for_path(p).is_some()) else {
-            self.comp = None;
-            return;
-        };
+        let path = buf.file_path.clone().filter(|p| ServerKind::for_path(p).is_some());
         let sel = buf.selections[0];
         let head = sel.head;
         let line: Vec<char> = buf.lines.get(head.line).map(|l| l.chars().collect()).unwrap_or_default();
@@ -2477,19 +2481,57 @@ impl AlexCodeApp {
         } else if let Some(ch) = typed.filter(|_| changed) {
             if is_ident_char(ch) {
                 match &self.comp {
-                    None if !line[word_start].is_ascii_digit() => want = Some((word_start, None)),
+                    None if line[word_start].is_ascii_digit() => {}
+                    None if path.is_some() => want = Some((word_start, None)),
+                    None if auto_local && col - word_start >= LOCAL_COMPLETION_MIN => want = Some((word_start, None)),
                     Some(m) if m.incomplete => want = Some((m.start, None)),
                     _ => {}
                 }
-            } else if self.lsp.completion_triggers(&path).contains(ch) {
+            } else if path.as_ref().is_some_and(|p| self.lsp.completion_triggers(p).contains(ch)) {
                 self.comp = None;
                 want = Some((col, Some(ch)));
             }
         }
         if let Some((start, trigger)) = want {
-            let utf16 = buf.lines.get(head.line).map_or(0, |l| char_col_to_utf16(l, col));
-            self.comp_want = Some(CompletionReq { path, tab: buf.id, line: head.line, start, utf16, trigger });
-            ctx.request_repaint();
+            if let Some(path) = path {
+                let utf16 = buf.lines.get(head.line).map_or(0, |l| char_col_to_utf16(l, col));
+                self.comp_want = Some(CompletionReq { path, tab: buf.id, line: head.line, start, utf16, trigger });
+                ctx.request_repaint();
+            } else {
+                // 本機補全：只看游標前後 LOCAL_COMPLETION_LINES 行（大檔案不必每次串接整份文件）
+                let prefix: String = line[start..col].iter().collect();
+                let from = head.line.saturating_sub(LOCAL_COMPLETION_LINES);
+                let to = (head.line + LOCAL_COMPLETION_LINES + 1).min(buf.lines.len());
+                let (mut text, mut cursor) = (String::new(), 0);
+                for (i, l) in buf.lines[from..to].iter().enumerate() {
+                    if from + i == head.line {
+                        cursor = text.len() + l.char_indices().nth(col).map_or(l.len(), |(b, _)| b);
+                    }
+                    text.push_str(l);
+                    text.push('\n');
+                }
+                let items: Vec<crate::lsp::CompletionItem> = crate::ai::suggest_local_completions(&text, cursor, &prefix, COMPLETION_MAX)
+                    .into_iter()
+                    .map(|w| crate::lsp::CompletionItem {
+                        label: w.clone(),
+                        insert: w.clone(),
+                        filter: w.clone(),
+                        sort: w,
+                        detail: String::new(),
+                    })
+                    .collect();
+                let (tab, line_no) = (buf.id, head.line);
+                self.comp = (!items.is_empty()).then(|| CompletionMenu {
+                    tab,
+                    line: line_no,
+                    start,
+                    items,
+                    incomplete: false,
+                    shown: Vec::new(),
+                    prefix: String::new(),
+                    selected: 0,
+                });
+            }
         }
         // 篩選（不分大小寫）：開頭相同的在前，其次是第一個字相同、其餘字元依序出現的（例如 gtv → get_value）；
         // 各自維持伺服器的順序
@@ -11779,6 +11821,49 @@ mod tests {
         app.detached.clear();
         app.persist_state();
         assert!(AppState::load(&state_file).unwrap().detached.is_empty());
+    }
+
+    #[test]
+    fn files_without_a_language_server_complete_words_from_the_document() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "let helper_one = 1;\nlet helper_two = helper_one;\n\n");
+        app.tabs[0].file_path = Some("t.js".into());
+        let shown = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t == s);
+        // 游標放在第 3 行（空行）
+        app.pending_select = Some((49, 49));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (2, 0));
+        // 程式碼檔案：打到第 3 個字才自動列出文件裡的字（出現次數多的在前）
+        frame(&mut app, &ctx, vec![Event::Text("h".into())]);
+        let out = frame(&mut app, &ctx, vec![Event::Text("e".into())]);
+        assert!(!shown(&out, "helper_one"), "two letters are not enough");
+        frame(&mut app, &ctx, vec![Event::Text("l".into())]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "helper_one") && shown(&out, "helper_two"), "the menu lists words from the document: {:?}", painted_texts(&out));
+        let y = |out: &egui::FullOutput, s: &str| painted_lines(out).into_iter().find(|l| l.0 == s).unwrap().1.top();
+        assert!(y(&out, "helper_one") < y(&out, "helper_two"), "the word used more often comes first");
+        // Enter 接受：打過的 "hel" 換成完整的字
+        frame(&mut app, &ctx, vec![key(Key::Enter, Modifiers::NONE)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[2], "helper_one");
+        assert_eq!(app.tabs[0].lines.len(), 4, "Enter accepted the item instead of breaking the line");
+        assert!(!shown(&out, "helper_two"), "the menu closes after accepting");
+
+        // 純文字檔：打字不自動跳出，Ctrl+Space 才列出
+        // （換路徑後編輯區的 id 跟著變，用 pending_select 放游標順便把焦點交給它）
+        app.tabs[0].file_path = Some("notes.txt".into());
+        app.pending_select = Some((60, 60));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(cursor(&app), (3, 0));
+        for ch in ["h", "e", "l"] {
+            frame(&mut app, &ctx, vec![Event::Text(ch.into())]);
+        }
+        let out = frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs[0].lines[3], "hel", "{:?} {:?}", app.tabs[0].lines, cursor(&app));
+        assert!(!shown(&out, "helper_two"), "no automatic menu in plain text");
+        frame(&mut app, &ctx, vec![key(Key::Space, Modifiers::CTRL)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(shown(&out, "helper_one") && shown(&out, "helper_two"), "Ctrl+Space lists the words");
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
