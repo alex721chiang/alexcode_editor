@@ -12359,8 +12359,8 @@ mod tests {
         // 面板與終端機的大小每一幀都一樣（之前面板每一幀縮 2 像素）
         assert!(seen.windows(2).skip(1).all(|w| w[0] == w[1]), "the dock keeps its size: {seen:?}");
         let font = FontId::monospace(13.0);
-        let width = |s: &str| ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), font.clone(), Color32::WHITE).size().x);
-        let adv = width("00") - width("0");
+        // 每個字往右移的距離就是字寬（egui 0.33 起以次像素累加；「兩個字與一個字的寬度差」會因為字形位置取整到像素而少算）
+        let adv = ctx.fonts_mut(|f| f.glyph_width(&font, '0'));
         // 大小跟著輸出區：寬度放得下的欄數（扣掉捲軸），而不是固定的 200 × 160
         let (rows, cols) = (app.terminal.rows(), app.terminal.cols());
         let w = app.probe["terminal-output"].width();
