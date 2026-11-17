@@ -29,6 +29,16 @@ pub struct AppState {
     pub config: Option<EditorConfig>,
     /// 分割檢視：另一欄顯示的檔案、有焦點的是不是右欄、左欄佔的寬度比例；None = 沒有分割
     pub split: Option<SplitState>,
+    /// 開在獨立視窗裡的檔案（分頁右鍵「在新視窗開啟」或拖出分頁列）
+    pub detached: Vec<DetachedState>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DetachedState {
+    pub file: String,
+    /// 視窗左上角與內容大小 [x, y, 寬, 高]（邏輯像素）；None = 還沒量到
+    pub rect: Option<[f32; 4]>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

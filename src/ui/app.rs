@@ -259,6 +259,10 @@ pub struct AlexCodeApp {
     detached: Vec<u64>,
     /// 各獨立視窗的 Git 標記快取：((revision, HEAD 指標), 標記)
     detached_git: HashMap<u64, DetachedGit>,
+    /// 各獨立視窗上一幀量到的位置與大小（存檔用）
+    detached_rects: HashMap<u64, Rect>,
+    /// 從上次的狀態還原的獨立視窗：開視窗時放在這裡（之後不再改，免得和使用者移動視窗互相干擾）
+    detached_place: HashMap<u64, Rect>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -1189,6 +1193,8 @@ impl AlexCodeApp {
             split_mid: None,
             detached: Vec::new(),
             detached_git: HashMap::new(),
+            detached_rects: HashMap::new(),
+            detached_place: HashMap::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1337,6 +1343,16 @@ impl AlexCodeApp {
                     vertical: s.vertical,
                 })
             }),
+            // 獨立視窗：同樣只記存過的檔案
+            detached: self
+                .detached
+                .iter()
+                .filter_map(|id| {
+                    let file = self.tabs.iter().find(|b| b.id == *id)?.file_path.clone()?;
+                    let rect = self.detached_rects.get(id).map(|r| [r.min.x, r.min.y, r.width(), r.height()]);
+                    Path::new(&file).is_absolute().then_some(crate::core::app_state::DetachedState { file, rect })
+                })
+                .collect(),
         }
     }
 
@@ -1390,6 +1406,19 @@ impl AlexCodeApp {
                     ratio: if sp.ratio.is_finite() { sp.ratio.clamp(0.1, 0.9) } else { 0.5 },
                     vertical: sp.vertical,
                 });
+            }
+        }
+        // 獨立視窗：檔案有重新開起來才還原；量過的位置大小合理才用（太小或不是數字就讓視窗用預設的）
+        for d in st.detached {
+            let Some(id) = self.tabs.iter().find(|b| b.file_path.as_deref() == Some(d.file.as_str())).map(|b| b.id) else { continue };
+            if self.detached.contains(&id) {
+                continue;
+            }
+            self.detached.push(id);
+            if let Some([x, y, w, h]) = d.rect.filter(|r| r.iter().all(|v| v.is_finite()) && r[2] >= 100.0 && r[3] >= 60.0) {
+                let r = Rect::from_min_size(Pos2::new(x, y), egui::vec2(w, h));
+                self.detached_place.insert(id, r);
+                self.detached_rects.insert(id, r);
             }
         }
     }
@@ -4760,26 +4789,41 @@ impl AlexCodeApp {
             let git = cache.as_ref().map_or(&empty, |(_, m)| m);
             let title = format!("{} — AlexCode", Self::tab_title(&self.tabs[idx]));
             let vid = egui::ViewportId::from_hash_of(("alexcode-detached", id));
-            let builder = egui::ViewportBuilder::default().with_title(title.clone()).with_inner_size([800.0, 600.0]);
+            // 上次結束時的位置大小（還原的視窗）；這裡傳的內容每一幀都要一樣，不然 egui 會一直把視窗移回去
+            let place = self.detached_place.get(&id).copied();
+            let mut builder = egui::ViewportBuilder::default().with_title(title.clone()).with_inner_size([800.0, 600.0]);
+            if let Some(r) = place {
+                builder = builder.with_position(r.min).with_inner_size(r.size());
+            }
             let this = &mut *self;
-            let close = ctx.show_viewport_immediate(vid, builder, |ctx, class| {
+            let (close, rect) = ctx.show_viewport_immediate(vid, builder, |ctx, class| {
                 if class == egui::ViewportClass::Embedded {
                     let mut open = true;
-                    egui::Window::new(title.clone())
+                    let mut win = egui::Window::new(title.clone())
                         .id(egui::Id::new(("alexcode-detached-window", id)))
                         .open(&mut open)
-                        .default_size([600.0, 400.0])
-                        .show(ctx, |ui| {
-                            this.detached_body(ui, idx, c, pal, git);
-                        });
-                    !open
+                        .default_size([600.0, 400.0]);
+                    if let Some(r) = place {
+                        win = win.default_pos(r.min);
+                    }
+                    let shown = win.show(ctx, |ui| {
+                        this.detached_body(ui, idx, c, pal, git);
+                    });
+                    // 內嵌的浮動視窗：記整個視窗的左上角（大小固定用預設的）
+                    (!open, shown.map(|s| Rect::from_min_size(s.response.rect.min, egui::vec2(600.0, 400.0))))
                 } else {
                     egui::CentralPanel::default().frame(egui::Frame::none().fill(c.panel)).show(ctx, |ui| {
                         this.detached_body(ui, idx, c, pal, git);
                     });
-                    ctx.input(|i| i.viewport().close_requested())
+                    // 作業系統視窗：外框左上角 + 內容大小（與 with_position / with_inner_size 對應）
+                    let (outer, inner) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+                    let rect = outer.zip(inner).map(|(o, i)| Rect::from_min_size(o.min, i.size()));
+                    (ctx.input(|i| i.viewport().close_requested()), rect)
                 }
             });
+            if let Some(r) = rect {
+                self.detached_rects.insert(id, r);
+            }
             if let Some(cache) = cache {
                 self.detached_git.insert(id, cache);
             }
@@ -4788,6 +4832,9 @@ impl AlexCodeApp {
             }
         }
         self.detached.retain(|id| !closed.contains(id));
+        let open = self.detached.clone();
+        self.detached_rects.retain(|id, _| open.contains(id));
+        self.detached_place.retain(|id, _| open.contains(id));
     }
 
     /// 獨立視窗的內容：畫法與分割檢視的另一欄相同，點一下取得鍵盤焦點並放游標，
@@ -11678,6 +11725,60 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         assert!(painted_lines(&out).iter().any(|l| l.0 == "t.rs — AlexCode"), "the window is shown");
         assert_eq!(app.tabs.len(), 2, "the tab stays in the main window too");
+    }
+
+    #[test]
+    fn detached_windows_are_saved_and_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, text: &str| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, text).unwrap();
+            p
+        };
+        let (a, b) = (write("a.rs", "fn a() {}"), write("b.rs", "fn b() {}"));
+        let state_file = dir.path().join("cfg").join("state.json");
+        let ctx = ctx();
+        let mut app = AlexCodeApp::new();
+        app.state_path = Some(state_file.clone());
+        app.open_path(&a);
+        app.open_path(&b);
+        let ib = app.tabs.iter().position(|t| t.file_path.as_deref() == Some(b.to_str().unwrap())).unwrap();
+        app.run_tab_action(&ctx, TabAction::Detach(ib));
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let title = |out: &egui::FullOutput| painted_lines(out).into_iter().find(|l| l.0 == "b.rs — AlexCode").map(|l| l.1);
+        let t0 = title(&out).expect("the window is shown");
+        // 拖標題列把視窗移到別的地方
+        let (from, to) = (t0.center(), t0.center() + egui::vec2(150.0, 120.0));
+        let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        frame(&mut app, &ctx, vec![Event::PointerMoved(from)]);
+        frame(&mut app, &ctx, vec![button(from, true)]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(from + egui::vec2(75.0, 60.0))]);
+        frame(&mut app, &ctx, vec![Event::PointerMoved(to)]);
+        frame(&mut app, &ctx, vec![button(to, false)]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let t1 = title(&out).unwrap();
+        assert!((t1.center() - to).length() < 2.0, "the window moved: {t0:?} -> {t1:?}");
+        app.persist_state();
+        let st = AppState::load(&state_file).unwrap();
+        assert_eq!(st.detached.len(), 1);
+        assert_eq!(st.detached[0].file, b.to_str().unwrap());
+
+        // 重開：同一個檔案又開在獨立視窗、位置相同
+        let ctx2 = self::ctx();
+        let mut app2 = AlexCodeApp::new();
+        app2.apply_state(st);
+        let ib2 = app2.tabs.iter().position(|t| t.file_path.as_deref() == Some(b.to_str().unwrap())).unwrap();
+        assert_eq!(app2.detached, vec![app2.tabs[ib2].id], "the window is reopened");
+        frame(&mut app2, &ctx2, vec![]);
+        let out = frame(&mut app2, &ctx2, vec![]);
+        let t2 = title(&out).expect("the restored window is shown");
+        assert!((t2.center() - t1.center()).length() < 2.0, "same place: {t1:?} vs {t2:?}");
+
+        // 視窗關掉後存檔就不再記
+        app.detached.clear();
+        app.persist_state();
+        assert!(AppState::load(&state_file).unwrap().detached.is_empty());
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
