@@ -255,6 +255,8 @@ pub struct AlexCodeApp {
     split_drag: Option<usize>,
     /// 上一幀分割檢視中間分隔線的 x（沒有分割時 None）
     split_mid: Option<f32>,
+    /// 在獨立視窗裡顯示的分頁（分頁 id）
+    detached: Vec<u64>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -517,6 +519,8 @@ enum TabAction {
     CloseOthers(usize),
     CloseRight(usize),
     CloseAll,
+    /// 在獨立的視窗裡顯示這個分頁（唯讀）
+    Detach(usize),
 }
 
 /// 超過此大小的文件不做語法高亮（仍可編輯與搜尋）
@@ -1178,6 +1182,7 @@ impl AlexCodeApp {
             pending_offset: None,
             split_drag: None,
             split_mid: None,
+            detached: Vec::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -1633,6 +1638,13 @@ impl AlexCodeApp {
             TabAction::CloseAll => {
                 let ids = ids_where(&self.tabs, &|_| true);
                 self.request_close(ids, false);
+            }
+            TabAction::Detach(i) => {
+                if let Some(id) = self.tabs.get(i).map(|b| b.id) {
+                    if !self.detached.contains(&id) {
+                        self.detached.push(id);
+                    }
+                }
             }
         }
     }
@@ -3312,6 +3324,8 @@ impl AlexCodeApp {
                                 pick(ui, tab_count > 1, "關閉其他分頁", TabAction::CloseOthers(i));
                                 pick(ui, i + 1 < tab_count, "關閉右側分頁", TabAction::CloseRight(i));
                                 pick(ui, true, "全部關閉", TabAction::CloseAll);
+                                ui.separator();
+                                pick(ui, true, "在新視窗檢視（唯讀）", TabAction::Detach(i));
                             });
                         }
                     });
@@ -4562,7 +4576,9 @@ impl AlexCodeApp {
                 s.rows.clear();
             }
         } else {
-            let (rows, offset) = self.split_preview(&mut pane, other, c, pal, pending);
+            let empty = HashMap::new();
+            let git = self.split.as_ref().map_or(&empty, |s| &s.git.1);
+            let (rows, offset) = self.split_preview(&mut pane, other, c, pal, pending, git);
             if let Some(s) = self.split.as_mut() {
                 s.rows = rows;
                 s.offset = offset;
@@ -4582,6 +4598,7 @@ impl AlexCodeApp {
         c: &Colors,
         pal: &crate::theme::Palette,
         offset: Option<Vec2>,
+        git: &HashMap<usize, u8>,
     ) -> (Vec<(usize, Pos2, Arc<egui::Galley>)>, Vec2) {
         let mut drawn = Vec::new();
         let Some(buf) = self.tabs.get(idx) else { return (drawn, Vec2::ZERO) };
@@ -4599,8 +4616,6 @@ impl AlexCodeApp {
         // 尋找列開著時與編輯區用同樣的條件標示命中
         let finder = (self.show_find_bar && !self.find_bar_text.is_empty()).then(|| Finder::new(&self.find_bar_text, &self.find_opts));
         let head = buf.selections.first().map(|s| s.head);
-        let empty = HashMap::new();
-        let git = self.split.as_ref().map_or(&empty, |s| &s.git.1);
         // 語言伺服器的診斷：行號以那一行最嚴重的診斷上色，範圍畫波浪線（與編輯區相同）
         let diags = buf.file_path.as_deref().map(|p| self.lsp.diagnostics(p)).unwrap_or_default();
         let mut diag_sev: HashMap<usize, i32> = HashMap::new();
@@ -4679,6 +4694,44 @@ impl AlexCodeApp {
                 }
             });
         (drawn, out.state.offset)
+    }
+
+    /// 在獨立視窗裡唯讀顯示的分頁（分頁右鍵「在新視窗檢視」）。每個分頁一個作業系統視窗（egui 的 viewport），
+    /// 不支援多視窗的環境（例如測試）改畫成主視窗裡的浮動視窗。分頁關掉或視窗被關掉時就不再顯示
+    fn detached_windows(&mut self, ctx: &egui::Context, c: &Colors, pal: &crate::theme::Palette) {
+        let alive: Vec<u64> = self.tabs.iter().map(|b| b.id).collect();
+        self.detached.retain(|id| alive.contains(id));
+        let mut closed = Vec::new();
+        let empty = HashMap::new();
+        for id in self.detached.clone() {
+            let Some(idx) = self.tabs.iter().position(|b| b.id == id) else { continue };
+            let title = format!("{} — AlexCode", Self::tab_title(&self.tabs[idx]));
+            let vid = egui::ViewportId::from_hash_of(("alexcode-detached", id));
+            let builder = egui::ViewportBuilder::default().with_title(title.clone()).with_inner_size([800.0, 600.0]);
+            let this = &*self;
+            let close = ctx.show_viewport_immediate(vid, builder, |ctx, class| {
+                if class == egui::ViewportClass::Embedded {
+                    let mut open = true;
+                    egui::Window::new(title.clone())
+                        .id(egui::Id::new(("alexcode-detached-window", id)))
+                        .open(&mut open)
+                        .default_size([600.0, 400.0])
+                        .show(ctx, |ui| {
+                            let _ = this.split_preview(ui, idx, c, pal, None, &empty);
+                        });
+                    !open
+                } else {
+                    egui::CentralPanel::default().frame(egui::Frame::none().fill(c.panel)).show(ctx, |ui| {
+                        let _ = this.split_preview(ui, idx, c, pal, None, &empty);
+                    });
+                    ctx.input(|i| i.viewport().close_requested())
+                }
+            });
+            if close {
+                closed.push(id);
+            }
+        }
+        self.detached.retain(|id| !closed.contains(id));
     }
 
     /// 上一幀分割檢視中間分隔線的 x
@@ -7612,6 +7665,7 @@ impl AlexCodeApp {
         }
 
         self.menu_bar(ctx, &colors);
+        self.detached_windows(ctx, &colors, &pal);
         self.tool_bar(ctx, &colors);
         self.status_bar(ctx, &colors);
         self.terminal_dock(ctx, &colors);
@@ -11250,6 +11304,40 @@ mod tests {
         // （寬度比例沿用剛才拖過的高度比例）
         let x = app.split_divider_x().unwrap();
         assert!(beta.left() > x && beta.top() < m2 - 100.0, "side by side again: {beta:?} at {x}");
+    }
+
+    #[test]
+    fn a_tab_can_be_shown_in_its_own_window() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\nalpha two\n");
+        let mut b = EditorBuffer::from_text("beta one\nbeta two\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        app.active_tab_idx = 1;
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(!painted_lines(&out).iter().any(|l| l.0 == "alpha one"), "tab 1 is not shown anywhere yet");
+        // 分頁右鍵「在新視窗檢視」：沒有多視窗的環境（測試）裡畫成一個內嵌的視窗
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        assert_eq!(app.detached.len(), 1, "one window per tab");
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let texts: Vec<String> = painted_lines(&out).into_iter().map(|l| l.0).collect();
+        assert!(texts.iter().any(|t| t == "alpha one"), "the window shows the tab: {texts:?}");
+        assert!(texts.iter().any(|t| t == "t.rs — AlexCode"), "the window title names the file");
+        assert!(texts.iter().any(|t| t.starts_with("beta one")), "the main editor still shows its tab");
+        // 內容改了視窗馬上跟著變
+        let top = Position { line: 0, col: 0 };
+        app.tabs[0].replace_range(top, top, "NEW ", false);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(painted_lines(&out).iter().any(|l| l.0 == "NEW alpha one"));
+        // 分頁關掉時視窗也關掉
+        let id = app.tabs[0].id;
+        app.tabs[0].mark_saved();
+        app.finish_close(&[id], false);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(app.detached.is_empty());
+        assert!(!painted_lines(&out).iter().any(|l| l.0.contains("alpha one")));
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
