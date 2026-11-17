@@ -4461,6 +4461,13 @@ impl AlexCodeApp {
         let head = buf.selections.first().map(|s| s.head);
         let empty = HashMap::new();
         let git = self.split.as_ref().map_or(&empty, |s| &s.git.1);
+        // 語言伺服器的診斷：行號以那一行最嚴重的診斷上色，範圍畫波浪線（與編輯區相同）
+        let diags = buf.file_path.as_deref().map(|p| self.lsp.diagnostics(p)).unwrap_or_default();
+        let mut diag_sev: HashMap<usize, i32> = HashMap::new();
+        for d in diags.iter() {
+            let s = diag_sev.entry(d.start_line.max(0) as usize).or_insert(d.severity);
+            *s = (*s).min(d.severity);
+        }
         egui::ScrollArea::both()
             .id_source(("split-preview", buf.id))
             .auto_shrink([false, false])
@@ -4478,7 +4485,7 @@ impl AlexCodeApp {
                         Align2::RIGHT_CENTER,
                         format!("{}", ln + 1),
                         FontId::monospace(self.config.font_size - 1.0),
-                        c.fg_dim2,
+                        diag_sev.get(&ln).map_or(c.fg_dim2, |&s| diag_color(s)),
                     );
                     // 書籤與 Git 標記（與編輯區的行號區相同）
                     let y = rect.top();
@@ -4505,6 +4512,20 @@ impl AlexCodeApp {
                         let ci = h.col.min(shown.chars().count());
                         let r = g.pos_from_cursor(&g.from_ccursor(CCursor::new(ci)));
                         ui.painter().rect_filled(Rect::from_min_size(at + egui::vec2(r.left(), 0.0), egui::vec2(1.5, row_h)), 0.0, c.fg_dim);
+                    }
+                    // 波浪線：把跨到這一行的診斷換成只有這一行的範圍（開頭在前面的行就從行首、結尾在後面的行就到行尾）
+                    let one = [shown.to_string()];
+                    for d in diags.iter().filter(|d| d.start_line.max(0) as usize <= ln && d.end_line.max(0) as usize >= ln) {
+                        let mut d1 = d.clone();
+                        if (d.start_line.max(0) as usize) < ln {
+                            (d1.start_line, d1.start_char) = (0, 0);
+                        } else {
+                            d1.start_line = 0;
+                        }
+                        d1.end_line = if (d.end_line.max(0) as usize) > ln { 1 } else { 0 };
+                        for (_, bottom, l, r) in diag_spans(&g, &one, &[], &d1, char_w) {
+                            ui.painter().add(squiggle(at.x + l, at.x + r, at.y + bottom - 1.0, diag_color(d.severity)));
+                        }
                     }
                     drawn.push((ln, at, g.clone()));
                     ui.painter().galley(at, g, c.fg);
@@ -10638,6 +10659,93 @@ mod tests {
         let x = two.left() + g.rows[0].x_offset(3);
         let carets = shapes_of(c.fg_dim);
         assert!(carets.iter().any(|r| (r.left() - x).abs() < 1.5 && r.width() < 3.0 && r.center().y > two.top() && r.center().y < two.bottom()), "caret at {x}: {carets:?}");
+    }
+
+    #[test]
+    fn split_view_other_pane_shows_diagnostics() {
+        use serde_json::json;
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rs").to_string_lossy().into_owned();
+        let mut app = app_with(&ctx, "fn nope() {}\nlet 😀x = 1;\nfn fine() {}\n");
+        app.tabs[0].file_path = Some(path.clone());
+        let mut b = EditorBuffer::from_text("plain one\nplain two\n");
+        b.file_path = Some(dir.path().join("b.txt").to_string_lossy().into_owned());
+        app.tabs.push(b);
+        // 假的伺服器：收到 didOpen 就送出第 1 行 `nope` 的錯誤與第 2 行 `x` 的警告
+        let launcher: Launcher = Box::new(move |_, _| {
+            let (client_read, mut server_write) = std::io::pipe()?;
+            let (mut server_read, client_write) = std::io::pipe()?;
+            std::thread::spawn(move || {
+                let mut frames = crate::lsp::Reader::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = server_read.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    frames.feed(&buf[..n]);
+                    for m in frames.take_messages() {
+                        if m["method"] == "initialize" {
+                            let reply = json!({ "jsonrpc": "2.0", "id": m["id"], "result": { "capabilities": {} } });
+                            let _ = server_write.write_all(&crate::lsp::frame(&reply));
+                        }
+                        if m["method"] == "textDocument/didOpen" {
+                            let note = json!({ "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": {
+                                "uri": m["params"]["textDocument"]["uri"],
+                                "diagnostics": [
+                                    { "range": { "start": { "line": 0, "character": 3 }, "end": { "line": 0, "character": 7 } },
+                                      "severity": 1, "message": "cannot find function `nope`" },
+                                    { "range": { "start": { "line": 1, "character": 6 }, "end": { "line": 1, "character": 7 } },
+                                      "severity": 2, "message": "unused variable: `x`" }
+                                ] } });
+                            let _ = server_write.write_all(&crate::lsp::frame(&note));
+                        }
+                    }
+                }
+            });
+            Ok(crate::lsp::LspClient::from_io(client_read, client_write))
+        });
+        app.lsp = LspManager::new(dir.path().to_path_buf(), launcher);
+        let end = Instant::now() + Duration::from_secs(10);
+        while app.lsp.diagnostics(&path).len() < 2 && Instant::now() < end {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(app.lsp.diagnostics(&path).len(), 2, "the diagnostics arrived");
+
+        // 分割後編輯右欄的純文字檔：有診斷的那一份在左欄唯讀顯示
+        app.run_cmd(Cmd::SplitEditor);
+        app.active_tab_idx = 1;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let mid = 640.0;
+        let left_num = |n: &str| {
+            let rects: Vec<Rect> = painted_lines(&out).into_iter().filter(|l| l.0 == n && l.1.right() < mid).map(|l| l.1).collect();
+            painted_galleys(&out)
+                .into_iter()
+                .zip(painted_lines(&out))
+                .find(|(g, l)| g.job.text == n && rects.contains(&l.1))
+                .map(|(g, _)| g.job.sections[0].format.color)
+        };
+        assert_eq!(left_num("1"), Some(DIAG_ERROR), "the line number of the error line");
+        assert_eq!(left_num("2"), Some(DIAG_WARNING));
+        assert!(!matches!(left_num("3"), Some(c) if c == DIAG_ERROR || c == DIAG_WARNING));
+        let (g, text) = painted_galleys(&out)
+            .into_iter()
+            .zip(painted_lines(&out))
+            .find(|(g, l)| g.job.text == "fn nope() {}" && l.1.right() < mid)
+            .map(|(g, l)| (g, l.1))
+            .expect("the first line in the left pane");
+        let paths = painted_paths(&out);
+        let err: Vec<_> = paths.iter().filter(|p| p.0 == DIAG_ERROR).collect();
+        assert_eq!(err.len(), 1, "one error squiggle: {paths:?}");
+        let r = err[0].1;
+        let (x3, x7) = (text.left() + g.rows[0].x_offset(3), text.left() + g.rows[0].x_offset(7));
+        assert!((r.left() - x3).abs() < 1.0 && (r.right() - x7).abs() < 1.0, "{r:?} vs {x3}..{x7}");
+        assert!(r.top() > text.top() + text.height() * 0.6 && r.bottom() <= text.bottom() + 1.0, "under the line: {r:?} {text:?}");
+        assert_eq!(paths.iter().filter(|p| p.0 == DIAG_WARNING).count(), 1);
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
