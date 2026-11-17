@@ -237,6 +237,10 @@ pub struct AlexCodeApp {
     comp_invoke: bool,
     comp_rect: Option<Rect>,
     comp_caret: Option<Rect>,
+    /// 矩形選取、是否正在拖曳，與上一幀算出的每一行選取範圍（行, 起欄, 迄欄）
+    box_sel: Option<BoxSel>,
+    box_dragging: bool,
+    box_cols: Vec<(usize, usize, usize)>,
 
     /// 等待使用者決定「儲存 / 不儲存 / 取消」的關閉要求
     pending_close: Option<PendingClose>,
@@ -855,6 +859,17 @@ struct CompletionMenu {
     selected: usize,
 }
 
+/// 矩形選取（Alt+拖曳）：起點與終點所在的行，以及畫面上的 x（相對於文字排版的左緣）。
+/// 每一行選取的欄是那一行在這兩個 x 之間的字元，所以 Tab、全形字也對得齊；內容一變就取消
+struct BoxSel {
+    tab: u64,
+    rev: u64,
+    a_line: usize,
+    b_line: usize,
+    a_x: f32,
+    b_x: f32,
+}
+
 /// 一個補全請求：要問的位置（UTF-16）與回覆來了之後選單的位置
 struct CompletionReq {
     path: String,
@@ -1104,6 +1119,9 @@ impl AlexCodeApp {
             comp_invoke: false,
             comp_rect: None,
             comp_caret: None,
+            box_sel: None,
+            box_dragging: false,
+            box_cols: Vec::new(),
             pending_close: None,
             allow_exit: false,
             editor_focused: false,
@@ -2694,6 +2712,10 @@ impl AlexCodeApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.commit_md_edit();
+            if self.box_sel.take().is_some() {
+                self.box_cols.clear();
+                self.focus_editor = true; // egui 收到 Esc 時會拿掉鍵盤焦點：留在編輯區
+            }
             if self.show_find_bar {
                 self.focus_editor = true; // 關閉尋找列後回到編輯區（游標停在目前的命中）
             }
@@ -4267,6 +4289,12 @@ impl AlexCodeApp {
         }
     }
 
+    /// 上一幀算出的矩形選取：每一行的（行, 起欄, 迄欄）
+    #[cfg(test)]
+    fn box_ranges(&self) -> Vec<(usize, usize, usize)> {
+        self.box_cols.clone()
+    }
+
     /// 上一幀固定在編輯區頂端的標頭行號（由外層到內層）
     #[cfg(test)]
     fn sticky_lines(&self) -> Vec<usize> {
@@ -4361,6 +4389,47 @@ impl AlexCodeApp {
             })
         };
         let mut caret: Option<Rect> = None;
+        // 矩形選取：Ctrl+C 複製區塊（每一行選到的部分以換行連接）；打字、按鍵、貼上、沒按 Alt 的點擊都取消它
+        // （之後照一般輸入處理）。內容變了、換了分頁、開了自動換行也取消
+        if let Some(b) = &self.box_sel {
+            let mut cancel = b.tab != self.tabs[idx].id || b.rev != self.tabs[idx].revision() || self.config.word_wrap;
+            let mut copy = false;
+            ui.input_mut(|i| {
+                i.events.retain(|e| match e {
+                    egui::Event::Copy => {
+                        copy = true;
+                        false
+                    }
+                    egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Cut | egui::Event::CompositionStart => {
+                        cancel = true;
+                        true
+                    }
+                    egui::Event::Key { pressed: true, modifiers, .. } if !modifiers.command => {
+                        cancel = true;
+                        true
+                    }
+                    egui::Event::PointerButton { pressed: true, modifiers, .. } if !modifiers.alt => {
+                        cancel = true;
+                        true
+                    }
+                    _ => true,
+                })
+            });
+            if copy && !self.box_cols.is_empty() {
+                let lines = &self.tabs[idx].lines;
+                let block: Vec<String> = self
+                    .box_cols
+                    .iter()
+                    .map(|&(l, a, b)| lines.get(l).map_or(String::new(), |s| s.chars().skip(a).take(b - a).collect()))
+                    .collect();
+                ui.ctx().copy_text(block.join("\n"));
+            }
+            if cancel {
+                self.box_sel = None;
+                self.box_cols.clear();
+                self.box_dragging = false;
+            }
+        }
         let find_current = if self.show_find_bar {
             self.find_current.filter(|(_, rev)| *rev == self.tabs[idx].revision()).map(|(r, _)| r)
         } else {
@@ -4476,6 +4545,7 @@ impl AlexCodeApp {
                         ui.allocate_exact_size(egui::vec2(gutter_w, min_h), Sense::click());
                     let line_bg_idx = ui.painter().add(Shape::Noop);
                     let gutter_idx = ui.painter().add(Shape::Noop);
+                    let box_idx = ui.painter().add(Shape::Noop);
 
                     let cursor_shift =
                         if pair_enabled && was_focused && !accepted { Self::auto_pair_events(ui, editor_id, &text) } else { 0 };
@@ -4536,6 +4606,59 @@ impl AlexCodeApp {
                         new_cursor = Some((r, col));
                     }
                     caret = output.cursor_range.map(|cr| galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2()));
+
+                    // 矩形選取：按住 Alt 時在文字上面多放一個接拖曳的區域（蓋過 TextEdit 自己的拖曳選取）。
+                    // 自動換行時畫面上的列不等於行，不提供
+                    if !wrap && (ui.input(|i| i.modifiers.alt) || self.box_dragging) {
+                        let resp = ui.interact(output.response.rect, editor_id.with("box-select"), Sense::drag());
+                        let line_at = |p: Pos2| galley.cursor_from_pos(p - gpos).rcursor.row;
+                        if resp.drag_started() {
+                            if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
+                                let line = line_at(p);
+                                let (tab, rev) = (self.tabs[idx].id, self.tabs[idx].revision());
+                                let x = p.x - gpos.x;
+                                self.box_sel = Some(BoxSel { tab, rev, a_line: line, b_line: line, a_x: x, b_x: x });
+                                self.box_dragging = true;
+                                ui.memory_mut(|m| m.request_focus(editor_id));
+                            }
+                        }
+                        if self.box_dragging {
+                            if let (Some(b), Some(p)) = (self.box_sel.as_mut(), ui.input(|i| i.pointer.interact_pos())) {
+                                b.b_line = line_at(p);
+                                b.b_x = p.x - gpos.x;
+                                // 游標跟著拖曳的終點（TextEdit 自己的選取收成一個點）
+                                let cur = galley.cursor_from_pos(p - gpos);
+                                let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
+                                st.cursor.set_char_range(Some(CCursorRange::one(cur.ccursor)));
+                                st.store(ui.ctx(), editor_id);
+                                new_cursor = Some((cur.rcursor.row, cur.rcursor.column));
+                            }
+                            if !ui.input(|i| i.pointer.primary_down()) {
+                                self.box_dragging = false;
+                            }
+                        }
+                    }
+                    // 每一行選取的欄：那一行落在兩個 x 之間的字元（短的行收在行尾）；底色畫在文字下面
+                    self.box_cols.clear();
+                    if let Some(b) = self.box_sel.as_ref().filter(|_| !wrap) {
+                        let (l0, l1) = (b.a_line.min(b.b_line), b.a_line.max(b.b_line));
+                        let (x0, x1) = (b.a_x.min(b.b_x), b.a_x.max(b.b_x));
+                        let fill = ui.visuals().selection.bg_fill;
+                        let mut shapes = Vec::new();
+                        for (l, row) in galley.rows.iter().enumerate().take(l1 + 1).skip(l0) {
+                            let y = row.rect.center().y;
+                            let ca = galley.cursor_from_pos(egui::vec2(x0, y)).rcursor.column;
+                            let cb = galley.cursor_from_pos(egui::vec2(x1, y)).rcursor.column;
+                            self.box_cols.push((l, ca, cb));
+                            let (xa, xb) = (row.x_offset(ca), row.x_offset(cb));
+                            let r = Rect::from_min_max(
+                                gpos + egui::vec2(xa, row.rect.top()),
+                                gpos + egui::vec2(xb.max(xa + 2.0), row.rect.top() + row_h),
+                            );
+                            shapes.push(Shape::rect_filled(r, 0.0, fill));
+                        }
+                        ui.painter().set(box_idx, Shape::Vec(shapes));
+                    }
                     // 游標移到固定標頭底下（例如按方向鍵往上）時多捲一點，讓游標所在行露出來
                     if let Some(cr) = output.cursor_range.filter(|_| sticky_h > 0.0 && !scroll_to_cursor) {
                         let r = galley.pos_from_cursor(&cr.primary).translate(gpos.to_vec2());
@@ -9711,6 +9834,102 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         frame(&mut app, &ctx, vec![]);
         assert_eq!(asked.lock().unwrap().len(), n);
+    }
+
+    #[test]
+    fn alt_drag_selects_a_rectangle_and_copies_it() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "abcdefgh\nab\nABCDEFGH\nzzzz\n");
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
+        let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
+        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        let sel_fill = ctx.style().visuals.selection.bg_fill;
+        let sel_rects = |out: &egui::FullOutput| {
+            fn walk(shape: &Shape, fill: Color32, found: &mut Vec<Rect>) {
+                match shape {
+                    Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, found)),
+                    Shape::Rect(r) if r.fill == fill => found.push(r.rect),
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            out.shapes.iter().for_each(|s| walk(&s.shape, sel_fill, &mut found));
+            found
+        };
+        let alt = Modifiers::ALT;
+        let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2, m: Modifiers| {
+            let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: m };
+            for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
+                frame_with(app, &ctx, |i| {
+                    i.modifiers = m;
+                    i.events = events;
+                });
+            }
+            frame_with(app, &ctx, |i| i.modifiers = m)
+        };
+
+        // 按住 Alt 從第 1 行第 2 欄拖到第 3 行第 5 欄：每一行選第 2–5 欄，短的第 2 行只到行尾（零寬）
+        let out = drag(&mut app, at(0, 2), at(2, 5), alt);
+        assert_eq!(app.box_ranges(), vec![(0, 2, 5), (1, 2, 2), (2, 2, 5)]);
+        let rects = sel_rects(&out);
+        assert_eq!(rects.len(), 3, "one highlight per line: {rects:?}");
+        let x2 = text.left() + g.rows[0].x_offset(2);
+        let x5 = text.left() + g.rows[0].x_offset(5);
+        assert!(rects.iter().all(|r| (r.left() - x2).abs() < 1.0), "{rects:?} start at {x2}");
+        assert!((rects[0].right() - x5).abs() < 1.0 && (rects[2].right() - x5).abs() < 1.0);
+        assert!(rects[1].width() <= 2.5, "the short line gets a thin caret: {:?}", rects[1]);
+        assert_eq!(app.tabs[0].edit_text(), "abcdefgh\nab\nABCDEFGH\nzzzz\n", "selecting does not edit");
+        assert_eq!(cursor(&app), (2, 5), "the cursor follows the drag");
+        assert!(app.editor_focused);
+
+        // 反方向拖（右下往左上）得到同樣的區塊
+        let out = drag(&mut app, at(2, 5), at(0, 2), alt);
+        assert_eq!(app.box_ranges(), vec![(0, 2, 5), (1, 2, 2), (2, 2, 5)]);
+        assert_eq!(sel_rects(&out).len(), 3);
+
+        // Ctrl+C 複製區塊：每一行選到的部分以換行連接
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, "cde\n\nCDE");
+        assert_eq!(app.box_ranges().len(), 3, "copying keeps the selection");
+
+        // 一般點擊（沒按 Alt）取消矩形選取
+        click(&mut app, &ctx, at(3, 1));
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(app.box_ranges().is_empty());
+        assert!(sel_rects(&out).is_empty());
+        assert_eq!(cursor(&app), (3, 1));
+
+        // 沒按 Alt 的拖曳仍是一般選取
+        drag(&mut app, at(0, 2), at(2, 5), Modifiers::NONE);
+        assert!(app.box_ranges().is_empty());
+        let out = frame(&mut app, &ctx, vec![Event::Copy]);
+        assert_eq!(out.platform_output.copied_text, "cdefgh\nab\nABCDE");
+
+        // 打字取消矩形選取（多行同時輸入還沒有做），字打在游標的位置
+        drag(&mut app, at(0, 2), at(2, 5), alt);
+        assert_eq!(app.box_ranges().len(), 3);
+        frame(&mut app, &ctx, vec![Event::Text("Z".into())]);
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(app.box_ranges().is_empty());
+        assert!(sel_rects(&out).is_empty());
+        assert_eq!(app.tabs[0].lines[2], "ABCDEZFGH");
+        // Esc 也取消
+        drag(&mut app, at(0, 2), at(2, 5), alt);
+        frame(&mut app, &ctx, vec![key(Key::Escape, Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![]);
+        assert!(app.box_ranges().is_empty());
+
+        // 自動換行時不提供（Alt+拖曳照一般選取處理）
+        app.config.word_wrap = true;
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
+        let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
+        let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
+        drag(&mut app, at(0, 2), at(2, 5), alt);
+        assert!(app.box_ranges().is_empty());
     }
 
     /// 這一幀畫出的所有文字排版（含各段的顏色）
