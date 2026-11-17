@@ -1086,7 +1086,7 @@ pub fn render_typora_document(
                                 let mut layouter = move |ui: &egui::Ui, s: &dyn egui::TextBuffer, wrap_w: f32| {
                                     let mut job = highlight(s.as_str(), Lang::Markdown, &pal_c, font_c.clone(), "");
                                     job.wrap.max_width = wrap_w;
-                                    ui.fonts(|f| f.layout_job(job))
+                                    ui.fonts_mut(|f| f.layout_job(job))
                                 };
 
                                 let rows = state.editing_text.lines().count().max(2);
@@ -1405,7 +1405,7 @@ fn render_single_block(
                         FontId::monospace((base_size - 0.5).max(11.0)),
                         &find.find_all(code),
                     );
-                    let galley = ui.fonts(|f| f.layout_job(job));
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
                     egui::ScrollArea::horizontal()
                         .id_salt(("md_code_block", block.start_line))
                         .show(ui, |ui| {

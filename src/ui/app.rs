@@ -280,6 +280,8 @@ pub struct AlexCodeApp {
     /// 編輯區排版結果（含語法高亮）快取：鍵為全文 / 語言 / 主題 / 字型 / 搜尋字串的雜湊。
     /// 一併記住排版當時的字型圖集：egui 重建圖集（縮放改變、圖集快滿）後舊排版的字形座標即失效。
     highlight_cache: Option<(u64, Arc<egui::Galley>, FontAtlas)>,
+    /// 上一次排的探測文字（`check_font_atlas`：拿回來的不是同一份表示字型圖集重建過）
+    atlas_probe: Option<Arc<egui::Galley>>,
     /// 尋找列命中位置快取
     find_cache: ((u64, u64, String), Vec<(usize, usize)>),
     /// 大檔案裡尋找列的命中數等內容停止變動才重算：(最後一次看到的 (分頁 id, 內容版本), 發現變動的時間)
@@ -442,7 +444,9 @@ enum TreeAction {
     CopyPath(PathBuf),
 }
 
-type FontAtlas = Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>;
+/// 排版快取記下的字型狀態：(pixels_per_point, 字型圖集寬度)，變了舊排版就不能用。
+/// egui 0.33 起拿不到圖集本身（之前用 `Arc` 是不是同一個來判斷）；圖集快滿時的重建另由 `check_font_atlas` 處理
+type FontAtlas = (f32, usize);
 
 struct PendingClose {
     /// 要關閉的分頁 id
@@ -579,7 +583,7 @@ fn char_byte(line: &str, col: usize) -> usize {
 }
 
 /// 前 `col` 個字元排出來的寬度（像素）。`width` 是每個字元的寬度；全是 ASCII 又沒有 Tab 時直接以 `cw` 計算
-fn prefix_x(line: &str, col: usize, cw: f32, width: impl Fn(char) -> f32) -> f32 {
+fn prefix_x(line: &str, col: usize, cw: f32, width: impl FnMut(char) -> f32) -> f32 {
     if line.is_ascii() && !line.contains('\t') {
         return col.min(line.len()) as f32 * cw;
     }
@@ -588,7 +592,7 @@ fn prefix_x(line: &str, col: usize, cw: f32, width: impl Fn(char) -> f32) -> f32
 
 /// 不換行時的一行很長的文字，只排版水平範圍 `x0..x1`（相對於行首的像素）涵蓋到的字元：
 /// 回傳 (起始字元索引, 結束字元索引, 起始字元左緣的 x)。`width` / `cw` 同 `prefix_x`
-fn line_window(line: &str, x0: f32, x1: f32, cw: f32, width: impl Fn(char) -> f32) -> (usize, usize, f32) {
+fn line_window(line: &str, x0: f32, x1: f32, cw: f32, mut width: impl FnMut(char) -> f32) -> (usize, usize, f32) {
     if line.is_ascii() && !line.contains('\t') {
         let n = line.len();
         let a = ((x0 / cw).floor().max(0.0) as usize).min(n);
@@ -614,7 +618,7 @@ fn line_window(line: &str, x0: f32, x1: f32, cw: f32, width: impl Fn(char) -> f3
 
 /// 自動換行時把一行很長的文字切成寬度不超過 `max_w` 的列（不看字的邊界，排滿就換列）：
 /// 每一列從第幾個字元、第幾個位元組開始。`width` / `cw` 同 `prefix_x`；一列至少放一個字元
-fn wrap_rows(line: &str, max_w: f32, cw: f32, width: impl Fn(char) -> f32) -> Vec<(usize, usize)> {
+fn wrap_rows(line: &str, max_w: f32, cw: f32, mut width: impl FnMut(char) -> f32) -> Vec<(usize, usize)> {
     if line.is_ascii() && !line.contains('\t') {
         let k = ((max_w / cw).floor() as usize).max(1);
         return (0..line.len().max(1)).step_by(k).map(|i| (i, i)).collect();
@@ -647,11 +651,11 @@ struct LongRows {
 type RowStarts = Vec<(usize, usize)>;
 
 impl LongRows {
-    fn build(key: (u64, u64, u32), lines: &[String], max_w: f32, cw: f32, width: impl Fn(char) -> f32) -> Self {
+    fn build(key: (u64, u64, u32), lines: &[String], max_w: f32, cw: f32, mut width: impl FnMut(char) -> f32) -> Self {
         let mut out = Vec::new();
         let mut extra = 0;
         for (i, l) in lines.iter().enumerate().filter(|(_, l)| l.len() > LARGE_VIEW_MAX_COLS) {
-            let rows = wrap_rows(l, max_w, cw, &width);
+            let rows = wrap_rows(l, max_w, cw, &mut width);
             let n = rows.len();
             out.push((i, extra, rows));
             extra += n - 1;
@@ -1269,6 +1273,7 @@ impl AlexCodeApp {
             editor_was_focused: false,
             text_cache: ((0, 0), String::new()),
             highlight_cache: None,
+            atlas_probe: None,
             find_cache: ((0, 0, String::new()), Vec::new()),
             find_seen: ((0, 0), std::time::Instant::now()),
             filter_cache: (None, Vec::new()),
@@ -4346,10 +4351,9 @@ impl AlexCodeApp {
                     }
                     // 終端機的大小跟著輸出區：可見的寬高能放幾欄 × 幾列，變了就改 `terminal` 並通知 shell
                     let font = FontId::monospace(13.0);
-                    let ppp = ui.ctx().pixels_per_point();
-                    // 每個字元往右移的距離是字寬取整到像素（egui 排版時對齊像素）
-                    let adv = (ui.fonts(|f| f.glyph_width(&font, '0')) * ppp).round().max(1.0) / ppp;
-                    let row_h = ui.fonts(|f| f.row_height(&font));
+                    // 每個字元往右移的距離就是字寬（egui 0.33 起以次像素累加，不再對齊到像素）
+                    let adv = ui.fonts_mut(|f| f.glyph_width(&font, '0')).max(1.0);
+                    let row_h = ui.fonts_mut(|f| f.row_height(&font));
                     let pitch = row_h + ui.spacing().item_spacing.y;
                     let avail = egui::vec2(ui.available_width() - ui.spacing().scroll.bar_width - 8.0, ui.available_height() - input_h);
                     let size = (
@@ -4375,7 +4379,7 @@ impl AlexCodeApp {
                             let last = (0..t.rows()).rev().find(|&r| !t.line_text(r).trim().is_empty()).map_or(0, |r| r + 1);
                             let (cy, cx) = (t.cursor_row(), t.cursor_col());
                             for r in 0..last.max(cy + 1).min(t.rows()) {
-                                let galley = ui.fonts(|f| f.layout_job(terminal_row_job(t.row_cells(r), &font, c.fg)));
+                                let galley = ui.fonts_mut(|f| f.layout_job(terminal_row_job(t.row_cells(r), &font, c.fg)));
                                 let resp = ui.label(galley.clone());
                                 // 游標：shell 在跑時畫在游標所在的格子（有焦點時是實心方塊，沒有時是外框）
                                 if r == cy && alive {
@@ -4830,11 +4834,11 @@ impl AlexCodeApp {
         let lang = self.tab_lang(idx);
         let font = FontId::monospace(self.config.font_size);
         // 行高取編輯區排版實際的行距（排版會把每一列對齊到像素，和 row_height 差一點點，幾百行後就差很多）
-        let row_h = ui.fonts(|f| {
+        let row_h = ui.fonts_mut(|f| {
             let g = f.layout_no_wrap("0\n0".into(), font.clone(), Color32::WHITE);
             g.rows.get(1).map_or_else(|| f.row_height(&font), |r| r.rect().top())
         });
-        let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
+        let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
         let digits = buf.lines.len().to_string().len().max(3);
         let gutter_w = digits as f32 * char_w + 30.0;
         ui.painter().rect_filled(ui.max_rect(), 0.0, c.panel);
@@ -4865,7 +4869,7 @@ impl AlexCodeApp {
                     let line = &buf.lines[ln];
                     let shown = line.char_indices().nth(4000).map_or(line.as_str(), |(i, _)| &line[..i]);
                     let hits = finder.as_ref().map(|f| f.find_all(shown)).unwrap_or_default();
-                    let g = ui.fonts(|f| f.layout_job(highlight_ranges(shown, lang, pal, font.clone(), &hits)));
+                    let g = ui.fonts_mut(|f| f.layout_job(highlight_ranges(shown, lang, pal, font.clone(), &hits)));
                     let w = (gutter_w + 10.0 + g.size().x + 20.0).max(ui.available_width());
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, row_h), Sense::hover());
                     ui.painter().text(
@@ -5362,8 +5366,8 @@ impl AlexCodeApp {
             None
         };
 
-        let row_h = ui.fonts(|f| f.row_height(&font));
-        let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
+        let row_h = ui.fonts_mut(|f| f.row_height(&font));
+        let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
         let digits = line_count.to_string().len().max(3);
         let gutter_w = digits as f32 * char_w + 30.0;
 
@@ -5393,9 +5397,10 @@ impl AlexCodeApp {
             fopts.hash(&mut h);
             max_width.to_bits().hash(&mut h);
             let key = h.finish();
-            let atlas = ui.fonts(|f| f.texture_atlas());
+            let ppp = ui.ctx().pixels_per_point();
+            let atlas: FontAtlas = ui.fonts_mut(|f| (ppp, f.font_image_size()[0]));
             match &hl_cache {
-                Some((k, galley, a)) if *k == key && Arc::ptr_eq(a, &atlas) => galley.clone(),
+                Some((k, galley, a)) if *k == key && *a == atlas => galley.clone(),
                 _ => {
                     let l = if s.len() > HIGHLIGHT_MAX_BYTES { Lang::Plain } else { lang };
                     let hits = find_all(s, &find, &fopts).unwrap_or_default();
@@ -5403,7 +5408,7 @@ impl AlexCodeApp {
                     if wrap {
                         job.wrap.max_width = max_width;
                     }
-                    let galley = ui.fonts(|f| f.layout_job(job));
+                    let galley = ui.fonts_mut(|f| f.layout_job(job));
                     hl_cache = Some((key, galley.clone(), atlas));
                     galley
                 }
@@ -5710,7 +5715,7 @@ impl AlexCodeApp {
                         ),
                     ];
                     let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
-                    ui.fonts(|f| {
+                    ui.fonts_mut(|f| {
                         for (i, row) in galley.rows.iter().enumerate() {
                             let y = gpos.y + row.rect().top();
                             if y + row_h < clip.top() || y > clip.bottom() {
@@ -5924,7 +5929,7 @@ impl AlexCodeApp {
                 let num = painter.layout_no_wrap((sym.line + 1).to_string(), num_font.clone(), c.faint);
                 let num_pos = Pos2::new(view.left() + gutter_w - 10.0 - num.size().x, row.top() + (row_h - num.size().y) * 0.5);
                 painter.galley(num_pos, num, c.faint);
-                let galley = ui.fonts(|f| f.layout_job(highlight_ranges(line_text, hl_lang, pal, font.clone(), &[])));
+                let galley = ui.fonts_mut(|f| f.layout_job(highlight_ranges(line_text, hl_lang, pal, font.clone(), &[])));
                 let text_clip = Rect::from_min_max(Pos2::new(view.left() + gutter_w, row.top()), row.max);
                 ui.painter_at(text_clip.intersect(view)).galley(
                     Pos2::new(view.left() + gutter_w + 10.0 - offset.x, row.top()),
@@ -5986,7 +5991,7 @@ impl AlexCodeApp {
         let font = FontId::monospace(self.config.font_size);
         let needle = self.filter_engine.positive_keywords().into_iter().next().unwrap_or_default();
         let digits = buf.lines.len().to_string().len().max(3);
-        let row_h = ui.fonts(|f| f.row_height(&font));
+        let row_h = ui.fonts_mut(|f| f.row_height(&font));
         let mut jump: Option<usize> = None;
 
         egui::ScrollArea::both().auto_shrink([false, false]).show_rows(ui, row_h, hits.len(), |ui, range| {
@@ -6006,7 +6011,7 @@ impl AlexCodeApp {
                     c.accent2,
                 );
                 let job = highlight(line, lang, pal, font.clone(), &needle);
-                let g = ui.fonts(|f| f.layout_job(job));
+                let g = ui.fonts_mut(|f| f.layout_job(job));
                 ui.painter().galley(Pos2::new(rect.left() + gw + 10.0, rect.top()), g, c.fg);
                 if resp.double_clicked() {
                     jump = Some(*ln);
@@ -6549,8 +6554,8 @@ impl AlexCodeApp {
                     cols[1].label(RichText::new("目前內容（含尚未存檔的修改）").size(11.5).color(c.fg_dim2));
                 });
 
-                let row_h = ui.fonts(|f| f.row_height(&font));
-                let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
+                let row_h = ui.fonts_mut(|f| f.row_height(&font));
+                let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
                 let num_w = head.len().max(lines.len()).to_string().len().max(3) as f32 * char_w + 16.0;
                 ui.spacing_mut().item_spacing.y = 0.0; // 每一列緊貼：捲動位置才能用「列號 × 列高」計算
                 let mut area = egui::ScrollArea::vertical().id_salt("diff-scroll").auto_shrink([false, false]);
@@ -6853,7 +6858,7 @@ impl AlexCodeApp {
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::ZERO)
             .show(ctx, |ui| {
-                let r = ctx.screen_rect();
+                let r = ctx.content_rect();
                 ui.allocate_response(r.size(), Sense::click());
                 ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(140));
             });
@@ -7022,13 +7027,11 @@ impl AlexCodeApp {
         let view_id = egui::Id::new(("alexcode-large-view", tab_id));
         let font = FontId::monospace(self.config.font_size);
         let num_font = FontId::monospace((self.config.font_size - 1.0).max(8.0));
-        let row_h = ui.fonts(|f| f.row_height(&font));
-        let char_w = ui.fonts(|f| f.glyph_width(&font, '0'));
-        // 排版時每個字元往右移的距離：egui 把每個字形的位置對齊到像素，所以是字寬取整到像素
-        //（例如 7.70 → 8.0），不換行時的總寬度與只排一段的長行的位置都要用它算
-        let ppp = ui.ctx().pixels_per_point();
-        let round_px = move |w: f32| (w * ppp).round() / ppp;
-        let adv = round_px(char_w);
+        let row_h = ui.fonts_mut(|f| f.row_height(&font));
+        let char_w = ui.fonts_mut(|f| f.glyph_width(&font, '0'));
+        // 排版時每個字元往右移的距離：egui 0.33 起以次像素累加字寬（0.32 以前每個字都對齊到像素，
+        // 例如 7.70 → 8.0），所以就是字寬本身；不換行時的總寬度與只排一段的長行的位置都要用它算
+        let adv = char_w;
         // 一般編輯區為其他分頁留下的排版結果已經用不到了
         self.highlight_cache = None;
         self.sticky_rows.clear();
@@ -7086,13 +7089,13 @@ impl AlexCodeApp {
                 let lay = |line: usize| {
                     let mut job = highlight_ranges(&buf.lines[line], Lang::Plain, pal, font.clone(), &[]);
                     job.wrap.max_width = wrap_w;
-                    ui.fonts(|f| f.layout_job(job))
+                    ui.fonts_mut(|f| f.layout_job(job))
                 };
                 // 長行的第 r 列（不再折行）
                 let piece = |line: usize, rows: &[(usize, usize)], r: usize| {
                     let l = &buf.lines[line];
                     let text = &l[rows[r].1..rows.get(r + 1).map_or(l.len(), |n| n.1)];
-                    ui.fonts(|f| f.layout_job(highlight_ranges(text, Lang::Plain, pal, font.clone(), &[])))
+                    ui.fonts_mut(|f| f.layout_job(highlight_ranges(text, Lang::Plain, pal, font.clone(), &[])))
                 };
                 // 目前位置的 x、在這一行的第幾列、這一行共幾列
                 let (x, row, n) = match long.rows(p.line) {
@@ -7214,8 +7217,8 @@ impl AlexCodeApp {
                                 // 長行切好的列：前一個事件可能剛改了內容，版本不同就重切
                                 let rows_key = (tab_id, buf.revision(), w.to_bits());
                                 if self.large_rows.key != rows_key {
-                                    self.large_rows = ui.fonts(|f| {
-                                        LongRows::build(rows_key, &buf.lines, w, adv, |ch| round_px(f.glyph_width(&font, ch)))
+                                    self.large_rows = ui.fonts_mut(|f| {
+                                        LongRows::build(rows_key, &buf.lines, w, adv, |ch| f.glyph_width(&font, ch))
                                     });
                                 }
                                 head = row_step(buf, &self.large_rows, head, *key == Key::ArrowDown, w);
@@ -7384,7 +7387,7 @@ impl AlexCodeApp {
                     let key = (tab_id, buf.revision(), w.to_bits());
                     if self.large_rows.key != key {
                         self.large_rows =
-                            ui.fonts(|f| LongRows::build(key, &buf.lines, w, adv, |ch| round_px(f.glyph_width(&font, ch))));
+                            ui.fonts_mut(|f| LongRows::build(key, &buf.lines, w, adv, |ch| f.glyph_width(&font, ch)));
                     }
                 }
                 // （沒有開自動換行時用不到，裡面可能是舊的）
@@ -7411,7 +7414,7 @@ impl AlexCodeApp {
                     if let Some(w) = wrap_w {
                         job.wrap.max_width = w;
                     }
-                    ui.fonts(|f| f.layout_job(job))
+                    ui.fonts_mut(|f| f.layout_job(job))
                 };
                 // 不換行時很長的行只排版畫面上看得到的那一段（左右各多留一點）：要涵蓋的水平範圍，相對於行首
                 let margin = char_w * 64.0;
@@ -7422,7 +7425,7 @@ impl AlexCodeApp {
                 let line_galley = |ui: &egui::Ui, line: usize, hits: bool| -> (Arc<egui::Galley>, usize, f32) {
                     let full = buf.lines.get(line).map_or("", |s| s.as_str());
                     let (shown, start, end, x0) = if !wrap && full.len() > LARGE_VIEW_MAX_COLS {
-                        let (a, b, x0) = ui.fonts(|f| line_window(full, win.0, win.1, adv, |ch| round_px(f.glyph_width(&font, ch))));
+                        let (a, b, x0) = ui.fonts_mut(|f| line_window(full, win.0, win.1, adv, |ch| f.glyph_width(&font, ch)));
                         (&full[char_byte(full, a)..char_byte(full, b)], a, b, x0)
                     } else {
                         (full, 0, usize::MAX, 0.0)
@@ -7451,7 +7454,7 @@ impl AlexCodeApp {
                         }
                         _ => highlight_ranges(text, Lang::Plain, pal, font.clone(), &[]),
                     };
-                    (ui.fonts(|f| f.layout_job(job)), start)
+                    (ui.fonts_mut(|f| f.layout_job(job)), start)
                 };
                 let x_of = |galley: &egui::Galley, col: usize| galley.pos_from_cursor(cc(col)).left();
 
@@ -7741,7 +7744,7 @@ impl AlexCodeApp {
                         text_x + x0 + x_of(&g, caret_col - start)
                     } else {
                         let full = &buf.lines[sel.head.line];
-                        text_x + ui.fonts(|f| prefix_x(full, sel.head.col, adv, |ch| round_px(f.glyph_width(&font, ch))))
+                        text_x + ui.fonts_mut(|f| prefix_x(full, sel.head.col, adv, |ch| f.glyph_width(&font, ch)))
                     };
                     let r = Rect::from_min_size(Pos2::new(x, y_of(sel.head.line)), egui::vec2(char_w, row_h));
                     if scroll_to_cursor {
@@ -8020,6 +8023,25 @@ impl AlexCodeApp {
 impl AlexCodeApp {
     /// 一幀的完整 UI（與 eframe 無關，測試可用無視窗的 `egui::Context` 直接驅動）
     pub fn ui_frame(&mut self, ctx: &egui::Context) {
+        self.check_font_atlas(ctx);
+        self.ui_frame_inner(ctx);
+        self.check_font_atlas(ctx);
+    }
+
+    /// egui 快填滿字型圖集時會在下一幀開始時重建它，之前排好的文字（編輯區的排版快取）字形座標就失效了。
+    /// egui 0.33 起拿不到圖集本身，改用 egui 自己的排版快取判斷：重建圖集時它會整個清空，
+    /// 而上一幀用過的排版平常會留到這一幀。所以每次都排同一小段探測文字，拿回來的不是上一次那一份，
+    /// 就表示圖集重建過（或兩次之間 egui 清過一次以上的快取，多排一次而已）：丟掉排版快取。
+    /// 在每一幀的開頭與結尾各看一次（中間的獨立視窗也可能觸發重建）
+    fn check_font_atlas(&mut self, ctx: &egui::Context) {
+        let probe = ctx.fonts_mut(|f| f.layout_no_wrap("AlexCode".into(), FontId::monospace(9.0), Color32::WHITE));
+        if self.atlas_probe.as_ref().is_some_and(|p| !Arc::ptr_eq(p, &probe)) {
+            self.highlight_cache = None;
+        }
+        self.atlas_probe = Some(probe);
+    }
+
+    fn ui_frame_inner(&mut self, ctx: &egui::Context) {
         let pal = self.theme_mgr.current_palette().clone();
         let colors = Colors::from_palette(&pal, self.theme_mgr.is_neon_hud());
 
@@ -8310,6 +8332,29 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         frame(&mut app, &ctx, vec![]);
         assert!(!Arc::ptr_eq(&before, &app.highlight_cache.as_ref().unwrap().1));
+    }
+
+    #[test]
+    fn layout_cache_is_dropped_when_the_font_atlas_fills_up() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "fn main() {}");
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        let before = app.highlight_cache.as_ref().unwrap().1.clone();
+        // 用很大的字把字型圖集填到八成以上：下一幀開始時 egui 會重建圖集，舊排版的字形座標就失效了
+        let text: String = ('!'..='~').collect();
+        let mut size = 120.0;
+        while ctx.fonts_mut(|f| f.font_atlas_fill_ratio()) <= 0.8 && size < 400.0 {
+            ctx.fonts_mut(|f| f.layout_no_wrap(text.clone(), FontId::proportional(size), Color32::WHITE));
+            size += 1.0;
+        }
+        assert!(ctx.fonts_mut(|f| f.font_atlas_fill_ratio()) > 0.8, "the atlas is almost full");
+        frame(&mut app, &ctx, vec![]);
+        assert!(ctx.fonts_mut(|f| f.font_atlas_fill_ratio()) < 0.5, "egui rebuilt the atlas");
+        assert!(!Arc::ptr_eq(&before, &app.highlight_cache.as_ref().unwrap().1), "laid out again on the new atlas");
+        let after = app.highlight_cache.as_ref().unwrap().1.clone();
+        frame(&mut app, &ctx, vec![]);
+        assert!(Arc::ptr_eq(&after, &app.highlight_cache.as_ref().unwrap().1), "idle frames reuse the new layout");
     }
 
     #[test]
@@ -9272,7 +9317,7 @@ mod tests {
         // 狀態列顯示的文字（短 SHA、作者、日期、「·」、摘要）每個字元在內建字型中都有字形，不會畫成方框。
         // 中文訊息用的是系統的中文字型（CI 的 Linux / macOS 機器上沒有），不在這裡檢查。
         assert!(!text.contains('⎇'), "{text}");
-        let has = ctx.fonts(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), &text));
+        let has = ctx.fonts_mut(|fonts| fonts.has_glyphs(&FontId::proportional(12.0), &text));
         assert!(has, "every character of `{text}` must be drawable");
     }
 
@@ -9558,7 +9603,7 @@ mod tests {
     }
 
     fn row_height(app: &AlexCodeApp, ctx: &egui::Context) -> f32 {
-        ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)))
+        ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)))
     }
 
     /// 大檔案檢視中某一行目前在畫面上的 y 座標（行的上緣）
@@ -9708,7 +9753,7 @@ mod tests {
         let has = |out: &egui::FullOutput, text: &str| painted_texts(out).iter().any(|t| t == text);
         let caret_x = |out: &egui::FullOutput| out.platform_output.ime.expect("IME output").cursor_rect.left();
         let preedit_w =
-            ctx.fonts(|f| f.layout_no_wrap("zhong".into(), FontId::monospace(app.config.font_size), Color32::WHITE).size().x);
+            ctx.fonts_mut(|f| f.layout_no_wrap("zhong".into(), FontId::monospace(app.config.font_size), Color32::WHITE).size().x);
 
         frame(&mut app, &ctx, vec![key(Key::ArrowRight, Modifiers::COMMAND)]);
         assert_eq!(cursor(&app), (0, 4));
@@ -9725,8 +9770,17 @@ mod tests {
         // 文件與游標位置不變；游標（輸入法候選字視窗跟著它）畫在組字中的文字後面
         assert_eq!((line0(&app).as_str(), cursor(&app)), ("line 00000 some text here", (0, 4)));
         assert!(!app.tabs[0].modified);
+        // egui 0.33 起字形的位置是累加字寬後取整到像素，所以游標移動的距離與組字文字的寬度最多差一個像素；
+        // 精確的值是 egui 排出來那一行裡，組字文字後面那個字與原本游標那個字的位置差
+        let x_at = |s: &str, col: usize| {
+            ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), FontId::monospace(app.config.font_size), Color32::WHITE))
+                .pos_from_cursor(CCursor::new(col))
+                .left()
+        };
+        let expect = x_at("linezhong 00000 some text here", 9) - x_at("line 00000 some text here", 4);
         let moved = caret_x(&out) - caret0;
-        assert!((moved - preedit_w).abs() < 0.5, "caret moved {moved}, the preedit is {preedit_w} wide");
+        assert!((moved - expect).abs() < 0.01, "caret moved {moved}, the composed line puts it {expect} further");
+        assert!((moved - preedit_w).abs() < 1.5, "caret moved {moved}, the preedit is {preedit_w} wide");
         // 之後沒有事件的幀也維持這個畫面
         let out = frame(&mut app, &ctx, vec![]);
         assert!(has(&out, "linezhong 00000 some text here"));
@@ -10071,7 +10125,7 @@ mod tests {
         let mut app = large_app_with(&ctx, &format!("{long}\n{rest}"));
         assert!(!app.probe.contains_key("large-edit"), "nothing is cut, so there is no switch button");
         let font = FontId::monospace(app.config.font_size);
-        let cw = ctx.fonts(|f| f.glyph_width(&font, '0'));
+        let cw = ctx.fonts_mut(|f| f.glyph_width(&font, '0'));
         let line0 = |out: &egui::FullOutput, probe: &str| {
             painted_lines(out).into_iter().find(|l| l.0.contains(probe)).unwrap_or_else(|| panic!("no painted text with {probe}"))
         };
@@ -10088,17 +10142,23 @@ mod tests {
         assert!(long.ends_with(&text) && text.chars().count() < 2000, "the end of the line is laid out ({} chars)", text.chars().count());
         let start = total - text.chars().count();
         // egui 排版這一行的開頭（到這一段之前）有多寬：這一段就該從那裡開始
-        let width_of = |ctx: &egui::Context, s: &str| ctx.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE)).size().x;
+        let width_of = |ctx: &egui::Context, s: &str| ctx.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE)).size().x;
         let line_left = app.probe["large-text"].left();
-        let w = width_of(&ctx, &long[..start]);
+        // egui 0.33 起以次像素累加字寬：這一行都是 ASCII（等寬字型），每個字往右移 cw。
+        // 整行交給 egui 排版時，f32 在 48 萬像素附近每加一次就差一點，累積到幾百像素，所以這裡用 f64 算該在的位置；
+        // 另外以 egui 排版前 2000 個字（誤差可以忽略）確認每個字往右移的距離就是 cw
+        let g = ctx.fonts_mut(|f| f.layout_no_wrap(long[..2000].to_string(), font.clone(), Color32::WHITE));
+        let x1999 = g.pos_from_cursor(CCursor::new(1999)).left();
+        assert!((x1999 - 1999.0 * cw).abs() < 1.0, "egui moves each character by cw: {x1999} vs {}", 1999.0 * cw);
+        let w = (start as f64 * cw as f64) as f32;
         assert!((r.left() - (line_left + w)).abs() < 1.0, "the piece sits where the whole line would put it: {} vs {w}", r.left() - line_left);
         let (clip, caret) = (app.probe["large-clip"], app.probe["large-caret"]);
         assert!(caret.left() >= clip.left() && caret.right() <= clip.right(), "the caret at the end is on screen: {caret:?} in {clip:?}");
         assert!((caret.left() - r.right()).abs() < 1.0);
 
         // 點在畫面中間：游標落在點到的字元，輸入的字寫進那個位置
-        //（這一段的左邊多排了一點，在畫面外；每個字元往右移的距離是排版兩個字與一個字的寬度差）
-        let adv = width_of(&ctx, "00") - width_of(&ctx, "0");
+        //（這一段的左邊多排了一點，在畫面外；每個字元往右移的距離是字寬 cw）
+        let adv = cw;
         let k = ((clip.center().x - r.left()) / adv).floor() as usize;
         click(&mut app, &ctx, Pos2::new(r.left() + (k as f32 + 0.3) * adv, r.center().y));
         assert_eq!(cursor(&app), (0, start + k));
@@ -10152,7 +10212,7 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         let row_h = row_height(&app, &ctx);
         let font = FontId::monospace(app.config.font_size);
-        let width_of = |s: &str| ctx.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE)).size().x;
+        let width_of = |s: &str| ctx.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE)).size().x;
         let adv = width_of("00") - width_of("0");
         // 畫面上屬於那一長行的各列（由上到下）
         let pieces = |out: &egui::FullOutput| {
@@ -10433,7 +10493,7 @@ mod tests {
 
         let out = frame(&mut app, &ctx, vec![]);
         let font = FontId::monospace(app.config.font_size);
-        let row_h = ctx.fonts(|f| f.row_height(&font));
+        let row_h = ctx.fonts_mut(|f| f.row_height(&font));
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn nope()")).expect("the editor text").1;
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn nope()")).unwrap();
         // 字元在畫面上的 x（以 egui 實際排出來的位置為準）
@@ -10562,7 +10622,7 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn main()")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn main()")).unwrap().1;
-        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let at = Pos2::new(text.left() + g.rows[1].x_offset(6) + 1.0, text.top() + row_h * 1.5);
         let ctrl = Modifiers::COMMAND;
         let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: ctrl };
@@ -10663,7 +10723,7 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("fn main()")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("fn main()")).unwrap().1;
-        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let shown = |out: &egui::FullOutput, s: &str| painted_texts(out).iter().any(|t| t.contains(s));
         // 停在 `helper` 上（第 2 行，表情符號後面第 3 個字元）
         let at = Pos2::new(text.left() + g.rows[1].x_offset(8) + 1.0, text.top() + row_h * 1.5);
@@ -10901,7 +10961,7 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
-        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         let sel_fill = ctx.style().visuals.selection.bg_fill;
         let sel_rects = |out: &egui::FullOutput| {
@@ -10999,7 +11059,7 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
-        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         let alt = Modifiers::ALT;
         let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2| {
@@ -11076,7 +11136,7 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         let g = painted_galleys(&out).into_iter().find(|g| g.job.text.starts_with("abcdefgh")).unwrap();
         let text = painted_lines(&out).into_iter().find(|l| l.0.starts_with("abcdefgh")).unwrap().1;
-        let row_h = ctx.fonts(|f| f.row_height(&FontId::monospace(app.config.font_size)));
+        let row_h = ctx.fonts_mut(|f| f.row_height(&FontId::monospace(app.config.font_size)));
         let at = |row: usize, col: usize| Pos2::new(text.left() + g.rows[row].x_offset(col) + 1.0, text.top() + row_h * (row as f32 + 0.5));
         let alt = Modifiers::ALT;
         let drag = |app: &mut AlexCodeApp, from: Pos2, to: Pos2| {
@@ -12299,7 +12359,7 @@ mod tests {
         // 面板與終端機的大小每一幀都一樣（之前面板每一幀縮 2 像素）
         assert!(seen.windows(2).skip(1).all(|w| w[0] == w[1]), "the dock keeps its size: {seen:?}");
         let font = FontId::monospace(13.0);
-        let width = |s: &str| ctx.fonts(|f| f.layout_no_wrap(s.into(), font.clone(), Color32::WHITE).size().x);
+        let width = |s: &str| ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), font.clone(), Color32::WHITE).size().x);
         let adv = width("00") - width("0");
         // 大小跟著輸出區：寬度放得下的欄數（扣掉捲軸），而不是固定的 200 × 160
         let (rows, cols) = (app.terminal.rows(), app.terminal.cols());
@@ -12616,7 +12676,7 @@ mod tests {
         // 第 0 行第 `col` 個字元（小數部分 = 在那個字元裡的哪裡）在畫面上的位置，用實際排版量出來
         let first = app.tabs[0].lines[0].clone();
         let font = FontId::monospace(app.config.font_size);
-        let x_of = |n: usize| ctx.fonts(|f| f.layout_no_wrap(first.chars().take(n).collect(), font.clone(), Color32::WHITE).size().x);
+        let x_of = |n: usize| ctx.fonts_mut(|f| f.layout_no_wrap(first.chars().take(n).collect(), font.clone(), Color32::WHITE).size().x);
         let at = |col: f32| {
             let n = col.floor() as usize;
             let x = x_of(n) + (x_of(n + 1) - x_of(n)).max(1.0) * col.fract();
@@ -12723,7 +12783,7 @@ mod tests {
         let y = clip.top() + row_h * 1.5;
         press_and_drag(&mut app, &ctx, Pos2::new(clip.left() + 200.0, y), Pos2::new(clip.left() + 400.0, y));
         let cols: Vec<usize> = hold_at(&mut app, &ctx, Pos2::new(clip.right() + 30.0, y), 60).iter().map(|c| c.1).collect();
-        let shown = ((clip.width() - 60.0) / ctx.fonts(|f| f.glyph_width(&FontId::monospace(app.config.font_size), '0'))) as usize;
+        let shown = ((clip.width() - 60.0) / ctx.fonts_mut(|f| f.glyph_width(&FontId::monospace(app.config.font_size), '0'))) as usize;
         assert!(cols.windows(2).all(|w| w[1] >= w[0]) && cols[59] > cols[30] && cols[59] > shown, "{cols:?}");
     }
 
@@ -13137,9 +13197,9 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(Default::default(), |_| {});
         let font = FontId::monospace(14.0);
-        let w = ctx.fonts(|f| f.glyph_width(&font, 'x'));
+        let w = ctx.fonts_mut(|f| f.glyph_width(&font, 'x'));
         let job = egui::text::LayoutJob::simple("abcdefghij\nxy\n".into(), font, Color32::WHITE, w * 4.5);
-        let g = ctx.fonts(|f| f.layout_job(job));
+        let g = ctx.fonts_mut(|f| f.layout_job(job));
         let texts: Vec<String> = g.rows.iter().map(|r| r.text()).collect();
         assert_eq!(texts, ["abcd", "efgh", "ij", "xy", ""], "rows of the wrapped layout");
         // 段落（檔案的行）與段落裡的位移

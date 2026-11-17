@@ -206,7 +206,7 @@ fn large_file_memory_report() {
         let _ = ctx.run(RawInput::default(), |ctx| {
             let base = live();
             let job = LayoutJob::simple(joined.clone(), FontId::monospace(14.0), Color32::WHITE, f32::INFINITY);
-            let galley = ctx.fonts(|f| f.layout_job(job));
+            let galley = ctx.fonts_mut(|f| f.layout_job(job));
             let total = live() - base;
             let glyphs: usize = galley.rows.iter().map(|r| r.glyphs.len()).sum();
             let verts: usize = galley.rows.iter().map(|r| r.visuals.mesh.vertices.len()).sum();
