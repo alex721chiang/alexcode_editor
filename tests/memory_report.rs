@@ -77,7 +77,7 @@ fn frame(app: &mut AlexCodeApp, ctx: &egui::Context) {
         focused: true,
         ..Default::default()
     };
-    let _ = ctx.run_ui(input, |ui| app.ui_frame(ui));
+    ctx.run_ui(input, |ui| app.ui_frame(ui)).textures_delta.clear();
 }
 
 /// 類似 log 的純文字：每行約 72 位元組
@@ -129,7 +129,7 @@ fn type_chars(app: &mut AlexCodeApp, ctx: &egui::Context, n: usize) -> f64 {
             events: vec![egui::Event::Text("x".into())],
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ui| app.ui_frame(ui));
+        ctx.run_ui(input, |ui| app.ui_frame(ui)).textures_delta.clear();
     }
     t.elapsed().as_secs_f64() * 1000.0 / n as f64
 }
@@ -206,7 +206,7 @@ fn large_file_memory_report() {
         drop(buf);
 
         // 編輯區把整份文字交給 egui 排版成一個 Galley（每個字元一個字形 + 4 個頂點 + 6 個索引）
-        let _ = ctx.run_ui(RawInput::default(), |ui| {
+        let mut out = ctx.run_ui(RawInput::default(), |ui| {
             let ctx = ui.ctx();
             let base = live();
             let job = LayoutJob::simple(joined.clone(), FontId::monospace(14.0), Color32::WHITE, f32::INFINITY);
@@ -226,6 +226,7 @@ fn large_file_memory_report() {
                 idx
             );
         });
+        out.textures_delta.clear();
     }
 
     // ---- 整個程式：開檔前後的差 ----
@@ -272,7 +273,7 @@ fn frame_with(app: &mut AlexCodeApp, ctx: &egui::Context, events: Vec<egui::Even
         events,
         ..Default::default()
     };
-    let _ = ctx.run_ui(input, |ui| app.ui_frame(ui));
+    ctx.run_ui(input, |ui| app.ui_frame(ui)).textures_delta.clear();
 }
 
 /// 大檔案其餘部分的記憶體量測（待辦 3e）：追蹤中的檔案多握的 HEAD 內容、尋找列的全文快取、

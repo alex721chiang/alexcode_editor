@@ -3101,7 +3101,7 @@ impl AlexCodeApp {
             self.pending_close = None;
         }
         // 拖放檔案開啟
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         for p in dropped {
             self.open_path(&p);
         }
@@ -7660,7 +7660,7 @@ impl AlexCodeApp {
                         painter.rect_filled(caret, 0.0, c.accent);
                         caret_rect = Some(caret);
                         // 告訴作業系統游標在哪裡：輸入法的候選字視窗會跟著它，沒有這個輸入法也不會啟用
-                        ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { rect: clip, cursor_rect: caret, should_interrupt_composition: false }));
+                        ui.ctx().output_mut(|o| o.ime = Some(egui::output::IMEOutput { purpose: egui::IMEPurpose::Normal, rect: clip, cursor_rect: caret, should_interrupt_composition: false }));
                     }
                     // 組字中的文字加底線，和已經在文件裡的文字區分開來
                     if let Some(p) = compose_at.filter(|p| p.line == line && p.col >= start) {
@@ -8162,7 +8162,14 @@ mod tests {
             ..Default::default()
         };
         edit(&mut input);
-        ctx.run_ui(input, |ui| app.ui_frame(ui))
+        // egui 0.36 起修飾鍵是事件、會一直保持到下一次改變：沒有指定時每一幀都放開（與之前每一幀預設沒有按修飾鍵相同）
+        if !input.events.iter().any(|e| matches!(e, Event::ModifiersChanged(_))) {
+            input.events.insert(0, Event::ModifiersChanged(Modifiers::NONE));
+        }
+        let mut out = ctx.run_ui(input, |ui| app.ui_frame(ui));
+        // egui 0.36 起沒有交給繪圖端就丟掉的貼圖變更會在除錯建置裡 panic；測試沒有繪圖端，直接清掉
+        out.textures_delta.clear();
+        out
     }
 
     /// 這一幀複製到剪貼簿的文字（egui 0.31 起放在 `platform_output.commands` 的 CopyText；沒有複製時是空字串）
@@ -10667,16 +10674,13 @@ mod tests {
         let ctrl = Modifiers::COMMAND;
         let button = |pressed| Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: ctrl };
         frame_with(&mut app, &ctx, |i| {
-            i.modifiers = ctrl;
-            i.events = vec![Event::PointerMoved(at)];
+            i.events = vec![Event::ModifiersChanged(ctrl), Event::PointerMoved(at)];
         });
         frame_with(&mut app, &ctx, |i| {
-            i.modifiers = ctrl;
-            i.events = vec![button(true)];
+            i.events = vec![Event::ModifiersChanged(ctrl), button(true)];
         });
         frame_with(&mut app, &ctx, |i| {
-            i.modifiers = ctrl;
-            i.events = vec![button(false)];
+            i.events = vec![Event::ModifiersChanged(ctrl), button(false)];
         });
         pump(&mut app, "Ctrl+click jumps too", &|app| same_file(&active_path(app), &lib.to_string_lossy()));
         assert_eq!(asked.lock().unwrap().len(), 2);
@@ -11021,11 +11025,10 @@ mod tests {
             let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: m };
             for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
                 frame_with(app, &ctx, |i| {
-                    i.modifiers = m;
-                    i.events = events;
+                    i.events = [vec![Event::ModifiersChanged(m)], events].concat();
                 });
             }
-            frame_with(app, &ctx, |i| i.modifiers = m)
+            frame_with(app, &ctx, |i| i.events = vec![Event::ModifiersChanged(m)])
         };
 
         // 按住 Alt 從第 1 行第 2 欄拖到第 3 行第 5 欄：每一行選第 2–5 欄，短的第 2 行只到行尾（零寬）
@@ -11106,8 +11109,7 @@ mod tests {
             let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: alt };
             for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
                 frame_with(app, &ctx, |i| {
-                    i.modifiers = alt;
-                    i.events = events;
+                    i.events = [vec![Event::ModifiersChanged(alt)], events].concat();
                 });
             }
             frame(app, &ctx, vec![]);
@@ -11183,8 +11185,7 @@ mod tests {
             let button = |pos, pressed| Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: alt };
             for events in [vec![Event::PointerMoved(from)], vec![button(from, true)], vec![Event::PointerMoved(to)], vec![button(to, false)]] {
                 frame_with(app, &ctx, |i| {
-                    i.modifiers = alt;
-                    i.events = events;
+                    i.events = [vec![Event::ModifiersChanged(alt)], events].concat();
                 });
             }
             frame(app, &ctx, vec![]);
@@ -13235,7 +13236,7 @@ mod tests {
     #[test]
     fn cursor_conversions_follow_rows_and_paragraphs() {
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(Default::default(), |_| {});
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         let font = FontId::monospace(14.0);
         let w = ctx.fonts_mut(|f| f.glyph_width(&font, 'x'));
         let job = egui::text::LayoutJob::simple("abcdefghij\nxy\n".into(), font, Color32::WHITE, w * 4.5);
