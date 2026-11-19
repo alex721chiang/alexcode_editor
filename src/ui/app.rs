@@ -180,6 +180,8 @@ pub struct AlexCodeApp {
     pub term_input: String,
     /// 終端機下方輸入列（含上方間距）上一幀的高度：輸出區留給它這麼多，面板才不會每一幀變大或變小
     term_input_h: f32,
+    /// 終端機輸出區有焦點時輸入法組字中的文字（還沒送進 shell，畫在游標處）
+    term_preedit: String,
     pub show_terminal: bool,
     pub show_graph: bool,
     pub show_command_palette: bool,
@@ -1144,12 +1146,25 @@ fn terminal_key_bytes(key: Key, m: Modifiers) -> Option<Vec<u8>> {
 /// 終端機有鍵盤焦點時，這一幀的輸入事件要送給 shell 的位元組：輸入的字照送、貼上的文字換行改成 `\r`、
 /// 特殊鍵見 `terminal_key_bytes`。egui 把 Ctrl+C / X / V 變成「複製 / 剪下 / 貼上」事件（同一幀也有那個按鍵的事件）：
 /// 在終端機裡 Ctrl+C / X 是控制字元（0x03 中斷 / 0x18），Ctrl+V 是貼上剪貼簿的文字，按鍵本身不再重送
+#[cfg(test)]
 fn terminal_input_bytes(events: &[egui::Event]) -> Vec<u8> {
+    terminal_input_bytes_ime(events, &mut String::new())
+}
+
+/// 同 `terminal_input_bytes`，再加上輸入法：`composing` 是組字中的文字（跨幀保留，畫在游標處）。
+/// 組字期間的按鍵與輸入屬於輸入法、不送進 shell；選定的字（Commit）以 UTF-8 送出
+fn terminal_input_bytes_ime(events: &[egui::Event], composing: &mut String) -> Vec<u8> {
     use egui::Event;
     let clip = events.iter().any(|e| matches!(e, Event::Copy | Event::Cut | Event::Paste(_)));
     let mut out = Vec::new();
     for ev in events {
         match ev {
+            Event::Ime(egui::ImeEvent::Preedit { text, .. }) => *composing = text.clone(),
+            Event::Ime(egui::ImeEvent::Commit(t)) => {
+                composing.clear();
+                out.extend_from_slice(t.as_bytes());
+            }
+            _ if !composing.is_empty() => {}
             Event::Text(t) => out.extend_from_slice(t.as_bytes()),
             Event::Paste(t) => out.extend_from_slice(t.replace("\r\n", "\r").replace('\n', "\r").as_bytes()),
             Event::Copy => out.push(0x03),
@@ -1232,6 +1247,7 @@ impl AlexCodeApp {
             terminal: VtParser::new(200, 160),
             term_input: String::new(),
             term_input_h: 28.0,
+            term_preedit: String::new(),
             show_terminal: false,
             show_graph: false,
             show_command_palette: false,
@@ -4377,10 +4393,12 @@ impl AlexCodeApp {
                                 egui::EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: true },
                             )
                         });
-                        let bytes = terminal_input_bytes(&ui.input(|i| i.events.clone()));
+                        let bytes = terminal_input_bytes_ime(&ui.input(|i| i.events.clone()), &mut self.term_preedit);
                         if let (false, Some(s)) = (bytes.is_empty(), &mut self.term_pty) {
                             let _ = s.write(&bytes);
                         }
+                    } else {
+                        self.term_preedit.clear();
                     }
                     // 終端機的大小跟著輸出區：可見的寬高能放幾欄 × 幾列，變了就改 `terminal` 並通知 shell
                     let font = FontId::monospace(13.0);
@@ -4437,6 +4455,30 @@ impl AlexCodeApp {
                         });
                     if let Some(r) = cursor_rect {
                         self.mark_rect("terminal-cursor", r);
+                        if focused {
+                            // 輸入法：組字中的文字畫在游標處（蓋住後面的字，送進 shell 之前不改畫面內容），候選字視窗放在它後面。
+                            // 告訴作業系統游標在哪裡也是讓它在這裡啟用輸入法的條件（沒有的話 egui 會關掉輸入法）
+                            let mut caret = r;
+                            if !self.term_preedit.is_empty() {
+                                let g = ui.fonts_mut(|f| f.layout_no_wrap(self.term_preedit.clone(), font.clone(), c.fg));
+                                let pre = Rect::from_min_size(r.min, egui::vec2(g.size().x, r.height()));
+                                let painter = ui.painter_at(out.inner_rect);
+                                painter.rect_filled(pre, 0.0, c.panel);
+                                painter.galley(pre.min, g, c.fg);
+                                painter.line_segment([pre.left_bottom(), pre.right_bottom()], Stroke::new(1.0_f32, c.accent));
+                                caret = Rect::from_min_size(Pos2::new(pre.right(), r.top()), r.size());
+                                self.mark_rect("terminal-preedit", pre);
+                            }
+                            let rect = out.inner_rect;
+                            ui.ctx().output_mut(|o| {
+                                o.ime = Some(egui::output::IMEOutput {
+                                    purpose: egui::IMEPurpose::Normal,
+                                    rect,
+                                    cursor_rect: caret,
+                                    should_interrupt_composition: false,
+                                })
+                            });
+                        }
                     }
                     // 點一下輸出區取得鍵盤焦點（只接點擊：拖曳仍然是選取輸出的文字）；有焦點時加一圈外框
                     let resp = ui.interact(out.inner_rect, term_id, Sense::click());
@@ -12588,6 +12630,63 @@ mod tests {
         settle(&mut app);
         let moved = app.probe["terminal-cursor"].left() - cursor.left();
         assert!((moved - 3.0 * adv).abs() < 1.5, "the cursor moved {moved} px for 3 characters");
+    }
+
+    #[test]
+    fn terminal_ime_commits_go_to_the_shell_and_keys_while_composing_do_not() {
+        let k = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+        let preedit = |t: &str| Event::Ime(egui::ImeEvent::Preedit { text: t.into(), active_range_chars: None });
+        let mut composing = String::new();
+        // 組字中：組字文字記下來（畫在游標處），按鍵屬於輸入法，不送進 shell
+        let out = terminal_input_bytes_ime(&[preedit("ㄓㄨㄥ"), k(Key::Backspace), k(Key::ArrowLeft), k(Key::Enter)], &mut composing);
+        assert!(out.is_empty(), "keys while composing belong to the IME: {out:?}");
+        assert_eq!(composing, "ㄓㄨㄥ");
+        // 選定的字送進 shell（UTF-8）
+        let out = terminal_input_bytes_ime(&[Event::Ime(egui::ImeEvent::Commit("中文".into()))], &mut composing);
+        assert_eq!(out, "中文".as_bytes());
+        assert!(composing.is_empty());
+        // 組字結束後按鍵照常送出
+        assert_eq!(terminal_input_bytes_ime(&[k(Key::Enter)], &mut composing), b"\r");
+        // 取消組字（空的組字文字）
+        terminal_input_bytes_ime(&[preedit("ㄓ")], &mut composing);
+        assert_eq!(terminal_input_bytes_ime(&[preedit(""), k(Key::Enter)], &mut composing), b"\r");
+        assert!(composing.is_empty());
+    }
+
+    #[test]
+    fn terminal_tells_the_ime_where_its_cursor_is_and_shows_the_composition() {
+        use std::time::{Duration, Instant};
+        let ctx = ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = AlexCodeApp::new();
+        app.term_cwd = dir.path().to_path_buf();
+        app.show_terminal = true;
+        let screen = |app: &AlexCodeApp| (0..app.terminal.rows()).map(|r| app.terminal.line_text(r)).collect::<Vec<_>>().join("\n");
+        let end = Instant::now() + Duration::from_secs(30);
+        while screen(&app).trim().is_empty() && Instant::now() < end {
+            frame(&mut app, &ctx, vec![]);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!screen(&app).trim().is_empty(), "the shell prints its prompt");
+        let out = app.probe["terminal-output"].center();
+        click(&mut app, &ctx, out);
+        // 輸出區有焦點：告訴作業系統游標在哪裡（沒有這個 Windows 不會在這裡啟用輸入法，候選字視窗也不知道放哪）
+        let o = frame(&mut app, &ctx, vec![]);
+        let cursor = app.probe["terminal-cursor"];
+        let ime = o.platform_output.ime.expect("the IME is enabled while the terminal has focus");
+        assert!((ime.cursor_rect.left() - cursor.left()).abs() < 0.5, "{:?} vs {cursor:?}", ime.cursor_rect);
+        // 組字中：組字文字畫在游標處，候選字視窗在它後面
+        let o = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: "ㄓㄨㄥ".into(), active_range_chars: None })]);
+        let pre = app.probe["terminal-preedit"];
+        let w = ctx.fonts_mut(|f| f.layout_no_wrap("ㄓㄨㄥ".into(), FontId::monospace(13.0), Color32::WHITE).size().x);
+        assert!((pre.left() - cursor.left()).abs() < 0.5 && (pre.width() - w).abs() < 0.5, "{pre:?}, preedit {w} wide");
+        assert!(painted_texts(&o).iter().any(|t| t == "ㄓㄨㄥ"), "the composition is drawn");
+        let ime = o.platform_output.ime.unwrap();
+        assert!((ime.cursor_rect.left() - pre.right()).abs() < 0.5);
+        // 選定後組字文字消失（送進 shell 的字由 shell 回顯）
+        let o = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Commit("中".into()))]);
+        assert!(!painted_texts(&o).iter().any(|t| t == "ㄓㄨㄥ"));
+        assert!(app.term_preedit.is_empty());
     }
 
     #[test]
