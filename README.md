@@ -1,9 +1,9 @@
-# AlexCode — Neon Edition (Rust v5.5)
+# AlexCode — Neon Edition (Rust v6.0)
 
 [![Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GUI](https://img.shields.io/badge/GUI-egui%20%2F%20eframe-neon.svg)](https://github.com/emilk/egui)
-[![Release](https://img.shields.io/badge/Release-v5.5.0--rust-00e5ff.svg)](https://github.com/alex721chiang/alexcode_editor/releases/latest)
+[![Release](https://img.shields.io/badge/Release-v6.0.0--rust-00e5ff.svg)](https://github.com/alex721chiang/alexcode_editor/releases/latest)
 
 AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完全移植為高效、記憶體安全且跨平台的純 Rust 實現。
 保留了 Notepad++ 風格的日常編輯體驗、強大的 Log 行篩選引擎、LSP 語言伺服器協定支援、Git 行級差異與 Blame 追蹤、**Typora 風格直觀 Markdown 即時預覽與原位編輯**、Obsidian 雙鏈筆記關聯圖、VT100 終端機，以及極具未來感的 **Neon Grid / Neon HUD** 霓虹調色盤主題。
@@ -17,25 +17,26 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 - 🚀 **[Windows：`alexcode.exe`（單一獨立執行檔）](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/alexcode.exe)**
 - 📦 **[Windows：`AlexCode-Rust-win64-portable.zip`（免安裝可攜包）](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-win64-portable.zip)**
 - 🐧 **[Linux x86_64：`AlexCode-Rust-linux-x86_64.tar.gz`](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-linux-x86_64.tar.gz)**
-- 🍎 **[macOS (Apple Silicon)：`AlexCode-Rust-macos-arm64.tar.gz`](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-macos-arm64.tar.gz)**（未簽章，第一次執行需在系統設定中允許）
+- 🍎 **[macOS（Apple Silicon + Intel）：`AlexCode-Rust-macos-universal.zip`（`AlexCode.app`）](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-macos-universal.zip)**（未簽章，第一次開啟請按右鍵 →「打開」）
+- 🍎 **[macOS (Apple Silicon)：`AlexCode-Rust-macos-arm64.tar.gz`（只有執行檔）](https://github.com/alex721chiang/alexcode_editor/releases/latest/download/AlexCode-Rust-macos-arm64.tar.gz)**（未簽章，第一次執行需在系統設定中允許）
 - 🔗 **[前往 GitHub Releases 頁面查看版本說明](https://github.com/alex721chiang/alexcode_editor/releases/latest)**
 
 ---
 
-## 🆕 v5.5 新增 (What's New)
+## 🆕 v6.0 新增 (What's New)
 
 | 功能 | 操作 |
 |---|---|
-| 分頁右鍵選單：開啟所在資料夾、在此開啟 cmd / PowerShell / Windows Terminal、複製路徑、關閉其他 / 右側 / 全部 | 在分頁上按右鍵 |
-| 檔案總管側邊欄、開啟資料夾 | `Ctrl+B`、檔案 → 開啟資料夾 |
-| 尋找與取代（區分大小寫 / 全字 / 正規表示式） | `Ctrl+F`、`Ctrl+H` |
-| 編碼偵測與轉換（UTF-8 / BOM / UTF-16 / Big5 / GBK / Shift_JIS） | 點狀態列的編碼 |
-| 未儲存提示、外部變更自動重新載入 | 自動 |
-| 工作階段還原、最近開啟的檔案 | 自動、檔案 → 最近開啟的檔案 |
-| 單一實例（雙擊檔案開在現有視窗） | 自動；`--new-instance` 另開視窗 |
-| Git 行號區標記（新增 / 修改 / 刪除）、自動配對括號 | 自動；檢視選單可關閉自動配對 |
+| 分割檢視：左右或上下兩欄，拖曳分隔線調整大小，點另一欄直接編輯；另一欄也顯示 Git 標記、書籤、尋找命中、診斷，Markdown 以閱讀模式顯示；重新啟動後還原 | `Ctrl+\`、檢視 → 分割編輯器 / 上下分割 |
+| 獨立視窗：分頁開成另一個視窗，可編輯、選取、複製貼上，有 Git 標記和與主視窗相同的選單；拖出去的分頁從主視窗的分頁列移除，關掉視窗後回到主視窗；重新啟動後照原位置還原 | 把分頁拖到分頁列外面放開，或分頁右鍵 →「在新視窗開啟」 |
+| LSP：依檔案類型啟動 rust-analyzer / clangd / pylsp（需自行安裝並放在 PATH 裡），診斷（行號顏色與波浪底線）、跳到定義、滑鼠停留說明、自動完成選單 | 自動；`F12` / `Ctrl+點擊` 跳到定義；`Ctrl+Space` 叫出補全 |
+| 補全：沒有語言伺服器的檔案列出文件裡出現過的字；可啟用遠端 AI 補全（OpenAI 相容端點，例如 LM Studio、Ollama；預設不啟用） | 程式碼打到第 3 個字自動出現、`Ctrl+Space`；AI 補全在設定對話框啟用 |
+| 互動式終端機：在虛擬終端（Windows ConPTY / Unix PTY）執行 shell，即時輸出、ANSI 顏色、游標，可選 shell，可用中文輸入法 | 檢視 → 互動終端機；點一下輸出區後鍵盤直接送進 shell |
+| 矩形選取：複製、剪下、貼上，打字 / Backspace / Delete 同時修改每一行 | `Alt+拖曳`、`Shift+Alt+方向鍵` |
+| 中文輸入法：選字時游標與候選字視窗跟著輸入法的位置移動（一般編輯區、大檔案檢視） | 自動 |
+| macOS：universal（Apple Silicon + Intel）的 `AlexCode.app`，含圖示與檔案關聯；從 Finder 雙擊或「打開方式」開檔會開進編輯器 | 下載 `AlexCode-Rust-macos-universal.zip` |
 
-**v5.5.0 之後加入（尚未發佈，需自行建置）**
+**v6.0 其他新增**
 
 | 功能 | 操作 |
 |---|---|
@@ -50,28 +51,45 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 | 大的 Markdown 檔：256 KB 以上的 `.md` 以原始碼顯示（閱讀 / 雙欄模式每一幀都要排版整份文件：1 MB 的檔案每一幀約 180 ms），編輯區上方的說明列可讓那個分頁換回閱讀模式 | 自動；按「仍要使用閱讀模式」 |
 | 熱結束：有未存檔的修改時關閉視窗不再詢問，下次啟動連同未存檔的內容（含未命名分頁）一起還原；內容以純文字存在設定資料夾的 `hot_exit.json`，全部存檔後自動移除。關閉單一分頁仍會詢問 | 自動；在設定對話框關閉「啟動時還原…」即恢復結束前詢問 |
 
-> **目前狀態**：下方列出的 AI 補全、矩形選取，其邏輯模組與測試已在程式庫中，但尚未接上介面；LSP 會依檔案類型啟動語言伺服器（rust-analyzer / clangd / pylsp，需自行安裝並放在 PATH 裡）並把開著的文件同步給它，狀態列顯示連線狀態；已接上診斷（行號顏色與波浪底線）、跳到定義（F12 / Ctrl+點擊）、滑鼠停留說明，以及自動完成（打字時或按 Ctrl+Space 出現選單，上下鍵選擇、Enter / Tab 接受、Esc 關閉）；
-> 內建終端機在虛擬終端（Windows ConPTY / Unix PTY）裡執行 shell，輸出即時顯示（含 ANSI 顏色與游標），鍵盤可直接操作 shell，大小跟著終端機面板。完整說明見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+> **已知限制**：程式沒有簽章（Windows 可能出現 SmartScreen 警告，macOS 第一次開啟需按右鍵 →「打開」）；macOS 的 `.app` 與 Finder 開檔只在 CI 上建置與測試過；LSP 的「尋找全部引用」與「重新命名」只有協定層，還沒有接上介面；從獨立視窗的選單執行「尋找 / 取代」時，尋找列開在主視窗。完整說明見 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+
+### v5.5 新增
+
+| 功能 | 操作 |
+|---|---|
+| 分頁右鍵選單：開啟所在資料夾、在此開啟 cmd / PowerShell / Windows Terminal、複製路徑、關閉其他 / 右側 / 全部 | 在分頁上按右鍵 |
+| 檔案總管側邊欄、開啟資料夾 | `Ctrl+B`、檔案 → 開啟資料夾 |
+| 尋找與取代（區分大小寫 / 全字 / 正規表示式） | `Ctrl+F`、`Ctrl+H` |
+| 編碼偵測與轉換（UTF-8 / BOM / UTF-16 / Big5 / GBK / Shift_JIS） | 點狀態列的編碼 |
+| 未儲存提示、外部變更自動重新載入 | 自動 |
+| 工作階段還原、最近開啟的檔案 | 自動、檔案 → 最近開啟的檔案 |
+| 單一實例（雙擊檔案開在現有視窗） | 自動；`--new-instance` 另開視窗 |
+| Git 行號區標記（新增 / 修改 / 刪除）、自動配對括號 | 自動；檢視選單可關閉自動配對 |
 
 ---
 
 ## 🚀 核心特性 (Features)
 
 ### 1. Notepad++ 風格高生產力編輯
-- **多游標編輯 (Multi-Cursor)**：Sublime 式多游標，支援多處同時輸入、選取與行操作。
-- **欄位 / 矩形選取 (Box / Column Selection)**：`Alt + 拖曳` 矩形區塊選取，跨行同欄批次輸入與刪除。
+- **欄位 / 矩形選取 (Box / Column Selection)**：`Alt + 拖曳` 或 `Shift+Alt+方向鍵` 選出矩形區塊；複製、剪下、貼上，打字 / Backspace / Delete 同時修改每一行。
+- **分割檢視與獨立視窗**：`Ctrl+\` 把編輯區分成左右或上下兩欄；把分頁拖到分頁列外面開成獨立視窗（有自己的選單，與主視窗共用同一份內容）。
 - **括號與引號智慧自動配對 (Auto-Pair)**：自動補閉合、選取包圍 (Surround)、輸入閉合跳過 (SkipOver)、退格成對刪除。
+- **自動補全**：有語言伺服器時用 LSP 的補全；沒有時列出文件裡出現過的字；可另外啟用遠端 AI 補全（OpenAI 相容端點）。
+- **Sticky Scroll**：捲動時把目前所在的函式 / 類別標題固定在編輯區頂端。
 - **行操作捷徑**：
   - 複製當前行 (`Ctrl+D`)
   - 刪除當前行 (`Ctrl+Shift+L`)
   - 上下移動行 (`Alt+↑` / `Alt+↓`)
   - 智慧切換註解 (`Ctrl+/`)
-  - 轉大寫 / 小寫 (`Ctrl+Shift+U` / `Ctrl+U`)
-- **文字工具箱 (Text Tools)**：行排序、去重、反轉、全形半形互轉、Unicode Escape/Unescape、數字底數解析。
-- **大檔自動分級降級 (File Tiering)**：
-  - `< 2MB`：Full 全功能模式（自動補全、LSP、即時 Git、語法高亮）
-  - `> 2MB`：AssistOff 模式（停用 LSP / 即時背景掃描，保留高亮）
-  - `> 10MB`：HighlightOff 模式（極速純文字流暢滾動）
+  - 切換書籤 (`Ctrl+F2`)、跳至行 (`Ctrl+G`)
+- **文字工具（工具選單）**：行排序（遞增 / 遞減）、去除重複行、全形轉半形。
+- **中文輸入法**：注音 / 拼音選字時游標與候選字視窗跟著輸入法的位置；終端機也能輸入中文。
+- **大檔案**：
+  - `< 2 MB`：一般編輯區（語法高亮、Sticky Scroll、LSP）
+  - `≥ 2 MB`：大檔案檢視，只排版畫面上看得到的行（29 MB 的檔案約 190 MB 記憶體），仍可直接編輯、尋找、選取、自動換行；很長的行也整行看得到
+  - 2 MB 以上的檔案與網路路徑上的檔案在背景讀取，視窗不凍結
+  - 256 KB 以上的 Markdown 以原始碼顯示（可按鈕換回閱讀模式）
+- **熱結束**：有未存檔的修改時直接關閉視窗，下次啟動連同未存檔的內容一起還原。
 
 ### 2. 強大 Log 行篩選引擎 (FilterEngine)
 - 支援以 `||`（或相容舊式 `|`）分割 OR 關鍵字條件。
@@ -86,12 +104,11 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 - **行內 Git Blame**：解析 `git blame --line-porcelain`，狀態列即時顯示 commit SHA、作者、日期、摘要及未提交變更標示。
 
 ### 4. LSP (Language Server Protocol) 語言伺服器
-- 完整 JSON-RPC 2.0 協定層（`Content-Length` 框架封裝與串流 Reader）。
-- 即時診斷解析 (Diagnostics)。
-- 程式碼智慧補全與 Snippet 佔位符過濾 (`extract_completions`)。
-- 跳至定義 (Goto Definition)、尋找全部引用 (References)。
-- 符號重新命名 (Rename) 與跨檔案工作區編輯套用 (`apply_text_edits`)。
-- 增量同步 (Incremental Sync) diff 計算，UTF-16 代理對安全。
+- 依檔案類型自動啟動語言伺服器：`.rs` → rust-analyzer、C / C++ → clangd、`.py` → pylsp（需自行安裝並放在 PATH 裡），開著的文件自動同步，狀態列顯示連線狀態。
+- **診斷 (Diagnostics)**：行號以最嚴重的診斷上色，範圍畫波浪底線。
+- **跳到定義**：`F12`、`Ctrl+點擊`、搜尋選單或命令面板；其他檔案會自動開啟。
+- **滑鼠停留說明 (Hover)**、**自動完成選單**（打字時或 `Ctrl+Space`）。
+- 協定層另外有尋找全部引用 (References)、重新命名 (Rename)、增量同步等，**尚未接上介面**。
 
 ### 5. Markdown 筆記雙鏈與知識圖譜 (Obsidian Style)
 - **Wikilink 雙鏈解析**：支援 `[[筆記名稱]]`、`[[筆記|別名]]`、`[[筆記#章節]]` 與標準 `[text](path.md)`。
@@ -104,6 +121,7 @@ AlexCode 的全新 **Rust 重寫版本**。從原本的 C++20 / Qt 6 架構完�
 - 終端機上方可選擇 shell：Windows 有 cmd、PowerShell（裝了 PowerShell 7 時用 pwsh）、Git Bash（找得到時），macOS / Linux 有 `$SHELL` 與 bash、zsh、sh；換了就重新啟動，並記在設定裡。
 - 點一下輸出區後，鍵盤直接送進 shell：輸入的字、Enter、Backspace、方向鍵（叫出歷史指令）、Tab（補完）、Home / End / Delete / PageUp / PageDown、Esc，以及 Ctrl + 字母（Ctrl+C 中斷執行中的指令、Ctrl+V 貼上剪貼簿）。下方的輸入列也照樣可以一次送出一行。
 - 輸出依 ANSI 顏色顯示（16 色，配色同 Windows Terminal 的 Campbell；粗體的基本色顯示為亮色；捲出畫面的歷史也保留顏色），shell 在跑時畫出游標（有鍵盤焦點時是實心方塊）。終端機的列數與欄數跟著面板大小，改變時通知 shell（Unix 上 shell 收到 SIGWINCH，ConPTY 依新大小重畫）。
+- 輸出區有焦點時可以用中文輸入法：組字中的文字畫在游標處，選定的字才送進 shell。
 - 純邏輯 VT100/ANSI 狀態機與 2D 螢幕單元模型。
 - 支援 CR/LF/BS/TAB (對齊 8 倍數)、EOL 自動折行、5000 行 Scrollback 捲動歷史。
 - CSI 游標移動 (CUU, CUD, CUF, CUB, CHA, CUP)、ED (J 0 / 1 / 2) 清除畫面、EL (K) 清除行、ECH (X) 清除字元；回覆游標位置查詢（DSR `ESC[6n`，ConPTY 啟動時要等到這個回覆才會輸出）。
@@ -139,7 +157,7 @@ alexcode_rust/
 │   ├── ai/                     # 本地離線智慧補全、OpenAI 相容 LLM 客戶端
 │   ├── snippets/               # 樣板代碼展開控制器
 │   ├── plugins/                # 外掛指令擴充系統
-│   ├── core/                   # 網路路徑判斷、全域組態設定
+│   ├── core/                   # 設定與工作階段、單一實例、熱結束、檔案監看、網路路徑判斷、macOS 開檔
 │   └── ui/                     # Egui / Eframe 現代化 GPU 加速前端介面
 └── tests/                      # 涵蓋全模組的完整單元測試套件
 ```
@@ -149,7 +167,8 @@ alexcode_rust/
 ## 🛠️ 建置與執行 (Build & Run)
 
 ### 前置需求
-- 安裝 [Rust](https://rustup.rs/) (建議 1.70 以上版本)
+- 安裝 [Rust](https://rustup.rs/) 最新的 stable 版本（egui 0.37 需要較新的編譯器；CI 用最新 stable）
+- Linux 需要 X11 / Wayland 的開發套件（見 `.github/workflows/rust-release.yml` 的「Install Linux build dependencies」）
 
 ### 建置與啟動
 ```bash
@@ -167,7 +186,9 @@ cargo test
 
 ## 🧪 測試涵蓋 (Test Coverage)
 
-專案包含對應於原 C++ 專案各個模組的完整單元測試：
+`cargo test` 目前共約 300 個測試，三個平台的 CI 每次推送都會執行。除了 `tests/` 底下各模組的單元測試，`src/ui/app.rs` 底部的 `mod tests` 以無視窗的 `egui::Context` 驅動整個介面（點擊、拖曳、輸入法組字、終端機、分割檢視、獨立視窗、大檔案檢視等）。
+
+`tests/` 底下對應原 C++ 專案各模組的單元測試：
 - `filter_test.rs`：AND / OR 邏輯、`||` 與 `|` 相容、進階語法、Regex 前綴與錯誤容忍。
 - `diff_calc_test.rs`：LCS 行對齊、純新增/純刪除、Modified 配對、不平衡區塊填充。
 - `auto_pair_test.rs`：括號引號補全、選取包圍、閉合跳過、成對刪除。
