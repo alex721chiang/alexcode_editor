@@ -399,6 +399,10 @@ pub struct AlexCodeApp {
     large_rows: LongRows,
     /// 大檔案檢視中輸入法正在組字的文字（還沒寫進文件）
     large_preedit: String,
+    /// 大檔案檢視組字中輸入法報的游標位置（組字文字裡的第幾個字元；沒有報時是組字文字的長度）
+    large_ime_at: usize,
+    /// 一般編輯區輸入法組字時，輸入法報的游標 / 選字位置（相對於組字文字的字元範圍）；沒在組字時是 None
+    editor_ime_active: Option<std::ops::Range<usize>>,
     /// 大檔案檢視中內容最後一次變動：((分頁 id, 內容版本), 發現變動的時間)；Git 標記等內容停下來才重算
     large_marks_seen: ((u64, u64), std::time::Instant),
     /// 拖曳選取到可見範圍外時，下一幀大檔案檢視要捲到的位置：(分頁 id, 捲動位移)
@@ -1349,6 +1353,8 @@ impl AlexCodeApp {
             large_stats: ((0, 0), (0, 0)),
             large_rows: LongRows::default(),
             large_preedit: String::new(),
+            large_ime_at: 0,
+            editor_ime_active: None,
             large_marks_seen: ((0, 0), std::time::Instant::now()),
             large_scroll_to: None,
             large_wrap_w: None,
@@ -5531,6 +5537,23 @@ impl AlexCodeApp {
                         Self::tab_to_spaces_events(ui, editor_id, &text, self.config.tab_size);
                     }
 
+                    // 輸入法組字中游標 / 選字的位置（TextEdit 收到同樣的事件；這裡記下來，下面用來放候選字視窗）
+                    if ui.memory(|m| m.has_focus(editor_id)) {
+                        ui.input(|i| {
+                            for e in &i.events {
+                                match e {
+                                    egui::Event::Ime(egui::ImeEvent::Preedit { text: t, active_range_chars }) => {
+                                        let n = t.chars().count();
+                                        self.editor_ime_active = (n > 0).then(|| active_range_chars.clone().unwrap_or(n..n));
+                                    }
+                                    egui::Event::Ime(egui::ImeEvent::Commit(_)) => self.editor_ime_active = None,
+                                    _ => {}
+                                }
+                            }
+                        });
+                    } else {
+                        self.editor_ime_active = None;
+                    }
                     let output = egui::TextEdit::multiline(&mut text)
                         .id(editor_id)
                         .font(font.clone())
@@ -5558,6 +5581,24 @@ impl AlexCodeApp {
                     }
                     let galley = &output.galley;
                     let gpos = output.galley_pos;
+
+                    // 組字中：TextEdit 把候選字視窗放在組字文字的最後；改放在輸入法報的游標 / 選到的字那裡
+                    if let (Some(act), Some(cr)) = (self.editor_ime_active.clone(), output.cursor_range.filter(|r| !r.is_empty())) {
+                        if output.response.has_focus() {
+                            let [start, end] = cr.sorted_cursors();
+                            let at = (start.index.0 + act.start).min(end.index.0);
+                            // 與 TextEdit 算游標框的方式相同（egui 的 cursor_rect：至少一列高、四周各放大 1.5）
+                            let mut r = galley.pos_from_cursor(CCursor::new(at));
+                            r.max.y = r.max.y.max(r.min.y + row_h);
+                            let r = r.expand(1.5).translate(gpos.to_vec2());
+                            let to_global = ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap_or_default();
+                            ui.ctx().output_mut(|o| {
+                                if let Some(ime) = o.ime.as_mut() {
+                                    ime.cursor_rect = to_global * r;
+                                }
+                            });
+                        }
+                    }
 
                     if wrap {
                         let mut line = 0;
@@ -7120,6 +7161,7 @@ impl AlexCodeApp {
             // 自動配對的條件與一般編輯區相同：設定開啟，且不是純文字 / Markdown
             let pair_enabled = self.config.auto_pair && !matches!(self.tab_lang(idx), Lang::Plain | Lang::Markdown);
             let mut preedit = std::mem::take(&mut self.large_preedit);
+            let mut ime_at = self.large_ime_at;
             let wrap_w = if self.config.word_wrap { self.large_wrap_w } else { None };
             let buf = &mut self.tabs[idx];
             let rev = buf.revision();
@@ -7234,7 +7276,9 @@ impl AlexCodeApp {
                     }
                     // 輸入法：組字中的文字只顯示在游標處（把後面的文字往後推），選定之後才寫進文件。
                     // egui 0.35 起不再送 Ime(Enabled / Disabled)：空的組字文字表示取消組字
-                    Event::Ime(egui::ImeEvent::Preedit { text: t, .. }) => {
+                    Event::Ime(egui::ImeEvent::Preedit { text: t, active_range_chars }) => {
+                        let n = t.chars().count();
+                        ime_at = active_range_chars.as_ref().map_or(n, |r| r.start.min(n));
                         // 開始組字時先刪掉選取的文字（與一般編輯區相同），組字中的文字就排在那個位置
                         if !t.is_empty() && !sel.is_empty() {
                             edit = Some((sel.start(), sel.end(), String::new(), true));
@@ -7374,6 +7418,7 @@ impl AlexCodeApp {
                 self.large_stats = ((tab_id, buf.revision()), (bytes, max_cols));
             }
             self.large_preedit = preedit;
+            self.large_ime_at = ime_at;
             if edited && !self.uses_large_view(idx) {
                 // 刪到小於門檻了：下一幀起換回一般編輯區，游標與鍵盤焦點一併交給它
                 self.sync_cursor_to_editor();
@@ -7631,8 +7676,8 @@ impl AlexCodeApp {
                 painter.line_segment([gutter.right_top(), gutter.right_bottom()], Stroke::new(1.0_f32, c.border));
                 let (s0, s1) = (sel.start(), sel.end());
                 let preedit_cols = self.large_preedit.chars().count();
-                // 組字中的文字從游標的位置開始，游標畫在它的後面
-                let caret_col = sel.head.col + if compose_at == Some(sel.head) { preedit_cols } else { 0 };
+                // 組字中的文字從游標的位置開始，游標畫在輸入法報的位置（沒有報時在組字文字的後面）
+                let caret_col = sel.head.col + if compose_at == Some(sel.head) { self.large_ime_at.min(preedit_cols) } else { 0 };
                 let mut caret_rect = None;
                 for (line, y, galley, start, x0) in &vis {
                     let (line, y, start) = (*line, *y, *start);
@@ -8477,6 +8522,40 @@ mod tests {
         assert_eq!(app.project_root, dir.path(), "a pinned folder is not changed by opening files");
         assert_eq!(app.recent_files.len(), 2);
         assert!(app.recent_files[0].ends_with("b.txt"));
+    }
+
+    #[test]
+    fn editor_ime_caret_and_candidate_window_follow_the_composition_cursor() {
+        // 中文輸入法選字時（用方向鍵移回組字文字中間），游標與候選字視窗要跟著輸入法報的位置，不是一直停在組字文字的最後
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "ab");
+        frame(&mut app, &ctx, vec![key(Key::End, Modifiers::NONE)]);
+        assert!(
+            !ctx.global_style().visuals.ime_composition.legacy_visuals,
+            "egui's legacy IME visuals (the Windows default) always draw the caret at the end of the composition"
+        );
+        let ime_x = |o: &egui::FullOutput| o.platform_output.ime.as_ref().expect("the IME is told where the cursor is").cursor_rect.left();
+        let start = ime_x(&frame(&mut app, &ctx, vec![]));
+        let font = FontId::monospace(app.config.font_size);
+        let width = |s: &str| ctx.fonts_mut(|f| f.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x);
+        let text = "中文可以";
+        let preedit = |r: Option<std::ops::Range<usize>>| Event::Ime(egui::ImeEvent::Preedit { text: text.into(), active_range_chars: r });
+        // 輸入法的游標在第 1 個字後面
+        let x = ime_x(&frame(&mut app, &ctx, vec![preedit(Some(1..1))]));
+        assert!((x - (start + width("中"))).abs() < 1.5, "cursor after the 1st character: {x} vs {}", start + width("中"));
+        // 選到第 3 個字（輸入法反白的子句）：候選字視窗對著那個字
+        let x = ime_x(&frame(&mut app, &ctx, vec![preedit(Some(2..3))]));
+        assert!((x - (start + width("中文"))).abs() < 1.5, "the selected clause starts after 2 characters: {x}");
+        // 之後沒有新的事件，位置不變
+        let x2 = ime_x(&frame(&mut app, &ctx, vec![]));
+        assert!((x2 - x).abs() < 0.5, "{x2} vs {x}");
+        // 輸入法沒有給位置：在組字文字的最後
+        let x = ime_x(&frame(&mut app, &ctx, vec![preedit(None)]));
+        assert!((x - (start + width(text))).abs() < 1.5, "no cursor info: at the end, {x}");
+        // 選定後照常插入，游標在插入的字後面
+        let x = ime_x(&frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Commit(text.into()))]));
+        assert_eq!(app.tabs[0].lines[0], "ab中文可以");
+        assert!((x - (start + width(text))).abs() < 1.5, "after the commit: {x}");
     }
 
     #[test]
@@ -9847,8 +9926,9 @@ mod tests {
         assert!(!app.tabs[0].modified);
         // egui 0.33 起字形的位置是累加字寬後取整到像素，所以游標移動的距離與組字文字的寬度最多差一個像素；
         // 精確的值是 egui 排出來那一行裡，組字文字後面那個字與原本游標那個字的位置差
+        let font_size = app.config.font_size;
         let x_at = |s: &str, col: usize| {
-            ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), FontId::monospace(app.config.font_size), Color32::WHITE))
+            ctx.fonts_mut(|f| f.layout_no_wrap(s.into(), FontId::monospace(font_size), Color32::WHITE))
                 .pos_from_cursor(CCursor::new(col))
                 .left()
         };
@@ -9859,6 +9939,13 @@ mod tests {
         // 之後沒有事件的幀也維持這個畫面
         let out = frame(&mut app, &ctx, vec![]);
         assert!(has(&out, "linezhong 00000 some text here"));
+        // 輸入法報了組字中的游標位置（中文輸入法用方向鍵移回去選字）：游標與候選字視窗跟著它，不是固定在最後
+        let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: "zhong".into(), active_range_chars: Some(2..2) })]);
+        let expect = x_at("linezhong 00000 some text here", 6) - x_at("line 00000 some text here", 4);
+        let moved = caret_x(&out) - caret0;
+        assert!((moved - expect).abs() < 0.01, "caret moved {moved}, the IME cursor after 'zh' is {expect} further");
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!((caret_x(&out) - caret0 - expect).abs() < 0.01, "it stays there without new events");
 
         // 取消組字：畫面回到原樣
         let out = frame(&mut app, &ctx, vec![Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None })]);

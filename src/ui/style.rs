@@ -169,6 +169,10 @@ pub fn apply_style(ctx: &egui::Context, c: &Colors) {
     v.selection.bg_fill = c.sel_bg;
     v.selection.stroke = Stroke::new(1.0_f32, c.fg);
     v.text_cursor.stroke = Stroke::new(2.0_f32, c.accent);
+    // 輸入法組字：egui 在 Windows 預設用「舊的畫法」（為了繞過 winit 對韓文輸入法報錯游標位置的問題），
+    // 組字文字畫成選取、游標固定在最後——中文輸入法用方向鍵移回去選字時游標不會跟過去。
+    // 改用新的畫法：組字文字畫底線，游標照輸入法報的位置
+    v.ime_composition.legacy_visuals = false;
     v.window_shadow = egui::epaint::Shadow {
         offset: [0, 6],
         blur: 18,
