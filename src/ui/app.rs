@@ -2218,6 +2218,23 @@ impl AlexCodeApp {
         v
     }
 
+    /// 在指定的分頁（獨立視窗的分頁，依 id）上執行指令：暫時把它當成目前分頁，執行完換回主視窗原本的分頁。
+    /// 指令自己換到別的分頁（新增 / 開啟檔案）就照它的；`tab` 是 None 時同 `run_cmd`
+    pub fn run_cmd_on(&mut self, cmd: Cmd, tab: Option<u64>) {
+        let Some(tab) = tab else { return self.run_cmd(cmd) };
+        let Some(idx) = self.tabs.iter().position(|b| b.id == tab) else { return };
+        let prev = self.tabs.get(self.active_tab_idx).map(|b| b.id);
+        self.active_tab_idx = idx;
+        self.run_cmd(cmd);
+        let cur = self.tabs.get(self.active_tab_idx).map(|b| b.id);
+        let closed = !self.tabs.iter().any(|b| b.id == tab);
+        if cur == Some(tab) || closed {
+            if let Some(i) = prev.and_then(|p| self.tabs.iter().position(|b| b.id == p)) {
+                self.active_tab_idx = i;
+            }
+        }
+    }
+
     pub fn run_cmd(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::NewFile => self.new_tab(),
@@ -3154,7 +3171,16 @@ impl AlexCodeApp {
     }
 
     fn menu_bar(&mut self, root: &mut egui::Ui, c: &Colors) {
-        egui::Panel::top("menu_bar")
+        self.menu_bar_for(root, c, None);
+    }
+
+    /// 選單列。`tab` 是獨立視窗的分頁 id：那個視窗的選單指令作用在它的分頁上（見 `run_cmd_on`）
+    fn menu_bar_for(&mut self, root: &mut egui::Ui, c: &Colors, tab: Option<u64>) {
+        let panel = match tab {
+            Some(id) => egui::Panel::top(egui::Id::unique(("menu_bar_detached", id))),
+            None => egui::Panel::top("menu_bar"),
+        };
+        panel
             .frame(Self::bar_frame(c))
             .show_separator_line(false)
             .show(root, |ui| {
@@ -3354,7 +3380,7 @@ impl AlexCodeApp {
                     });
 
                     if let Some(cmd) = cmd {
-                        self.run_cmd(cmd);
+                        self.run_cmd_on(cmd, tab);
                     }
                 });
             });
@@ -3484,6 +3510,10 @@ impl AlexCodeApp {
                         // 分割檢視另一欄顯示的分頁：細一點的強調色底線（有焦點的分頁照舊是粗線）
                         let other_id = self.split.as_ref().map(|s| s.other);
                         for i in 0..self.tabs.len() {
+                            // 拖出去開成獨立視窗的分頁不在主視窗的分頁列（關掉那個視窗後回來）
+                            if self.detached.contains(&self.tabs[i].id) {
+                                continue;
+                            }
                             let is_active = i == self.active_tab_idx;
                             let is_other = !is_active && Some(self.tabs[i].id) == other_id;
                             let mut title = Self::tab_title(&self.tabs[i]);
@@ -5023,6 +5053,17 @@ impl AlexCodeApp {
         let alive: Vec<u64> = self.tabs.iter().map(|b| b.id).collect();
         self.detached.retain(|id| alive.contains(id));
         self.detached_git.retain(|id, _| alive.contains(id));
+        // 主視窗不顯示拖出去的分頁：目前分頁被拖出去了（或開檔時切到它），把它的視窗帶到前面，
+        // 主視窗改顯示最近的另一個分頁；全部都拖出去了就開一個新的空白分頁
+        if let Some(cur) = self.tabs.get(self.active_tab_idx).map(|b| b.id).filter(|id| self.detached.contains(id)) {
+            ctx.send_viewport_cmd_to(egui::ViewportId::from_hash_of(("alexcode-detached", cur)), egui::ViewportCommand::Focus);
+            let at = self.active_tab_idx;
+            let next = (0..self.tabs.len()).filter(|&i| !self.detached.contains(&self.tabs[i].id)).min_by_key(|&i| i.abs_diff(at));
+            match next {
+                Some(i) => self.active_tab_idx = i,
+                None => self.new_tab(),
+            }
+        }
         let mut closed = Vec::new();
         for id in self.detached.clone() {
             let Some(idx) = self.tabs.iter().position(|b| b.id == id) else { continue };
@@ -5065,15 +5106,23 @@ impl AlexCodeApp {
                         win = win.default_pos(r.min);
                     }
                     let shown = win.show(ctx, |ui| {
-                        this.detached_body(ui, idx, c, pal, git);
+                        // 和主視窗一樣的選單；指令作用在這個視窗的分頁（指令可能關掉它，關掉了就不畫內容）
+                        this.menu_bar_for(ui, c, Some(id));
+                        if this.tabs.get(idx).is_some_and(|b| b.id == id) {
+                            // 內容放在自己的區塊裡：內容接點擊的範圍是它所在區塊的大小，不包在裡面會蓋住上面的選單
+                            ui.scope(|ui| this.detached_body(ui, idx, c, pal, git));
+                        }
                     });
                     // 內嵌的浮動視窗：記整個視窗的左上角（大小固定用預設的）
                     (!open, shown.map(|s| Rect::from_min_size(s.response.rect.min, egui::vec2(600.0, 400.0))))
                 }
             } else {
                 ctx.show_viewport_immediate(vid, builder, |ui, _class| {
+                    this.menu_bar_for(ui, c, Some(id));
                     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(c.panel)).show(ui, |ui| {
-                        this.detached_body(ui, idx, c, pal, git);
+                        if this.tabs.get(idx).is_some_and(|b| b.id == id) {
+                            this.detached_body(ui, idx, c, pal, git);
+                        }
                     });
                     // 作業系統視窗：外框左上角 + 內容大小（與 with_position / with_inner_size 對應）
                     let (outer, inner) = ui.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
@@ -5092,6 +5141,10 @@ impl AlexCodeApp {
             }
         }
         self.detached.retain(|id| !closed.contains(id));
+        // 關掉獨立視窗：分頁回到主視窗的分頁列，並切到它
+        if let Some(i) = closed.last().and_then(|id| self.tabs.iter().position(|b| b.id == *id)) {
+            self.active_tab_idx = i;
+        }
         let open = self.detached.clone();
         self.detached_rects.retain(|id, _| open.contains(id));
         self.detached_place.retain(|id, _| open.contains(id));
@@ -12190,20 +12243,10 @@ mod tests {
         frame(&mut app, &ctx, vec![Event::PointerMoved(p1)]);
         frame(&mut app, &ctx, vec![button(p1, false)]);
         assert_eq!(copied_text(&frame(&mut app, &ctx, vec![Event::Copy])), "hello", "dragging selects");
-        // 同一個分頁也在主視窗時，主視窗編輯區的游標跟著獨立視窗走
+        // 主視窗不會顯示拖出去的分頁（以前兩邊同時顯示時要讓主視窗的游標跟著走，現在不會發生）
         app.active_tab_idx = 0;
         frame(&mut app, &ctx, vec![]);
-        frame(&mut app, &ctx, vec![]);
-        let out = frame(&mut app, &ctx, vec![]);
-        let hello = painted_lines(&out).into_iter().rev().find(|l| l.0 == "hello").map(|l| l.1).unwrap();
-        click(&mut app, &ctx, Pos2::new(hello.right() + 30.0, hello.center().y));
-        frame(&mut app, &ctx, vec![Event::Text("!".into())]);
-        frame(&mut app, &ctx, vec![]);
-        assert_eq!(app.tabs[0].lines[0], "hello!");
-        let editor_id = egui::Id::unique(("alexcode-editor", 0usize, String::from("t.rs")));
-        let st = egui::text_edit::TextEditState::load(&ctx, editor_id).expect("main editor state");
-        let r = st.cursor.char_range().expect("main editor cursor");
-        assert_eq!(r.primary.index.0, 6, "the main editor's cursor follows the window");
+        assert_eq!(app.active_tab_idx, 1, "the main window switches back to a tab that is not detached");
     }
 
     #[test]
@@ -12239,6 +12282,63 @@ mod tests {
         let out = frame(&mut app, &ctx, vec![]);
         assert!(painted_lines(&out).iter().any(|l| l.0 == "t.rs — AlexCode"), "the window is shown");
         assert_eq!(app.tabs.len(), 2, "the tab stays in the main window too");
+    }
+
+    #[test]
+    fn a_detached_tab_leaves_the_main_tab_bar_and_its_window_has_the_menu() {
+        let ctx = ctx();
+        let mut app = app_with(&ctx, "alpha one\n");
+        let mut b = EditorBuffer::from_text("beta one\n");
+        b.file_path = Some("b.rs".into());
+        app.tabs.push(b);
+        app.active_tab_idx = 0;
+        frame(&mut app, &ctx, vec![]);
+        let names = |out: &egui::FullOutput| painted_lines(out).into_iter().map(|l| l.0).collect::<Vec<_>>();
+        let (t_id, b_id) = (app.tabs[0].id, app.tabs[1].id);
+
+        // 把正在看的分頁拖出去：主視窗的分頁列不再有它，主視窗改顯示另一個分頁
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        frame(&mut app, &ctx, vec![]);
+        let out = frame(&mut app, &ctx, vec![]);
+        let shown = names(&out);
+        assert!(shown.iter().any(|t| t == "t.rs — AlexCode"), "the window is shown");
+        assert!(!shown.iter().any(|t| t == "t.rs"), "the detached tab is gone from the main tab bar: {shown:?}");
+        assert!(shown.iter().any(|t| t == "b.rs"));
+        assert_eq!(app.tabs[app.active_tab_idx].id, b_id, "the main window shows the other tab");
+        assert_eq!(app.tabs.len(), 2, "the buffer is shared, not closed");
+
+        // 獨立視窗有和主視窗一樣的選單
+        let menus: Vec<Rect> = painted_lines(&out).into_iter().filter(|l| l.0 == "檔案 (File)").map(|l| l.1).collect();
+        assert_eq!(menus.len(), 2, "one menu bar in each window");
+        // 選單的指令作用在獨立視窗的分頁：切換書籤加在 t.rs、主視窗仍顯示 b.rs
+        app.run_cmd_on(Cmd::ToggleBookmark, Some(t_id));
+        assert!(!app.tabs[0].bookmarks.is_empty() && app.tabs[1].bookmarks.is_empty());
+        assert_eq!(app.tabs[app.active_tab_idx].id, b_id);
+        // 用滑鼠從獨立視窗的選單關閉分頁：關掉的是 t.rs
+        let file_menu = menus.iter().copied().max_by(|a, b| a.top().total_cmp(&b.top())).unwrap();
+        // 測試裡時間不會前進，彈出的選單淡入動畫永遠停在透明：關掉動畫
+        let mut st = (*ctx.global_style()).clone();
+        st.animation_time = 0.0;
+        ctx.set_global_style(st);
+        click(&mut app, &ctx, file_menu.center());
+        let out = frame(&mut app, &ctx, vec![]);
+        let close = painted_lines(&out).into_iter().find(|l| l.0 == "關閉分頁 (Close)").map(|l| l.1).expect("the File menu opened");
+        assert!(close.top() > file_menu.top(), "the menu opened under the window's menu bar");
+        click(&mut app, &ctx, close.center());
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs.iter().map(|t| t.id).collect::<Vec<_>>(), vec![b_id], "the detached tab was closed");
+        assert!(app.detached.is_empty());
+
+        // 主視窗的分頁全部拖出去：主視窗開一個新的空白分頁
+        app.run_tab_action(&ctx, TabAction::Detach(0));
+        frame(&mut app, &ctx, vec![]);
+        assert_eq!(app.tabs.len(), 2);
+        assert!(!app.detached.contains(&app.tabs[app.active_tab_idx].id), "the main window never shows a detached tab");
+
+        // 關掉獨立視窗：分頁回到主視窗
+        app.detached.clear();
+        let out = frame(&mut app, &ctx, vec![]);
+        assert!(names(&out).iter().any(|t| t == "b.rs"), "the tab is back in the main tab bar");
     }
 
     #[test]
